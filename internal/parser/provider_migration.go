@@ -83,6 +83,7 @@ var providerMigrationModes = map[AgentType]ProviderMigrationMode{
 	AgentCodebuff:       ProviderMigrationProviderAuthoritative,
 
 	AgentDeepSeekHarness: ProviderMigrationProviderAuthoritative,
+	AgentBob:            ProviderMigrationProviderAuthoritative,
 }
 
 // ProviderMigrationModes returns the current provider migration manifest.

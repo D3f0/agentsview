@@ -2996,3 +2996,22 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
 [evener-source-3]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/llm/types.go
 [evener-source-4]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/snapshot.go
 [evener-source-5]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/fork.go
+## Bob (`bob`)
+
+- **Format:** Project-hash-scoped JSON session files under `.bob/tmp/**/chats/`,
+  containing user and `bob-shell` messages, model/token metadata, internal
+  thoughts, and tool-call results.
+- **Evidence:** `no-public-source`.
+- **Upstream:** Bob's local persistence implementation and session artifacts
+  were searched 2026-08-03 under the user's `.bob` directory and inspected. No
+  public producer repository or authoritative transcript schema was identified;
+  this parser is therefore based on observed files and may require updates when
+  Bob changes its storage format.
+- **Usage and cost:** `bob-shell` messages persist input, output, cached, and
+  thoughts token counters plus a model label. Agentsview normalizes input and
+  cached input into its standard usage fields and catalog-prices the result;
+  Bob's persisted cost fields are not used.
+- **Agentsview:** `internal/parser/bob.go` and
+  `internal/parser/bob_test.go`; discovery is opt-in through `BOB_DIR` or the
+  `bob_dirs` configuration key because the default `.bob` tree also contains
+  application state and skills.
