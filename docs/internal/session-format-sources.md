@@ -2998,20 +2998,23 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
 [evener-source-5]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/fork.go
 ## Bob (`bob`)
 
-- **Format:** Project-hash-scoped JSON session files under `.bob/tmp/**/chats/`,
-  containing user and `bob-shell` messages, model/token metadata, internal
-  thoughts, and tool-call results.
+- **Format:** Bob uses two observed persistence families: project-hash-scoped JSON
+  session files under `.bob/tmp/**/chats/`, and a shared SQLite `bob.db` under
+  `.bob/db/`. The database stores task metadata in `tasks` and ordered message
+  payloads in `messages`; task sources are surfaced as virtual `bob.db#<task-id>`
+  paths.
 - **Evidence:** `no-public-source`.
-- **Upstream:** Bob's local persistence implementation and session artifacts
-  were searched 2026-08-03 under the user's `.bob` directory and inspected. No
-  public producer repository or authoritative transcript schema was identified;
-  this parser is therefore based on observed files and may require updates when
-  Bob changes its storage format.
-- **Usage and cost:** `bob-shell` messages persist input, output, cached, and
-  thoughts token counters plus a model label. Agentsview normalizes input and
-  cached input into its standard usage fields and catalog-prices the result;
-  Bob's persisted cost fields are not used.
-- **Agentsview:** `internal/parser/bob.go` and
-  `internal/parser/bob_test.go`; discovery is opt-in through `BOB_DIR` or the
-  `bob_dirs` configuration key because the default `.bob` tree also contains
+- **Upstream:** Bob's local persistence implementation and session artifacts were
+  searched 2026-08-03 under the user's `.bob` directory and inspected. No public
+  producer repository or authoritative transcript schema was identified; this
+  parser is therefore based on observed files and may require updates when Bob
+  changes its storage format.
+- **Usage and cost:** JSON `bob-shell` messages persist input, output, cached, and
+  thoughts token counters. SQLite assistant payloads persist model and spend
+  metadata, including input, output, and cache-read values. Agentsview normalizes
+  these into its standard usage fields and catalog-prices the result; Bob's
+  persisted cost fields are not used.
+- **Agentsview:** `internal/parser/bob.go`, `internal/parser/bob_test.go`, and
+  `internal/parser/bob_sqlite_test.go`; discovery is opt-in through `BOB_DIR` or
+  the `bob_dirs` configuration key because the default `.bob` tree also contains
   application state and skills.

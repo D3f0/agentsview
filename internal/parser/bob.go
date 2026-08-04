@@ -2,12 +2,18 @@ package parser
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
+
+const bobDBName = "bob.db"
 
 type bobSessionJSON struct {
 	SessionID   string           `json:"sessionId"`
@@ -18,19 +24,12 @@ type bobSessionJSON struct {
 }
 
 type bobMessageJSON struct {
-	ID        string            `json:"id"`
 	Type      string            `json:"type"`
 	Content   string            `json:"content"`
 	Timestamp string            `json:"timestamp"`
 	Model     string            `json:"model"`
-	Thoughts  []bobThoughtJSON  `json:"thoughts"`
 	Tokens    bobTokensJSON     `json:"tokens"`
 	ToolCalls []bobToolCallJSON `json:"toolCalls"`
-}
-
-type bobThoughtJSON struct {
-	Description string `json:"description"`
-	Timestamp   string `json:"timestamp"`
 }
 
 type bobTokensJSON struct {
@@ -46,7 +45,6 @@ type bobToolCallJSON struct {
 	Args          json.RawMessage `json:"args"`
 	Status        string          `json:"status"`
 	Timestamp     string          `json:"timestamp"`
-	Result        json.RawMessage `json:"result"`
 	ResultDisplay string          `json:"resultDisplay"`
 }
 
@@ -73,7 +71,6 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 	firstMessage := ""
 	startedAt := parseTimestamp(raw.StartTime)
 	endedAt := parseTimestamp(raw.LastUpdated)
-	userCount := 0
 	for _, entry := range raw.Messages {
 		ts := parseTimestamp(entry.Timestamp)
 		if !ts.IsZero() {
@@ -84,7 +81,6 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 				endedAt = ts
 			}
 		}
-
 		switch entry.Type {
 		case "user":
 			content := strings.TrimSpace(entry.Content)
@@ -95,14 +91,9 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 				firstMessage = truncate(strings.ReplaceAll(content, "\n", " "), 300)
 			}
 			messages = append(messages, ParsedMessage{
-				Ordinal:       len(messages),
-				Role:          RoleUser,
-				Content:       content,
-				Timestamp:     ts,
-				ContentLength: len(content),
+				Ordinal: len(messages), Role: RoleUser, Content: content,
+				Timestamp: ts, ContentLength: len(content),
 			})
-			userCount++
-
 		case "bob-shell":
 			content, thinking := bobVisibleContent(entry.Content)
 			toolCalls := bobToolCalls(entry.ToolCalls)
@@ -113,20 +104,14 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 			if model == "" {
 				model = "premium"
 			}
-			pm := ParsedMessage{
-				Ordinal:       len(messages),
-				Role:          RoleAssistant,
-				Content:       content,
-				ThinkingText:  thinking,
-				Timestamp:     ts,
-				Model:         model,
-				HasThinking:   thinking != "",
-				HasToolUse:    len(toolCalls) > 0,
-				ContentLength: len(content),
-				ToolCalls:     toolCalls,
+			message := ParsedMessage{
+				Ordinal: len(messages), Role: RoleAssistant, Content: content,
+				ThinkingText: thinking, Timestamp: ts, Model: model,
+				HasThinking: thinking != "", HasToolUse: len(toolCalls) > 0,
+				ContentLength: len(content), ToolCalls: toolCalls,
 			}
-			applyBobTokenUsage(&pm, entry.Tokens)
-			messages = append(messages, pm)
+			applyBobTokenUsage(&message, entry.Tokens)
+			messages = append(messages, message)
 		}
 	}
 	if len(messages) == 0 {
@@ -138,22 +123,19 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 	if project == "" {
 		project = "bob"
 	}
-	sessionID := "bob:" + stem
-	sess := &ParsedSession{
-		ID:               sessionID,
-		Project:          project,
-		Machine:          machine,
-		Agent:            AgentBob,
-		SourceSessionID:  raw.SessionID,
-		FirstMessage:     firstMessage,
-		StartedAt:        startedAt,
-		EndedAt:          endedAt,
-		MessageCount:     len(messages),
-		UserMessageCount: userCount,
-		File:             FileInfo{Path: path, Size: info.Size(), Mtime: info.ModTime().UnixNano()},
+	session := &ParsedSession{
+		ID: "bob:" + stem, Project: project, Machine: machine, Agent: AgentBob,
+		SourceSessionID: raw.SessionID, FirstMessage: firstMessage,
+		StartedAt: startedAt, EndedAt: endedAt, MessageCount: len(messages),
+		File: FileInfo{Path: path, Size: info.Size(), Mtime: info.ModTime().UnixNano()},
 	}
-	accumulateMessageTokenUsage(sess, messages)
-	return sess, messages, nil
+	for _, message := range messages {
+		if message.Role == RoleUser {
+			session.UserMessageCount++
+		}
+	}
+	accumulateMessageTokenUsage(session, messages)
+	return session, messages, nil
 }
 
 func bobVisibleContent(content string) (string, string) {
@@ -175,7 +157,8 @@ func bobVisibleContent(content string) (string, string) {
 		if text := strings.TrimSpace(rest[:end]); text != "" {
 			thinking = append(thinking, text)
 		}
-		content = rest[end+len("</thinking>"):]
+		content = rest[end+len("</thinking"):]
+		content = strings.TrimPrefix(content, ">")
 	}
 	think := strings.Join(thinking, "\n\n")
 	text := strings.TrimSpace(visible.String())
@@ -191,9 +174,6 @@ func bobVisibleContent(content string) (string, string) {
 }
 
 func bobToolCalls(raw []bobToolCallJSON) []ParsedToolCall {
-	if len(raw) == 0 {
-		return nil
-	}
 	calls := make([]ParsedToolCall, 0, len(raw))
 	for _, call := range raw {
 		if call.Name == "" {
@@ -204,18 +184,13 @@ func bobToolCalls(raw []bobToolCallJSON) []ParsedToolCall {
 			input = string(call.Args)
 		}
 		parsed := ParsedToolCall{
-			ToolUseID: call.ID,
-			ToolName:  call.Name,
-			Category:  NormalizeToolCategory(call.Name),
-			InputJSON: input,
+			ToolUseID: call.ID, ToolName: call.Name,
+			Category: NormalizeToolCategory(call.Name), InputJSON: input,
 		}
 		if display := strings.TrimSpace(call.ResultDisplay); display != "" {
 			parsed.ResultEvents = []ParsedToolResultEvent{{
-				ToolUseID: call.ID,
-				Source:    "bob",
-				Status:    call.Status,
-				Content:   display,
-				Timestamp: parseTimestamp(call.Timestamp),
+				ToolUseID: call.ID, Source: "bob", Status: call.Status,
+				Content: display, Timestamp: parseTimestamp(call.Timestamp),
 			}}
 		}
 		calls = append(calls, parsed)
@@ -223,26 +198,23 @@ func bobToolCalls(raw []bobToolCallJSON) []ParsedToolCall {
 	return calls
 }
 
-func applyBobTokenUsage(pm *ParsedMessage, tokens bobTokensJSON) {
+func applyBobTokenUsage(message *ParsedMessage, tokens bobTokensJSON) {
 	if tokens.Input == 0 && tokens.Output == 0 && tokens.Cached == 0 && tokens.Thoughts == 0 {
 		return
 	}
-	normalized := map[string]int{
-		"input_tokens":            tokens.Input,
-		"output_tokens":           tokens.Output,
-		"cache_read_input_tokens": tokens.Cached,
-		"reasoning_tokens":        tokens.Thoughts,
-	}
-	raw, err := json.Marshal(normalized)
+	raw, err := json.Marshal(map[string]int{
+		"input_tokens": tokens.Input, "output_tokens": tokens.Output,
+		"cache_read_input_tokens": tokens.Cached, "reasoning_tokens": tokens.Thoughts,
+	})
 	if err != nil {
 		return
 	}
-	pm.TokenUsage = raw
-	pm.ContextTokens = tokens.Input + tokens.Cached
-	pm.OutputTokens = tokens.Output
-	pm.HasContextTokens = tokens.Input != 0 || tokens.Cached != 0
-	pm.HasOutputTokens = tokens.Output != 0
-	pm.tokenPresenceKnown = true
+	message.TokenUsage = raw
+	message.ContextTokens = tokens.Input + tokens.Cached
+	message.OutputTokens = tokens.Output
+	message.HasContextTokens = tokens.Input != 0 || tokens.Cached != 0
+	message.HasOutputTokens = tokens.Output != 0
+	message.tokenPresenceKnown = true
 }
 
 func bobSessionIDFromPath(_ string, path string) string {
@@ -256,8 +228,359 @@ func isBobSourcePath(root, path string) bool {
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	return len(parts) >= 3 && parts[0] == "tmp" && parts[len(parts)-2] == "chats" &&
-		strings.HasPrefix(parts[len(parts)-1], "session-") &&
-		strings.HasSuffix(parts[len(parts)-1], ".json")
+		strings.HasPrefix(parts[len(parts)-1], "session-") && strings.HasSuffix(parts[len(parts)-1], ".json")
+}
+
+// bobDBSourceSet exposes one virtual source per task in Bob's shared database.
+type bobDBSourceSet struct{ multiSessionContainerSourceSet }
+
+func newBobDBSourceSet(roots []string) bobDBSourceSet {
+	return bobDBSourceSet{multiSessionContainerSourceSet: NewMultiSessionContainerSourceSet(
+		AgentBob, roots,
+		WithSourceDiscovery(bobDBDiscoverSources),
+		WithWatchRoots(bobDBWatchRoots),
+		WithChangedPathClassifier(bobDBClassifyPath),
+		WithMemberLookup(bobDBFindMember),
+		WithFingerprint(bobDBFingerprint),
+		WithContainerParse(bobDBParseContainer),
+		WithMemberParse(bobDBParseMember),
+		WithMemberPresence(bobDBMemberPresent),
+	)}
+}
+
+func bobDBPath(root string) string {
+	path := filepath.Join(root, "db", bobDBName)
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return path
+}
+
+func bobDBVirtualPath(dbPath, taskID string) string { return VirtualSourcePath(dbPath, taskID) }
+func bobDBParseVirtualPath(path string) (string, string, bool) {
+	return ParseVirtualSourcePathForBase(path, bobDBName)
+}
+
+func bobDBDiscoverSources(root string) []multiSessionMatch {
+	dbPath := bobDBPath(root)
+	if dbPath == "" {
+		return nil
+	}
+	conn, err := openBobDB(dbPath)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	rows, err := conn.Query(`SELECT id, project_id, created_at, updated_at FROM tasks ORDER BY created_at, id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []multiSessionMatch
+	for rows.Next() {
+		var id, project string
+		var created, updated int64
+		if err := rows.Scan(&id, &project, &created, &updated); err != nil || id == "" {
+			continue
+		}
+		out = append(out, multiSessionMatch{
+			Path: bobDBVirtualPath(dbPath, id), Container: dbPath, MemberID: id,
+			ProjectHint: project, DiscoveryMTimeNS: max(created, updated) * int64(time.Millisecond),
+		})
+	}
+	return out
+}
+
+func bobDBWatchRoots(roots []string) []WatchRoot {
+	out := make([]WatchRoot, 0, len(roots))
+	for _, root := range roots {
+		out = append(out, WatchRoot{
+			Path: root, Recursive: false,
+			IncludeGlobs: []string{"db/" + bobDBName, "db/" + bobDBName + "-*"},
+			DebounceKey:  string(AgentBob) + ":db:" + root,
+		})
+	}
+	return out
+}
+
+func bobDBClassifyPath(root, path string, allowMissing bool) (multiSessionMatch, bool) {
+	return classifySQLiteContainerPath(root, path, filepath.Join("db", bobDBName), allowMissing, false, bobDBParseVirtualPath)
+}
+
+func bobDBFindMember(root, taskID string) (multiSessionMatch, bool) {
+	dbPath := bobDBPath(root)
+	if dbPath == "" || taskID == "" {
+		return multiSessionMatch{}, false
+	}
+	conn, err := openBobDB(dbPath)
+	if err != nil {
+		return multiSessionMatch{}, false
+	}
+	defer conn.Close()
+	var found string
+	if err := conn.QueryRow(`SELECT id FROM tasks WHERE id = ?`, taskID).Scan(&found); err != nil {
+		return multiSessionMatch{}, false
+	}
+	return multiSessionMatch{Path: bobDBVirtualPath(dbPath, found), Container: dbPath, MemberID: found}, true
+}
+
+func bobDBFingerprint(src multiSessionSource) (SourceFingerprint, error) {
+	info, err := os.Stat(src.Container)
+	if err != nil {
+		return SourceFingerprint{}, err
+	}
+	mtime, err := sqliteDBCompositeMtime(src.Container, sqliteDBJournalSuffixes)
+	if err != nil {
+		mtime = info.ModTime().UnixNano()
+	}
+	return SourceFingerprint{Size: info.Size(), MTimeNS: mtime, Hash: fmt.Sprintf("%d:%d", info.Size(), mtime)}, nil
+}
+
+func openBobDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", "file:"+sqliteURIPath(path)+"?mode=ro&_busy_timeout=3000")
+	if err != nil {
+		return nil, fmt.Errorf("open Bob database %s: %w", path, err)
+	}
+	return db, nil
+}
+
+type bobDBTask struct {
+	ID, Project, Directory, Title string
+	CreatedAt, UpdatedAt          int64
+}
+
+func bobDBTasks(path string) ([]bobDBTask, error) {
+	conn, err := openBobDB(path)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	rows, err := conn.Query(`SELECT id, project_id, directory, title, created_at, updated_at FROM tasks ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list Bob tasks: %w", err)
+	}
+	defer rows.Close()
+	var tasks []bobDBTask
+	for rows.Next() {
+		var task bobDBTask
+		if err := rows.Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.CreatedAt, &task.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan Bob task: %w", err)
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func bobDBParseContainer(src multiSessionSource, req ParseRequest) ([]ParseResult, error) {
+	tasks, err := bobDBTasks(src.Container)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]ParseResult, 0, len(tasks))
+	for _, task := range tasks {
+		result, err := bobDBParseTask(src.Container, task, req.Machine)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil {
+			results = append(results, *result)
+		}
+	}
+	return results, nil
+}
+
+func bobDBParseMember(src multiSessionSource, req ParseRequest) (*ParseResult, error) {
+	conn, err := openBobDB(src.Container)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	var task bobDBTask
+	err = conn.QueryRow(`SELECT id, project_id, directory, title, created_at, updated_at FROM tasks WHERE id = ?`, src.MemberID).
+		Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.CreatedAt, &task.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return bobDBParseTaskWithDB(conn, src.Container, task, req.Machine)
+}
+
+func bobDBMemberPresent(src multiSessionSource) bool {
+	_, ok := bobDBFindMember(src.Root, src.MemberID)
+	return ok
+}
+
+func bobDBParseTask(path string, task bobDBTask, machine string) (*ParseResult, error) {
+	conn, err := openBobDB(path)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return bobDBParseTaskWithDB(conn, path, task, machine)
+}
+
+func bobDBParseTaskWithDB(conn *sql.DB, path string, task bobDBTask, machine string) (*ParseResult, error) {
+	rows, err := conn.Query(`SELECT role, data, created_at FROM messages WHERE task_id = ? ORDER BY created_at, id`, task.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list Bob messages: %w", err)
+	}
+	defer rows.Close()
+	var messages []ParsedMessage
+	first := ""
+	for rows.Next() {
+		var role, raw string
+		var createdAt int64
+		if err := rows.Scan(&role, &raw, &createdAt); err != nil {
+			return nil, err
+		}
+		message, ok, err := parseBobDBMessage(role, raw, createdAt, len(messages))
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if first == "" && message.Role == RoleUser && message.Content != "" {
+			first = truncate(strings.ReplaceAll(message.Content, "\n", " "), 300)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(messages) == 0 {
+		return nil, nil
+	}
+	project := task.Directory
+	if project == "" {
+		project = task.Project
+	}
+	session := ParsedSession{
+		ID: "bob:" + task.ID, Project: project, Machine: machine, Agent: AgentBob,
+		SourceSessionID: task.ID, FirstMessage: first, SessionName: task.Title,
+		StartedAt: time.UnixMilli(task.CreatedAt).UTC(), EndedAt: time.UnixMilli(task.UpdatedAt).UTC(),
+		MessageCount: len(messages), File: FileInfo{Path: bobDBVirtualPath(path, task.ID)},
+	}
+	for _, message := range messages {
+		if message.Role == RoleUser {
+			session.UserMessageCount++
+		}
+	}
+	if info, err := os.Stat(path); err == nil {
+		session.File.Size, session.File.Mtime = info.Size(), info.ModTime().UnixNano()
+	}
+	accumulateMessageTokenUsage(&session, messages)
+	return &ParseResult{Session: session, Messages: messages}, nil
+}
+
+type bobDBMessagePayload struct {
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	Model     string           `json:"model"`
+	ToolCalls []bobDBToolCall  `json:"toolCalls"`
+	Meta      bobDBMessageMeta `json:"_meta"`
+}
+type bobDBMessageMeta struct {
+	Timestamp int64      `json:"timestamp"`
+	Spend     bobDBSpend `json:"spend"`
+}
+type bobDBSpend struct {
+	Input      int `json:"input"`
+	Output     int `json:"output"`
+	CacheRead  int `json:"cacheRead"`
+	CacheWrite int `json:"cacheWrite"`
+	Reasoning  int `json:"reasoningTokens"`
+}
+type bobDBToolCall struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+	Args      json.RawMessage `json:"args"`
+}
+
+func parseBobDBMessage(role, raw string, createdAt int64, ordinal int) (ParsedMessage, bool, error) {
+	var payload bobDBMessagePayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ParsedMessage{}, false, fmt.Errorf("decode Bob message: %w", err)
+	}
+	if payload.Role != "" {
+		role = payload.Role
+	}
+	if role == "system" {
+		return ParsedMessage{}, false, nil
+	}
+	content := strings.TrimSpace(payload.Content)
+	if role == "user" {
+		if start := strings.Index(content, "<user_query>"); start >= 0 {
+			content = content[start+len("<user_query>"):]
+			if end := strings.Index(content, "</user_query>"); end >= 0 {
+				content = strings.TrimSpace(content[:end])
+			}
+		}
+	}
+	parsedRole := RoleType(role)
+	if parsedRole != RoleUser && parsedRole != RoleAssistant && parsedRole != RoleTool {
+		return ParsedMessage{}, false, nil
+	}
+	message := ParsedMessage{
+		Ordinal: ordinal, Role: parsedRole, Content: content,
+		Timestamp: time.UnixMilli(createdAt).UTC(), Model: payload.Model,
+		ContentLength: len(content),
+	}
+	if payload.Meta.Timestamp != 0 {
+		message.Timestamp = time.UnixMilli(payload.Meta.Timestamp).UTC()
+	}
+	if parsedRole == RoleAssistant {
+		message.ToolCalls = bobDBToolCalls(payload.ToolCalls)
+		message.HasToolUse = len(message.ToolCalls) > 0
+		applyBobDBSpend(&message, payload.Meta.Spend)
+	}
+	if content == "" && len(message.ToolCalls) == 0 {
+		return ParsedMessage{}, false, nil
+	}
+	return message, true, nil
+}
+
+func bobDBToolCalls(raw []bobDBToolCall) []ParsedToolCall {
+	calls := make([]ParsedToolCall, 0, len(raw))
+	for _, call := range raw {
+		if call.Name == "" {
+			continue
+		}
+		input := call.Arguments
+		if len(input) == 0 {
+			input = call.Args
+		}
+		calls = append(calls, ParsedToolCall{
+			ToolUseID: call.ID, ToolName: call.Name,
+			Category: NormalizeToolCategory(call.Name), InputJSON: string(input),
+		})
+	}
+	return calls
+}
+
+func applyBobDBSpend(message *ParsedMessage, spend bobDBSpend) {
+	if spend.Input == 0 && spend.Output == 0 && spend.CacheRead == 0 && spend.CacheWrite == 0 && spend.Reasoning == 0 {
+		return
+	}
+	raw, err := json.Marshal(map[string]int{
+		"input_tokens": spend.Input, "output_tokens": spend.Output,
+		"cache_read_input_tokens":     spend.CacheRead,
+		"cache_creation_input_tokens": spend.CacheWrite,
+		"reasoning_tokens":            spend.Reasoning,
+	})
+	if err != nil {
+		return
+	}
+	message.TokenUsage = raw
+	message.ContextTokens = spend.Input + spend.CacheRead + spend.CacheWrite
+	message.OutputTokens = spend.Output
+	message.HasContextTokens = true
+	message.HasOutputTokens = true
+	message.tokenPresenceKnown = true
 }
 
 type bobProviderFactory struct{ def AgentDef }
@@ -265,51 +588,88 @@ type bobProviderFactory struct{ def AgentDef }
 func newBobProviderFactory(def AgentDef) ProviderFactory {
 	return bobProviderFactory{def: cloneAgentDef(def)}
 }
-
 func (f bobProviderFactory) Definition() AgentDef       { return cloneAgentDef(f.def) }
 func (f bobProviderFactory) Capabilities() Capabilities { return bobProviderCapabilities() }
 func (f bobProviderFactory) NewProvider(cfg ProviderConfig) Provider {
 	cfg = cfg.Clone()
 	return &bobProvider{
 		ProviderBase: ProviderBase{Def: cloneAgentDef(f.def), Caps: bobProviderCapabilities(), Config: cfg},
-		sources:      newBobSourceSet(cfg.Roots),
+		jsonSources:  newBobSourceSet(cfg.Roots), dbSources: newBobDBSourceSet(cfg.Roots),
 	}
 }
 
 type bobProvider struct {
 	ProviderBase
-	sources JSONLSourceSet
+	jsonSources JSONLSourceSet
+	dbSources   bobDBSourceSet
 }
 
 func (p *bobProvider) Discover(ctx context.Context) ([]SourceRef, error) {
-	return p.sources.Discover(ctx)
+	jsonSources, err := p.jsonSources.Discover(ctx)
+	if err != nil {
+		return nil, err
+	}
+	dbSources, err := p.dbSources.Discover(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(jsonSources, dbSources...), nil
 }
 func (p *bobProvider) DiscoverEach(ctx context.Context, yield func(SourceRef) error) error {
-	return p.sources.DiscoverEach(ctx, yield)
+	if err := p.jsonSources.DiscoverEach(ctx, yield); err != nil {
+		return err
+	}
+	return p.dbSources.DiscoverEach(ctx, yield)
+}
+func (p *bobProvider) SourceForReconciliation(
+	ctx context.Context, path, project string,
+) (SourceRef, bool, error) {
+	if source, ok, err := p.dbSources.SourceForReconciliation(ctx, path, project); err != nil || ok {
+		return source, ok, err
+	}
+	return p.jsonSources.SourceForReconciliation(ctx, path, project)
 }
 func (p *bobProvider) WatchPlan(ctx context.Context) (WatchPlan, error) {
-	return p.sources.WatchPlan(ctx)
+	jsonPlan, err := p.jsonSources.WatchPlan(ctx)
+	if err != nil {
+		return WatchPlan{}, err
+	}
+	dbPlan, err := p.dbSources.WatchPlan(ctx)
+	if err != nil {
+		return WatchPlan{}, err
+	}
+	return WatchPlan{Roots: append(jsonPlan.Roots, dbPlan.Roots...)}, nil
 }
 func (p *bobProvider) SourcesForChangedPath(ctx context.Context, req ChangedPathRequest) ([]SourceRef, error) {
-	return p.sources.SourcesForChangedPath(ctx, req)
+	if sources, err := p.dbSources.SourcesForChangedPath(ctx, req); err != nil || len(sources) > 0 {
+		return sources, err
+	}
+	return p.jsonSources.SourcesForChangedPath(ctx, req)
 }
 func (p *bobProvider) FindSource(ctx context.Context, req FindSourceRequest) (SourceRef, bool, error) {
-	return p.sources.FindSource(ctx, ProviderFindRequestWithRawSessionID(p.Def, req))
+	req = ProviderFindRequestWithRawSessionID(p.Def, req)
+	if source, ok, err := p.dbSources.FindSource(ctx, req); err != nil || ok {
+		return source, ok, err
+	}
+	return p.jsonSources.FindSource(ctx, req)
 }
 func (p *bobProvider) Fingerprint(ctx context.Context, source SourceRef) (SourceFingerprint, error) {
-	return p.sources.Fingerprint(ctx, source)
+	if _, ok := source.Opaque.(multiSessionSource); ok {
+		return p.dbSources.Fingerprint(ctx, source)
+	}
+	return p.jsonSources.Fingerprint(ctx, source)
 }
 func (p *bobProvider) Parse(ctx context.Context, req ParseRequest) (ParseOutcome, error) {
 	req.Machine = firstNonEmptyJSONLString(req.Machine, p.Config.Machine)
-	return p.sources.Parse(ctx, req)
+	if _, ok := req.Source.Opaque.(multiSessionSource); ok {
+		return p.dbSources.Parse(ctx, req)
+	}
+	return p.jsonSources.Parse(ctx, req)
 }
 
 func newBobSourceSet(roots []string) JSONLSourceSet {
 	return NewJSONLSourceSet(AgentBob, roots,
-		WithRecursive(),
-		WithExtensions(".json"),
-		WithContentHashing(),
-		WithFollowSymlinkFiles(),
+		WithRecursive(), WithExtensions(".json"), WithContentHashing(), WithFollowSymlinkFiles(),
 		WithDescendPath(func(root, path string) bool {
 			rel, err := filepath.Rel(root, path)
 			if err != nil {
@@ -318,17 +678,16 @@ func newBobSourceSet(roots []string) JSONLSourceSet {
 			rel = filepath.ToSlash(rel)
 			return rel == "." || rel == "tmp" || strings.HasPrefix(rel, "tmp/")
 		}),
-		WithIncludePath(isBobSourcePath),
-		WithSessionIDFromPath(bobSessionIDFromPath),
+		WithIncludePath(isBobSourcePath), WithSessionIDFromPath(bobSessionIDFromPath),
 		WithParseFile(func(_ context.Context, path string, req ParseRequest) ([]ParseResult, []string, error) {
-			sess, messages, err := parseBobSession(path, req.Machine)
-			if err != nil || sess == nil {
+			session, messages, err := parseBobSession(path, req.Machine)
+			if err != nil || session == nil {
 				return nil, nil, err
 			}
 			if req.Fingerprint.Hash != "" {
-				sess.File.Hash = req.Fingerprint.Hash
+				session.File.Hash = req.Fingerprint.Hash
 			}
-			return []ParseResult{{Session: *sess, Messages: messages}}, nil, nil
+			return []ParseResult{{Session: *session, Messages: messages}}, nil, nil
 		}),
 	)
 }
@@ -338,15 +697,15 @@ func bobProviderCapabilities() Capabilities {
 		Source: func() SourceCapabilities {
 			caps := jsonlFileProviderSourceCapabilities()
 			caps.StreamingDiscovery = CapabilitySupported
+			caps.MultiSessionSource = CapabilitySupported
+			caps.SharedContainerSource = CapabilitySupported
+			caps.ForceReplaceOnParse = CapabilitySupported
 			return caps
 		}(),
 		Content: ContentCapabilities{
-			FirstMessage:         CapabilitySupported,
-			Model:                CapabilitySupported,
-			Thinking:             CapabilitySupported,
-			ToolCalls:            CapabilitySupported,
-			ToolResultEvents:     CapabilitySupported,
-			PerMessageTokenUsage: CapabilitySupported,
+			FirstMessage: CapabilitySupported, SessionName: CapabilitySupported,
+			Model: CapabilitySupported, Thinking: CapabilitySupported,
+			ToolCalls: CapabilitySupported, PerMessageTokenUsage: CapabilitySupported,
 		},
 	}
 }
