@@ -3009,11 +3009,14 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
   producer repository or authoritative transcript schema was identified; this
   parser is therefore based on observed files and may require updates when Bob
   changes its storage format.
-- **Usage and cost:** JSON `bob-shell` messages persist input, output, cached, and
-  thoughts token counters. SQLite assistant payloads persist model and spend
-  metadata, including input, output, and cache-read values. Agentsview normalizes
-  these into its standard usage fields and catalog-prices the result; Bob's
-  persisted cost fields are not used.
+- **Usage and cost:** JSON `bob-shell` messages persist input, output, cached,
+  and thoughts token counters. SQLite assistant payloads persist model and
+  spend metadata, including input, output, and cache-read values. SQLite task
+  rows also persist aggregate `cost` values alongside token totals. Agentsview
+  normalizes token usage and emits the task-level cost as provider-reported
+  monetary usage; message-level costs are not summed because they can be
+  incomplete. The persisted `cost` denomination remains based on observed Bob
+  artifacts; it is not labeled as Bobcoins.
 - **Agentsview:** `internal/parser/bob.go`, `internal/parser/bob_test.go`, and
   `internal/parser/bob_sqlite_test.go`; discovery is opt-in through `BOB_DIR` or
   the `bob_dirs` configuration key because the default `.bob` tree also contains

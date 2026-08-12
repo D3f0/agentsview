@@ -40,7 +40,7 @@ func TestBobProviderDiscoversAndParsesSQLiteTasks(t *testing.T) {
 
 	result := outcome.Results[0].Result
 	assert.Equal(t, "bob:task-1", result.Session.ID)
-	assert.Equal(t, "workspace/project", result.Session.Project)
+	assert.Equal(t, "project", result.Session.Project)
 	assert.Equal(t, "How are the UI components built?", result.Session.FirstMessage)
 	assert.Equal(t, "UI architecture", result.Session.SessionName)
 	assert.Equal(t, 2, result.Session.MessageCount)
@@ -52,6 +52,11 @@ func TestBobProviderDiscoversAndParsesSQLiteTasks(t *testing.T) {
 	assert.Equal(t, 120, result.Messages[1].ContextTokens)
 	assert.Equal(t, 40, result.Messages[1].OutputTokens)
 	assert.Equal(t, fingerprint.Hash, result.Session.File.Hash)
+	require.Len(t, result.Session.UsageEvents, 1)
+	require.NotNil(t, result.Session.UsageEvents[0].Cost)
+	assert.Equal(t, int64(1_364_024), result.Session.UsageEvents[0].Cost.Microdollars)
+	assert.Equal(t, "exact", result.Session.UsageEvents[0].CostStatus)
+	assert.Equal(t, "bob-reported", result.Session.UsageEvents[0].CostSource)
 }
 
 func TestBobProviderClassifiesSQLiteSidecarChange(t *testing.T) {
@@ -81,7 +86,7 @@ func writeBobSQLiteFixture(path string) error {
 	if _, err := db.Exec(`
 		CREATE TABLE tasks (
 			id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,
-			created_at INTEGER, updated_at INTEGER
+			costs TEXT, created_at INTEGER, updated_at INTEGER
 		);
 		CREATE TABLE messages (
 			id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER
@@ -90,9 +95,10 @@ func writeBobSQLiteFixture(path string) error {
 		return err
 	}
 	if _, err := db.Exec(`INSERT INTO tasks
-		(id, project_id, directory, title, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		(id, project_id, directory, title, costs, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		"task-1", "workspace", "workspace/project", "UI architecture",
+		`{"input":100,"output":40,"cacheRead":20,"cost":1.364024}`,
 		1785767435000, 1785767513000); err != nil {
 		return err
 	}

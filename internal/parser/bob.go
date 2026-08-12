@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"go.kenn.io/agentsview/internal/money"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -346,8 +348,8 @@ func openBobDB(path string) (*sql.DB, error) {
 }
 
 type bobDBTask struct {
-	ID, Project, Directory, Title string
-	CreatedAt, UpdatedAt          int64
+	ID, Project, Directory, Title, Costs string
+	CreatedAt, UpdatedAt                 int64
 }
 
 func bobDBTasks(path string) ([]bobDBTask, error) {
@@ -356,7 +358,7 @@ func bobDBTasks(path string) ([]bobDBTask, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	rows, err := conn.Query(`SELECT id, project_id, directory, title, created_at, updated_at FROM tasks ORDER BY created_at, id`)
+	rows, err := conn.Query(`SELECT id, project_id, directory, title, COALESCE(costs, ''), created_at, updated_at FROM tasks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list Bob tasks: %w", err)
 	}
@@ -364,7 +366,7 @@ func bobDBTasks(path string) ([]bobDBTask, error) {
 	var tasks []bobDBTask
 	for rows.Next() {
 		var task bobDBTask
-		if err := rows.Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.CreatedAt, &task.UpdatedAt); err != nil {
+		if err := rows.Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.Costs, &task.CreatedAt, &task.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan Bob task: %w", err)
 		}
 		tasks = append(tasks, task)
@@ -397,8 +399,8 @@ func bobDBParseMember(src multiSessionSource, req ParseRequest) (*ParseResult, e
 	}
 	defer conn.Close()
 	var task bobDBTask
-	err = conn.QueryRow(`SELECT id, project_id, directory, title, created_at, updated_at FROM tasks WHERE id = ?`, src.MemberID).
-		Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.CreatedAt, &task.UpdatedAt)
+	err = conn.QueryRow(`SELECT id, project_id, directory, title, COALESCE(costs, ''), created_at, updated_at FROM tasks WHERE id = ?`, src.MemberID).
+		Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.Costs, &task.CreatedAt, &task.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -454,12 +456,12 @@ func bobDBParseTaskWithDB(conn *sql.DB, path string, task bobDBTask, machine str
 	if len(messages) == 0 {
 		return nil, nil
 	}
-	project := task.Directory
+	project := ExtractProjectFromCwd(task.Directory)
 	if project == "" {
 		project = task.Project
 	}
 	session := ParsedSession{
-		ID: "bob:" + task.ID, Project: project, Machine: machine, Agent: AgentBob,
+		ID: "bob:" + task.ID, Project: project, Cwd: task.Directory, Machine: machine, Agent: AgentBob,
 		SourceSessionID: task.ID, FirstMessage: first, SessionName: task.Title,
 		StartedAt: time.UnixMilli(task.CreatedAt).UTC(), EndedAt: time.UnixMilli(task.UpdatedAt).UTC(),
 		MessageCount: len(messages), File: FileInfo{Path: bobDBVirtualPath(path, task.ID)},
@@ -473,7 +475,38 @@ func bobDBParseTaskWithDB(conn *sql.DB, path string, task bobDBTask, machine str
 		session.File.Size, session.File.Mtime = info.Size(), info.ModTime().UnixNano()
 	}
 	accumulateMessageTokenUsage(&session, messages)
+	if event := bobDBTaskUsageEvent(task, session.ID, session.EndedAt, messages); event != nil {
+		session.UsageEvents = []ParsedUsageEvent{*event}
+	}
 	return &ParseResult{Session: session, Messages: messages}, nil
+}
+
+func bobDBTaskUsageEvent(task bobDBTask, sessionID string, occurredAt time.Time, messages []ParsedMessage) *ParsedUsageEvent {
+	var costs struct {
+		Cost json.RawMessage `json:"cost"`
+	}
+	if strings.TrimSpace(task.Costs) == "" || json.Unmarshal([]byte(task.Costs), &costs) != nil || len(costs.Cost) == 0 || string(costs.Cost) == "null" {
+		return nil
+	}
+	cost, err := money.ParseDollars(string(costs.Cost))
+	if err != nil {
+		return nil
+	}
+	model := ""
+	for _, message := range messages {
+		if message.Role == RoleAssistant && message.Model != "" {
+			model = message.Model
+			break
+		}
+	}
+	if model == "" {
+		model = "premium"
+	}
+	return &ParsedUsageEvent{
+		SessionID: sessionID, Source: "bob-task", Model: model,
+		Cost: &cost, CostStatus: "exact", CostSource: "bob-reported",
+		OccurredAt: occurredAt.Format(time.RFC3339Nano), DedupKey: "task:" + sessionID,
+	}
 }
 
 type bobDBMessagePayload struct {
