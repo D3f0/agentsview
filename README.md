@@ -742,6 +742,47 @@ Pre-commit and pre-push hooks via [prek](https://github.com/j178/prek): run
 `make lint-tools` and `make install-hooks` after cloning (requires `prek` and
 `uv`).
 
+### Internal Release Automation
+
+The versioned release archives can be wrapped as platform-specific Python wheels
+and attached to a GitHub Enterprise release. Authenticate `gh` to the target
+GitHub Enterprise host first, then run:
+
+```bash
+uv run tasks.py publish-wheels \
+  --tag v1.2.3 \
+  --repo "$GHE_REPOSITORY"
+```
+
+The task downloads the tag's native archives, requires all supported platform
+artifacts, builds the wheels, and uploads them to the same release. Verify a
+specific local platform wheel before publishing with:
+
+```bash
+uv run tasks.py smoke-wheel --wheel \
+  wheels/agentsview-1.2.3-py3-none-macosx_11_0_arm64.whl
+```
+
+To build a Linux wheel archive on an internal SSH builder, clone a Git ref on
+that host, retrieve its archive, and build the local wheel:
+
+```bash
+uv run tasks.py remote-build-wheel \
+  --host "$BUILDER" \
+  --repo "$GHE_CLONE_URL" \
+  --ref v1.2.3 \
+  --version 1.2.3
+```
+
+The builder needs Git, Go, Node.js, npm, and network access to the configured
+package sources. The resulting wheel runs without a local Go or Node.js
+installation:
+
+```bash
+uvx --from wheels/agentsview-1.2.3-py3-none-macosx_11_0_arm64.whl \
+  agentsview --version
+```
+
 ### Project Layout
 
 ```
