@@ -56,20 +56,41 @@ For local desktop-style MCP clients, use stdio:
 Restart or reload your MCP client after adding the server. Once connected, the
 client will see these tools:
 
-| Tool                   | Purpose                                                            |
-| ---------------------- | ------------------------------------------------------------------ |
-| `search_sessions`      | Full-text search across recorded sessions                          |
-| `list_sessions`        | List recent or filtered sessions                                   |
-| `get_session_overview` | Fetch metadata and a compact message preview                       |
-| `get_messages`         | Read paginated message bodies from one session                     |
-| `search_content`       | Substring, regex, semantic, or hybrid search over raw session text |
-| `get_usage_summary`    | Aggregate token and cost usage                                     |
+| Tool                   | Purpose                                                                  |
+| ---------------------- | ------------------------------------------------------------------------ |
+| `search_sessions`      | Full-text search across recorded sessions                                |
+| `list_sessions`        | List recent or filtered sessions                                         |
+| `get_session_overview` | Fetch metadata and a compact message preview                             |
+| `get_messages`         | Read paginated message bodies from one session                           |
+| `search_content`       | Substring, regex, semantic, or hybrid search over raw session text       |
+| `get_usage_summary`    | Aggregate token and cost usage                                           |
+| `query_recall`         | Search extracted Recall entries when the backend supports Recall queries |
 
 `search_sessions` accepts optional `date_from` and `date_to` bounds in
 `YYYY-MM-DD` format, just like `list_sessions` and `search_content`. Dates
 include sessions whose activity overlaps the requested days in UTC. Either bound
 can be omitted; omitting both preserves unrestricted date matching. Malformed
 dates and ranges where `date_from` is after `date_to` return an error.
+
+Set `session_id` to a raw UUID or full stored session ID when you need one
+session. The lookup returns one metadata row, includes active sessions, ignores
+the other search arguments, and returns an error when the ID is missing or its
+raw suffix matches more than one session. A raw UUID matches an exact stored ID,
+an agent ID ending in `:<uuid>`, or a host ID ending in `~<uuid>`; the delimiter
+is part of the match, so a fork entry separated by `-` is not selected. The row
+has an empty `snippet`, `match_ordinal` set to `0`, and no `next_cursor`. Call
+`get_messages` with that ordinal to read the first message. For a known full ID,
+`get_session_overview` remains the way to get a compact message preview.
+Remote bare UUID lookup requires an updated server; an exact full stored ID still
+uses the existing `Get` path.
+
+`search_sessions` and `search_content` exclude sessions active in the last ten
+minutes by default, including the current conversation. Set
+`include_active: true` when you need that recent work.
+
+`search_content` also excludes one-shot and automated sessions by default. Set
+`include_one_shot: true` or `include_automated: true` to include those classes.
+An empty result can therefore omit a matching one-shot or automated session.
 
 When a vector search index is configured, prefer `search_content` with
 `mode: "hybrid"` or `mode: "semantic"` for questions about prior work,

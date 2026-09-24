@@ -2,7 +2,7 @@ package parser
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"strings"
 
@@ -132,7 +132,11 @@ func toolResultContentLength(content gjson.Result) int {
 	if content.IsArray() {
 		total := 0
 		content.ForEach(func(_, block gjson.Result) bool {
-			total += len(block.Get("text").Str)
+			if t := block.Get("text").Str; t != "" {
+				total += len(t)
+			} else if r := block.Get("result").Str; r != "" {
+				total += len(r)
+			}
 			return true
 		})
 		return total
@@ -163,6 +167,8 @@ func decodeContent(content gjson.Result) string {
 		content.ForEach(func(_, block gjson.Result) bool {
 			if t := block.Get("text").Str; t != "" {
 				parts = append(parts, t)
+			} else if r := block.Get("result").Str; r != "" {
+				parts = append(parts, r)
 			}
 			return true
 		})
@@ -221,7 +227,7 @@ func formatToolUse(block gjson.Result) string {
 	case "Bash":
 		// Claude Code uses "command"; Amp uses "cmd"
 		if input.Get("command").Str == "" && input.Get("cmd").Str != "" {
-			return fmt.Sprintf("[Bash]\n$ %s", input.Get("cmd").Str)
+			return "[Bash]\n$ " + input.Get("cmd").Str
 		}
 		return formatBash(input)
 	// Amp tools
@@ -230,7 +236,7 @@ func formatToolUse(block gjson.Result) string {
 	case "create_file":
 		return fmt.Sprintf("[Write: %s]", input.Get("path").Str)
 	case "shell_command":
-		return fmt.Sprintf("[Bash]\n$ %s", input.Get("command").Str)
+		return "[Bash]\n$ " + input.Get("command").Str
 	case "glob":
 		return fmt.Sprintf("[Glob: %s]", input.Get("filePattern").Str)
 	case "look_at":
@@ -265,9 +271,9 @@ func formatToolUse(block gjson.Result) string {
 		if desc != "" {
 			return fmt.Sprintf("[Bash: %s]\n$ %s", desc, cmd)
 		}
-		return fmt.Sprintf("[Bash]\n$ %s", cmd)
+		return "[Bash]\n$ " + cmd
 	case "run_command":
-		return fmt.Sprintf("[Bash]\n$ %s", input.Get("command").Str)
+		return "[Bash]\n$ " + input.Get("command").Str
 	case "find":
 		pattern := input.Get("pattern").Str
 		if pattern == "" {
@@ -367,7 +373,7 @@ func formatBash(input gjson.Result) string {
 	if desc != "" {
 		return fmt.Sprintf("[Bash: %s]\n$ %s", desc, cmd)
 	}
-	return fmt.Sprintf("[Bash]\n$ %s", cmd)
+	return "[Bash]\n$ " + cmd
 }
 
 func formatPatch(input gjson.Result) string {
@@ -625,7 +631,7 @@ func reduceToolInputToPaths(inputJSON string) string {
 			kept[key] = value
 		}
 	}
-	reduced, err := json.Marshal(kept)
+	reduced, err := json.Marshal(kept, json.Deterministic(true))
 	if err != nil {
 		return "{}"
 	}

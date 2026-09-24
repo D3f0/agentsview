@@ -128,6 +128,20 @@ export function registerShortcuts(opts: ShortcutOptions): () => void {
       return;
     }
 
+    if (
+      meta &&
+      e.key.toLowerCase() === "g" &&
+      !e.shiftKey &&
+      !e.altKey &&
+      ui.activeModal === null &&
+      !isInputFocused() &&
+      !(router.route === "sessions" && inSessionSearch.isOpen)
+    ) {
+      e.preventDefault();
+      ui.activeModal = "goToSession";
+      return;
+    }
+
     // Zoom: Cmd+= / Cmd+- / Cmd+0 (desktop only)
     if (sync.isDesktop) {
       if (meta && (e.key === "=" || e.key === "+")) {
@@ -149,6 +163,9 @@ export function registerShortcuts(opts: ShortcutOptions): () => void {
 
     // Esc — always works
     if (e.key === "Escape") {
+      // The palette handles Escape after its nested popovers have had a
+      // chance to claim it at document level.
+      if (ui.activeModal === "commandPalette") return;
       handleEscape();
       return;
     }

@@ -6,6 +6,8 @@ import (
 	"os"
 	"time"
 
+	"go.kenn.io/agentsview/internal/apiclient"
+
 	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
@@ -13,6 +15,7 @@ import (
 	"go.kenn.io/agentsview/internal/pricing"
 	"go.kenn.io/agentsview/internal/pricingrefresh"
 	"go.kenn.io/agentsview/internal/service"
+	"go.kenn.io/agentsview/internal/servicehttp"
 	"go.kenn.io/agentsview/internal/sync"
 )
 
@@ -37,14 +40,17 @@ type archiveQueryBackend interface {
 	ActivityReport(context.Context, ActivityReportConfig) (activity.Report, error)
 	DailyUsage(context.Context, dailyUsageQuery) (db.DailyUsageResult, error)
 	SessionUsage(context.Context, sessionUsageQuery) (*sessionUsageOutput, int, error)
+	MachineLabels(context.Context) (service.MachineLabelCatalog, error)
 }
 
 // sessionUsageQuery selects the session and the attribution scope for
 // `session usage`. OwnOnly restores the pre-rollup behavior of reporting
-// just the named transcript's own rows.
+// just the named transcript's own rows. NoSync skips source refreshes while
+// preserving the selected attribution scope.
 type sessionUsageQuery struct {
 	SessionID string
 	OwnOnly   bool
+	NoSync    bool
 }
 
 type dailyUsageQuery struct {
@@ -83,7 +89,7 @@ func resolveArchiveQueryBackendWithConfig(
 				if policy.AutoStart && !policy.SkipInitialSync && !policy.NoSync && !tr.ReadOnly {
 					progress := newResyncProgressPrinter(os.Stderr, time.Now)
 					_, err := postDaemonPush[sync.SyncStats](ctx, tr, cfg.AuthToken,
-						"/api/v1/sync?wait=true&startup_only=true", daemonPushRequest{}, progress.Print)
+						startupSyncOperation, apiclient.DaemonPushRequest{}, progress.Print)
 					progress.Finish()
 					if err != nil {
 						return nil, nil, fmt.Errorf("waiting for startup sync: %w", err)
@@ -170,7 +176,7 @@ func openArchiveQueryDB(
 	readOnly bool,
 ) (*db.DB, *writeOwnerLock, error) {
 	if readOnly {
-		database, err := openReadOnlyDB(cfg)
+		database, err := openReadOnlyDB(ctx, cfg)
 		if err != nil {
 			return nil, nil, fmt.Errorf("opening database: %w", err)
 		}
@@ -215,6 +221,15 @@ func (b daemonArchiveQueryBackend) SessionUsage(
 	return httpSessionUsageData(ctx, b.tr.URL, b.authToken, query)
 }
 
+func (b daemonArchiveQueryBackend) MachineLabels(
+	ctx context.Context,
+) (service.MachineLabelCatalog, error) {
+	return service.MachineLabels(
+		ctx,
+		servicehttp.NewHTTPBackend(b.tr.URL, b.authToken, b.tr.ReadOnly, ""),
+	)
+}
+
 type localArchiveQueryBackend struct {
 	cfg           config.Config
 	database      *db.DB
@@ -249,6 +264,16 @@ func (b localArchiveQueryBackend) DailyUsage(
 	return b.database.GetDailyUsage(ctx, filter)
 }
 
+func (b localArchiveQueryBackend) MachineLabels(
+	ctx context.Context,
+) (service.MachineLabelCatalog, error) {
+	labels, err := b.database.GetMachineLabels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return service.MachineLabelCatalog(labels), nil
+}
+
 func localDailyUsageFilter(query dailyUsageQuery) db.UsageFilter {
 	filter := query.Filter
 	filter.Progress = query.Progress
@@ -277,8 +302,8 @@ func (b localArchiveQueryBackend) SessionUsage(
 		ctx, b.database, b.cfg.AgentDirs, query.SessionID,
 	)
 
-	if known && !b.skipFreshData {
-		engine := sync.NewEngine(b.database, sync.EngineConfig{
+	if known && !b.skipFreshData && !query.NoSync {
+		engine := sync.NewEngine(ctx, b.database, sync.EngineConfig{
 			AgentDirs:               b.cfg.AgentDirs,
 			SourceMachines:          b.cfg.SourceMachines,
 			ProviderMetadata:        b.cfg.ProviderMetadata,

@@ -3,6 +3,7 @@ package rawderive
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -20,6 +21,10 @@ import (
 type ParsedManifest struct {
 	Outcome   parser.ParseOutcome
 	Tombstone bool
+	// ReplaceSessionContent requests full content replacement for emitted
+	// sessions only. Unlike Outcome.ForceReplace, it does not authorize
+	// removing archived sessions absent from this source generation.
+	ReplaceSessionContent bool
 }
 
 // ProviderParser dispatches materialized sources through registered provider
@@ -112,7 +117,7 @@ func (p *ProviderParser) Parse(
 		return ParsedManifest{}, redactMaterializedError("discovering provider source", err, materialized.Root())
 	}
 	if !discovery.Complete {
-		return ParsedManifest{}, fmt.Errorf("provider raw-capture discovery is incomplete")
+		return ParsedManifest{}, errors.New("provider raw-capture discovery is incomplete")
 	}
 	source, err := matchProviderSource(ctx, provider, discovery.Sources, manifest, materialized)
 	if err != nil {
@@ -170,6 +175,21 @@ func materializedProviderRoots(
 	materialized *Materialization,
 ) []string {
 	root := materialized.Root()
+	if manifest.Manifest.Provider == parser.AgentCrush {
+		var roots []string
+		for _, entry := range manifest.Manifest.Entries {
+			if path.Base(entry.Path) != parser.CrushDBName {
+				continue
+			}
+			local, err := materialized.EntryPath(entry.Path)
+			if err == nil {
+				roots = append(roots, filepath.Dir(local))
+			}
+		}
+		if len(roots) != 0 {
+			return roots
+		}
+	}
 	if manifest.Manifest.Provider != parser.AgentCodex {
 		return []string{root}
 	}
@@ -266,9 +286,13 @@ func (p *ProviderParser) parseRawSnapshotSessions(
 	materialized *Materialization,
 	sessions []parser.SourceRef,
 ) (ParsedManifest, error) {
-	// One physical SQLite snapshot replaces the provider's whole logical
-	// session set for this source generation.
-	aggregate := parser.ParseOutcome{ResultSetComplete: true, ForceReplace: true}
+	// Full content snapshots are not necessarily authoritative membership
+	// lists: archive providers retain sessions deleted in the source app.
+	aggregate := parser.ParseOutcome{
+		ResultSetComplete: true,
+		ForceReplace: provider.Capabilities().Source.ExplicitDeletionOnly !=
+			parser.CapabilitySupported,
+	}
 	if len(sessions) == 0 {
 		aggregate.SkipReason = parser.SkipNoSession
 		return ParsedManifest{Outcome: aggregate}, nil
@@ -315,7 +339,7 @@ func (p *ProviderParser) parseRawSnapshotSessions(
 		aggregate.ResultSetComplete = aggregate.ResultSetComplete && outcome.ResultSetComplete
 	}
 	rewriteParseOutcome(&aggregate, paths, materialized.Root())
-	return ParsedManifest{Outcome: aggregate}, nil
+	return ParsedManifest{Outcome: aggregate, ReplaceSessionContent: true}, nil
 }
 
 // sameMaterializedEntryFile reports whether a validated provider plan entry
@@ -612,7 +636,7 @@ func rewriteParseOutcome(outcome *parser.ParseOutcome, paths *stablePathMap, roo
 		sourceErr := &outcome.SourceErrors[index]
 		sourceErr.SourceKey = paths.rewrite(sourceErr.SourceKey)
 		sourceErr.DisplayPath = paths.rewrite(sourceErr.DisplayPath)
-		if sourceErr.Err != nil && strings.Contains(sourceErr.Err.Error(), root) {
+		if sourceErr.Err != nil {
 			sourceErr.Err = redactedProviderError{
 				message: strings.ReplaceAll(sourceErr.Err.Error(), root, "<materialized>"),
 				cause:   sourceErr.Err,

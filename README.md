@@ -1,7 +1,11 @@
 # agentsview
 
-Browse, search, and track costs across all your AI coding agents. One binary, no
-accounts, everything local.
+Browse, search, and track costs across your AI coding agents. Your session
+archive stays on your machine unless you choose a feature that shares it.
+
+This README and the [documentation](https://agentsview.io/docs/) follow `main`.
+Check the [changelog](https://agentsview.io/docs/changelog/) for released
+features.
 
 <p align="center">
   <img src="https://agentsview.io/assets/generated/screenshots/dashboard.png" alt="Analytics dashboard" width="720">
@@ -60,25 +64,17 @@ reports its URL and exits. `daemon stop` and `serve stop` both stop that
 writable server, including sync; `serve stop` also stops read-only mirror
 servers for the same data directory.
 
-For Devin CLI, point `DEVIN_DIR` or `agents.devin.dirs` at the local root that
-contains `cli/` — for example `~/Library/Application Support/devin` on macOS,
-`~/.local/share/devin` on Linux, or a redacted path like
-`.../Application Support/devin`. AgentsView reads session data under
-`<root>/cli/...` and intentionally ignores copied config or OAuth paths. Do not
-paste tokens, OAuth files, or other secrets into bug reports.
-
-Claude and Codex sources can also be configured as `s3://` roots, so a central
-AgentsView instance can read sessions that other machines push to S3-compatible
-object storage. Add those roots to `agents.claude.dirs` or `agents.codex.dirs`;
-AgentsView lists object metadata and only downloads changed sessions during
-sync. S3 change detection uses size, modified time, and available object
-fingerprints such as ETag, version ID, or checksums.
+For custom directories, additional agent homes, and supported S3 sources, see
+[Session discovery](https://agentsview.io/docs/configuration/#session-discovery).
+The same guide explains how to choose
+[what content to archive](https://agentsview.io/docs/configuration/#archive-content).
 
 The desktop app and ordinary session CLI commands share a detached local daemon
 and start one when needed. Dedicated diagnostics such as
 `db adopt-machine --list` and `doctor sync` read the archive without starting
-it. Commands that need fresh data or need to write, such as `sync`, `usage`,
-`token-use`, `pg push`, and `duckdb push`, auto-start the daemon when needed.
+it. Commands such as `sync`, `usage`, `token-use`, `pg push`, `duckdb push`, and
+`clickhouse push` auto-start the daemon when needed. Daily usage reports read
+saved archive data; run `agentsview sync` first to include new source changes.
 The server remains running after these commands exit and also serves the web UI.
 For a one-shot sync with no background server, stop the daemon first and run
 `AGENTSVIEW_NO_DAEMON=1 agentsview sync`.
@@ -347,6 +343,7 @@ local Amp thread JSON files.
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Aider                 | `<repo>/.aider.chat.history.md` (per repo; opt in with `AIDER_DIR` or `agents.aider.dirs`)                                                                                                                                                           |
 | Amp (deprecated)      | `~/.local/share/amp/threads/` (historical local thread JSON only)                                                                                                                                                                                    |
+| Augure Desktop        | `~/.augure-desktop/` (macOS/Linux), `%LOCALAPPDATA%\augure-desktop\` (Windows)                                                                                                                                                                       |
 | Antigravity           | `~/.gemini/antigravity/`                                                                                                                                                                                                                             |
 | Antigravity CLI       | `~/.gemini/antigravity-cli/` (see note below)                                                                                                                                                                                                        |
 | Claude Code           | `~/.claude/projects/`                                                                                                                                                                                                                                |
@@ -363,6 +360,7 @@ local Amp thread JSON files.
 | Forge                 | `~/.forge/`                                                                                                                                                                                                                                          |
 | Gemini CLI            | `~/.gemini/`                                                                                                                                                                                                                                         |
 | Goose                 | `~/.local/share/goose/sessions/` (macOS and Linux), `%APPDATA%\\Block\\goose\\data\\sessions\\` (Windows)                                                                                                                                            |
+| Crush                 | `~/.local/share/crush/projects.json` registry pointing at per-project `~/<project>/.crush/crush.db` stores (macOS and Linux), `%LOCALAPPDATA%\\crush\\projects.json` (Windows)                                                                       |
 | gptme                 | `~/.local/share/gptme/logs/`                                                                                                                                                                                                                         |
 | Grok                  | `~/.grok/sessions/`                                                                                                                                                                                                                                  |
 | Hermes Agent          | `~/.hermes/sessions/`                                                                                                                                                                                                                                |
@@ -401,6 +399,7 @@ local Amp thread JSON files.
 | TraeX (TRAE CLI)      | `~/.trae/cli/sessions/`, `~/.trae/cli/archived_sessions/`                                                                                                                                                                                            |
 | Warp                  | `~/.warp/` (platform-dependent)                                                                                                                                                                                                                      |
 | WorkBuddy             | `~/.workbuddy/projects/`                                                                                                                                                                                                                             |
+| CodeBuddy             | `%LOCALAPPDATA%\\CodeBuddyExtension\\Data\\` (Windows), `~/Library/Application Support/CodeBuddyExtension/Data/` (macOS), `~/.config/CodeBuddyExtension/Data/` (Linux)                                                                               |
 | ZCode                 | `~/.zcode/cli/db/`, `~/.zcode/cli/`                                                                                                                                                                                                                  |
 | Zed                   | `~/Library/Application Support/Zed/` (macOS)                                                                                                                                                                                                         |
 | Zencoder              | `~/.zencoder/sessions/`                                                                                                                                                                                                                              |
@@ -417,6 +416,14 @@ transcript content, thinking, tool calls and results, session relationships,
 models, token usage, and recorded costs. Set `GOOSE_PATH_ROOT` to a Goose path
 root (sessions are read from `<root>/data/sessions/`), or `agents.goose.dirs` to
 one or more data or sessions directories.
+
+Crush sessions are read from each project's SQLite `.crush/crush.db`, including
+transcript content, thinking, tool calls and results, session relationships,
+models, and recorded session costs. The project registry lives at
+`~/.local/share/crush/projects.json` (macOS and Linux) or
+`%LOCALAPPDATA%\crush\projects.json` (Windows). Set `CRUSH_DIR` or
+`agents.crush.dirs` to one or more Crush data directories, `.crush` directories,
+or `crush.db` files.
 
 Each directory can be overridden with an environment variable. See the
 [configuration docs](https://agentsview.io/configuration/) for details. Cursor
@@ -642,6 +649,56 @@ loginctl enable-linger "$USER"
 See [PostgreSQL docs](https://agentsview.io/postgresql/) for setup and
 configuration.
 
+## ClickHouse Sync
+
+Push session data to a ClickHouse instance. `clickhouse push` writes the copy;
+`clickhouse serve` queries it. SQLite stays the archive, the same operator story
+as PostgreSQL:
+
+```bash
+agentsview clickhouse push             # push local data to the default target
+agentsview clickhouse push archive     # push to one named target
+agentsview clickhouse push --all       # push every configured target sequentially
+agentsview clickhouse status           # show status for the default target
+agentsview clickhouse serve            # serve web UI from the default target (read-only)
+```
+
+Single-target configs use the legacy `[clickhouse]` block. To manage more than
+one destination, define named `[clickhouse.NAME]` blocks and set
+`default_clickhouse` when more than one target exists:
+
+```toml
+default_clickhouse = "work"
+
+[clickhouse.work]
+url = "clickhouse://user:pass@work-db:9440/agentsview?secure=true"
+
+[clickhouse.archive]
+url = "clickhouse://user:pass@archive-db:9440/agentsview?secure=true"
+exclude_projects = ["scratch"]
+```
+
+Named target names are normalized case-insensitively. `all`, `local`, and the
+legacy `[clickhouse]` field names `url`, `database`, `machine_name`,
+`allow_insecure`, `projects`, and `exclude_projects` cannot be used for
+`[clickhouse.NAME]`.
+
+`AGENTSVIEW_CLICKHOUSE_URL`, `AGENTSVIEW_CLICKHOUSE_DATABASE`, and
+`AGENTSVIEW_CLICKHOUSE_MACHINE` still work, but in named-target mode they apply
+only to the effective default target.
+
+```bash
+agentsview clickhouse push --watch                 # foreground, Ctrl-C to stop
+agentsview clickhouse service install              # launchd / systemd --user
+```
+
+`--all --watch` is rejected. `clickhouse serve` and `clickhouse service` always
+use the effective default target. Non-loopback URLs require verified TLS unless
+`allow_insecure = true`.
+
+See [ClickHouse docs](https://agentsview.io/docs/clickhouse-sync/) for setup and
+configuration.
+
 ## DuckDB Mirror and Quack
 
 DuckDB support is a mirror backend, not a replacement for the local SQLite
@@ -668,6 +725,7 @@ Backend modes:
 
 - SQLite: primary local archive, file sync, FTS5 search, and writable UI.
 - PostgreSQL: optional shared team backend; push from SQLite, serve read-only.
+- ClickHouse: optional remote backend; push from SQLite, serve read-only.
 - DuckDB: optional mirror file or Quack endpoint; push from SQLite, serve
   read-only.
 

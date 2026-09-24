@@ -4,12 +4,15 @@ RESUME_AGENTS["claude"] = (id) => `claude --resume ${shellQuote(id)}`;
 RESUME_AGENTS["codex"] = (id) => `codex resume ${shellQuote(id)}`;
 // TraeX ships the traex, traecli, and trae-cli aliases; use the shortest.
 RESUME_AGENTS["traex"] = (id) => `traex resume ${shellQuote(id)}`;
+// The Augure Code agent's command is the vendor's own `augure` CLI.
+RESUME_AGENTS["augure-code"] = (id) => `augure resume ${shellQuote(id)}`;
 RESUME_AGENTS["copilot"] = (id) => `copilot --resume=${shellQuote(id)}`;
 RESUME_AGENTS["cursor"] = (id) => `cursor agent --resume ${shellQuote(id)}`;
 RESUME_AGENTS["gemini"] = (id) => `gemini --resume ${shellQuote(id)}`;
 RESUME_AGENTS["opencode"] = (id) => `opencode --session ${shellQuote(id)}`;
 RESUME_AGENTS["amp"] = (id) => `amp --resume ${shellQuote(id)}`;
 RESUME_AGENTS["kiro"] = (id) => `kiro-cli chat --resume-id ${shellQuote(id)}`;
+RESUME_AGENTS["pi"] = (id) => `pi --session ${shellQuote(id)}`;
 
 /**
  * Agents whose resume commands require server-resolved parameters
@@ -17,7 +20,7 @@ RESUME_AGENTS["kiro"] = (id) => `kiro-cli chat --resume-id ${shellQuote(id)}`;
  * buildResumeCommand returns null for these agents so callers
  * don't produce incomplete fallback commands.
  */
-const SERVER_ONLY_RESUME = new Set(["cursor"]);
+const SERVER_ONLY_RESUME = new Set(["cursor", "pi"]);
 
 /** Flags available for Claude Code resume. */
 export interface ClaudeResumeFlags {
@@ -94,7 +97,8 @@ export function buildResumeCommand(
 
   if (flags?.model) {
     if (agent === "claude") cmd += ` --model ${shellQuote(flags.model)}`;
-    if (agent === "codex" || agent === "traex") cmd += ` -m ${shellQuote(flags.model)}`;
+    if (agent === "codex" || agent === "traex" || agent === "augure-code")
+      cmd += ` -m ${shellQuote(flags.model)}`;
   }
 
   if (agent === "claude" && flags) {

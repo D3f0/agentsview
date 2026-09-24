@@ -2,18 +2,21 @@ package remotesync
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"fmt"
+	"errors"
 	"sort"
 	"time"
 
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/jsonutil"
 	"go.kenn.io/agentsview/internal/parser"
+
 	syncpkg "go.kenn.io/agentsview/internal/sync"
 )
 
+//nolint:recvcheck // Value encoding and pointer decoding intentionally implement distinct interfaces.
 type SyncStats struct {
 	SessionsSynced       int              `json:"sessions_synced"`
 	SessionsTotal        int              `json:"sessions_total"`
@@ -123,7 +126,7 @@ func (t TargetSet) isFileScoped(agent parser.AgentType) bool {
 // full-archive flow, and new file-scoped agents default to sanitized
 // until added here.
 func verbatimFileScopedAgent(agent parser.AgentType) bool {
-	return agent == parser.AgentRooCode || agent == parser.AgentKiloLegacy ||
+	return agent == parser.AgentRooCode || agent == parser.AgentCline || agent == parser.AgentKiloLegacy ||
 		agent == parser.AgentCursor || agent == parser.AgentVSCodeCopilot || agent == parser.AgentEvener
 }
 
@@ -144,7 +147,7 @@ func snapshotFileScopedAgent(agent parser.AgentType) bool {
 // remaining copies instead of failing the sync. Agents without this
 // trait drop the root entirely when nothing is discovered.
 func emptyFileScopeAgent(agent parser.AgentType) bool {
-	return agent == parser.AgentCursor || agent == parser.AgentVSCodeCopilot || agent == parser.AgentEvener
+	return agent == parser.AgentCursor || agent == parser.AgentVSCodeCopilot || agent == parser.AgentEvener || agent == parser.AgentCline
 }
 
 // HasSanitizedFileScopedAgents reports whether any agent's export is
@@ -328,11 +331,11 @@ func (r *ArchiveRequest) UnmarshalJSON(data []byte) error {
 		return json.Unmarshal(files, &r.Files)
 	case '[':
 		if raw.DeltaFiles != nil {
-			return fmt.Errorf("archive request cannot use both files delta list and delta_files")
+			return errors.New("archive request cannot use both files delta list and delta_files")
 		}
 		return json.Unmarshal(files, &r.DeltaFiles)
 	default:
-		return fmt.Errorf("archive request files must be an object or array")
+		return errors.New("archive request files must be an object or array")
 	}
 }
 
@@ -346,7 +349,7 @@ type Importer struct {
 	Progress                  syncpkg.ProgressFunc
 	Targets                   TargetSet
 	Root                      string
-	replaceRemoteSkippedFiles func(string, map[string]int64) error
-	applyRemoteSkippedChanges func(string, []string, map[string]int64) error
+	replaceRemoteSkippedFiles func(context.Context, string, map[string]int64) error
+	applyRemoteSkippedChanges func(context.Context, string, []string, map[string]int64) error
 	saveSkipCache             func(*db.DB, *syncpkg.Engine, remotePathMap) error
 }

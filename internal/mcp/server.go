@@ -61,7 +61,7 @@ func newServer(opts ServeOptions) *mcp.Server {
 		Name:    "agentsview",
 		Title:   "agentsview session history",
 		Version: version,
-	}, nil)
+	}, &mcp.ServerOptions{Instructions: "Use returned web_url values when linking to recorded sessions."})
 
 	t := &toolset{svc: opts.Service, now: opts.Now}
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true}
@@ -75,7 +75,11 @@ func newServer(opts ServeOptions) *mcp.Server {
 			"is configured. Use this tool for keyword search, with optional date_from/date_to bounds. " +
 			"Every term must appear (AND); wrap the query in double quotes for an exact phrase. " +
 			"Sessions active in the last 10 minutes (including the current conversation) are excluded " +
-			"unless include_active is set.",
+			"unless include_active is set. Set session_id to look up one raw UUID or full stored ID. " +
+			"That lookup returns one metadata row, includes active sessions, ignores other search " +
+			"arguments, and reports missing or ambiguous raw IDs as errors. Its snippet is empty and " +
+			"match_ordinal is 0; call get_messages with that anchor for the first message. " +
+			"Use get_session_overview for a known full ID when you need a message preview.",
 		Annotations: readOnly,
 	}, t.searchSessions)
 
@@ -128,7 +132,8 @@ func newServer(opts ServeOptions) *mcp.Server {
 			"substring/regex for exact error messages, identifiers, and code fragments. " +
 			"The default mode remains substring. Set context to include N messages of " +
 			"surrounding conversation with each match. Matches from the last 10 minutes (including the " +
-			"current conversation) are excluded unless include_active is set.",
+			"current conversation) are excluded unless include_active is set. One-shot and automated " +
+			"sessions are excluded by default; set include_one_shot or include_automated to include them.",
 		Annotations: readOnly,
 	}, t.searchContent)
 
@@ -215,7 +220,7 @@ func isCleanStdioShutdown(err error) bool {
 // calls can finish. addr must already be validated as a safe bind
 // address (see the cmd layer's loopback guard).
 func ServeHTTP(ctx context.Context, opts ServeOptions, addr string) (result error) {
-	listener, err := net.Listen("tcp", addr)
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}

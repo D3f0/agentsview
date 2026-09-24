@@ -9,11 +9,16 @@ import (
 
 	"go.kenn.io/agentsview/internal/db"
 	syncpkg "go.kenn.io/agentsview/internal/sync"
+
+	"github.com/danielgtaylor/huma/v2"
 )
 
 func (s *Server) registerDataRoutes() {
-	group := newRouteGroup(s.api, "/api/v1/data", "Data")
+	group := huma.NewGroup(s.api, "/api/v1/data")
+	configureRouteGroup(group, "Data")
 	s.get(group, "/projects", "Get project inventory", s.humaDataProjects)
+	s.get(group, "/projects/{project_key}/sessions",
+		"List sessions for an opaque project identity", s.humaDataProjectSessions)
 	s.get(group, "/project-rules", "List project rules", s.humaDataProjectRules)
 	s.get(group, "/project-reclassification/candidates",
 		"List archive-wide reclassification candidates",
@@ -35,6 +40,7 @@ type dataProjectRulesResponse struct {
 }
 
 type dataCandidatesInput struct {
+	DataProjectsInput
 	ProjectLabel string `query:"project_label" doc:"Project display label"`
 	ProjectKey   string `query:"project_key" required:"true" doc:"Opaque project identity key"`
 }
@@ -82,10 +88,28 @@ type dataStripImagesApplyRequest struct {
 	Confirmed *bool  `json:"confirmed,omitempty" doc:"Must be true; confirms cleanup of every session matching the filter when the run starts"`
 }
 
+type dataProjectSessionsInput struct {
+	DataProjectsInput
+	ProjectKey       string `path:"project_key" required:"true" doc:"Opaque project identity key"`
+	Cursor           string `query:"cursor" doc:"Opaque pagination cursor"`
+	Limit            int    `query:"limit" minimum:"0" doc:"Maximum number of results per page"`
+	IncludeAutomated bool   `query:"include_automated" doc:"Include automated sessions"`
+}
+
+type DataProjectsInput struct {
+	DateFrom string `query:"date_from" format:"date" doc:"Session activity range start, inclusive"`
+	DateTo   string `query:"date_to" format:"date" doc:"Session activity range end, inclusive"`
+	Timezone string `query:"timezone" doc:"Timezone for date bounds"`
+}
+
+func (in DataProjectsInput) filter() db.ProjectDateFilter {
+	return db.ProjectDateFilter{DateFrom: in.DateFrom, DateTo: in.DateTo, Timezone: in.Timezone}
+}
+
 func (s *Server) humaDataProjects(
-	ctx context.Context, _ *emptyInput,
+	ctx context.Context, in *DataProjectsInput,
 ) (*jsonOutput[db.ProjectInventory], error) {
-	inv, err := s.db.GetProjectInventory(ctx)
+	inv, err := s.db.GetProjectInventory(ctx, in.filter())
 	if err != nil {
 		if handled := handleHumaContextError(err); handled != nil {
 			return nil, handled
@@ -96,6 +120,46 @@ func (s *Server) humaDataProjects(
 		return nil, internalError("get project inventory error", err)
 	}
 	return &jsonOutput[db.ProjectInventory]{Body: inv}, nil
+}
+
+func (s *Server) humaDataProjectSessions(
+	ctx context.Context, in *dataProjectSessionsInput,
+) (*jsonOutput[db.SessionPage], error) {
+	projectKey := strings.TrimSpace(in.ProjectKey)
+	if projectKey == "" {
+		return nil, apiError(http.StatusBadRequest, "project_key is required")
+	}
+	labels, err := s.db.GetActiveProjectLabels(ctx)
+	if err != nil {
+		return nil, internalError("list project labels", err)
+	}
+	catalog, err := s.db.BuildProjectIdentityMap(ctx, labels)
+	if err != nil {
+		return nil, internalError("resolve project identities", err)
+	}
+	resolved := make([]string, 0, 1)
+	for label, entry := range catalog {
+		if entry.ProjectKey == projectKey {
+			resolved = append(resolved, label)
+		}
+	}
+	if len(resolved) == 0 {
+		return nil, apiError(http.StatusNotFound, "project not found")
+	}
+	page, err := s.db.ListSessions(ctx, db.SessionFilter{
+		DateFrom: in.DateFrom, DateTo: in.DateTo, Timezone: in.Timezone,
+		ProjectLabels:    resolved,
+		IncludeChildren:  true,
+		IncludeEmpty:     true,
+		Limit:            clampLimit(in.Limit, db.DefaultSessionLimit, db.MaxSessionLimit),
+		Cursor:           in.Cursor,
+		ExcludeAutomated: !in.IncludeAutomated,
+		OrderBy:          "recent",
+	})
+	if err != nil {
+		return nil, internalError("list project sessions", err)
+	}
+	return &jsonOutput[db.SessionPage]{Body: page}, nil
 }
 
 func (s *Server) localMachineName() string {
@@ -142,8 +206,9 @@ func (s *Server) humaDataCandidates(
 	}
 	candidates, err := s.db.ListArchiveWorktreeCandidates(ctx,
 		db.ArchiveWorktreeCandidateRequest{
-			ProjectLabel: in.ProjectLabel,
-			ProjectKey:   in.ProjectKey,
+			ProjectDateFilter: in.filter(),
+			ProjectLabel:      in.ProjectLabel,
+			ProjectKey:        in.ProjectKey,
 		})
 	if err != nil {
 		if handled := handleHumaContextError(err); handled != nil {
@@ -185,7 +250,7 @@ func (s *Server) humaDataCompact(
 	if s.localCompactRunner != nil {
 		result, err = s.localCompactRunner(ctx, options)
 	} else {
-		err = s.tryArchiveWrite(func() error {
+		err = s.tryArchiveWrite(ctx, func() error {
 			result, err = local.Compact(ctx, options)
 			return err
 		})
@@ -276,7 +341,7 @@ func (s *Server) humaDataStripImages(
 	// StripToolImages documents that the caller owns the archive write lock;
 	// the daemon's foreground exclusive boundary is that ownership, not the
 	// CLI flock, and it refuses rather than queues behind a worker pass.
-	err = s.tryArchiveWrite(func() error {
+	err = s.tryArchiveWrite(ctx, func() error {
 		var stripErr error
 		report, stripErr = local.StripToolImages(ctx, filter)
 		// An error can follow per-session commits, even with an empty report.

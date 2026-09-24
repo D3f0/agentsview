@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,7 +31,9 @@ const (
 	daemonAPIVersion       = server.APIVersion
 	runtimeReadOnly        = "read_only"
 	runtimeHost            = "host"
+	runtimeBrowserURL      = "browser_url"
 	runtimePort            = "port"
+	runtimeExplicitPort    = "explicit_port"
 	runtimeRequireAuth     = "require_auth"
 	runtimeNoSync          = "no_sync"
 	runtimeAPIVersion      = "api_version"
@@ -41,8 +44,10 @@ const (
 	defaultStartProbeTick  = 250 * time.Millisecond
 )
 
-var startProbeTickNanos int64 = int64(defaultStartProbeTick)
-var tryAcquireStartLock = daemon.RuntimeStore.TryAcquireStartLock
+var (
+	startProbeTickNanos int64 = int64(defaultStartProbeTick)
+	tryAcquireStartLock       = daemon.RuntimeStore.TryAcquireStartLock
+)
 
 func startProbeTick() time.Duration {
 	return time.Duration(atomic.LoadInt64(&startProbeTickNanos))
@@ -52,7 +57,10 @@ func startProbeTick() time.Duration {
 type DaemonRuntime struct {
 	Record           daemon.RuntimeRecord
 	Host             string
+	BrowserURL       string
+	BasePath         string
 	Port             int
+	ExplicitPort     *int // Original --port value, including zero; nil if not recorded.
 	ReadOnly         bool
 	RequireAuth      bool
 	RequireAuthKnown bool
@@ -76,23 +84,23 @@ func WriteDaemonRuntime(
 	readOnly bool, caddyPID ...int,
 ) (string, error) {
 	return WriteDaemonRuntimeWithAuth(
-		dataDir, host, port, version, readOnly, false, caddyPID...,
+		dataDir, host, port, version, "", readOnly, false, caddyPID...,
 	)
 }
 
 func WriteDaemonRuntimeWithAuth(
-	dataDir string, host string, port int, version string,
+	dataDir string, host string, port int, version, browserURL string,
 	readOnly bool, requireAuth bool, caddyPID ...int,
 ) (string, error) {
 	return WriteDaemonRuntimeWithAuthAndNoSync(
-		dataDir, host, port, version, readOnly, requireAuth, false,
-		caddyPID...,
+		dataDir, host, port, version, browserURL, readOnly, requireAuth, false,
+		nil, caddyPID...,
 	)
 }
 
 func WriteDaemonRuntimeWithAuthAndNoSync(
-	dataDir string, host string, port int, version string,
-	readOnly bool, requireAuth bool, noSync bool, caddyPID ...int,
+	dataDir string, host string, port int, version, browserURL string,
+	readOnly bool, requireAuth bool, noSync bool, explicitPort *int, caddyPID ...int,
 ) (string, error) {
 	ep := daemon.Endpoint{
 		Network: daemon.NetworkTCP,
@@ -101,12 +109,16 @@ func WriteDaemonRuntimeWithAuthAndNoSync(
 	rec := daemon.NewRuntimeRecord(daemonService, version, ep)
 	rec.Metadata = map[string]string{
 		runtimeHost:        host,
+		runtimeBrowserURL:  browserURL,
 		runtimePort:        strconv.Itoa(port),
 		runtimeReadOnly:    strconv.FormatBool(readOnly),
 		runtimeRequireAuth: strconv.FormatBool(requireAuth),
 		runtimeNoSync:      strconv.FormatBool(noSync),
 		runtimeAPIVersion:  strconv.Itoa(daemonAPIVersion),
 		runtimeDataVersion: strconv.Itoa(db.CurrentDataVersion()),
+	}
+	if explicitPort != nil {
+		rec.Metadata[runtimeExplicitPort] = strconv.Itoa(*explicitPort)
 	}
 	// Persist this process's OS create time so `serve stop` can confirm a
 	// PID still belongs to the recorded daemon (and was not reused) by
@@ -129,7 +141,7 @@ func WriteDaemonRuntimeWithAuthAndNoSync(
 	if err != nil {
 		if !readOnly {
 			publishStartupStateFallback(
-				dataDir, host, port, requireAuth, noSync, caddy, err,
+				dataDir, host, port, browserURL, requireAuth, noSync, explicitPort, caddy, err,
 			)
 		}
 		return "", err
@@ -331,11 +343,15 @@ func findStartupStateFallback(dataDir, authToken string) *DaemonRuntime {
 	rec.StartedAt = st.StartedAt
 	rec.Metadata = map[string]string{
 		runtimeHost:        st.Host,
+		runtimeBrowserURL:  st.BrowserURL,
 		runtimePort:        strconv.Itoa(st.Port),
 		runtimeReadOnly:    "false",
 		runtimeAPIVersion:  strconv.Itoa(st.APIVersion),
 		runtimeDataVersion: strconv.Itoa(st.DataVersion),
 		runtimeCreateTime:  st.CreateTime,
+	}
+	if st.ExplicitPort != nil {
+		rec.Metadata[runtimeExplicitPort] = strconv.Itoa(*st.ExplicitPort)
 	}
 	if st.RequireAuthKnown {
 		rec.Metadata[runtimeRequireAuth] = strconv.FormatBool(st.RequireAuth)
@@ -454,6 +470,10 @@ func probeRuntime(
 	opts daemon.ProbeOptions,
 ) (daemon.PingInfo, error) {
 	ep := rec.Endpoint()
+	if opts.Path == "" {
+		opts.Path = daemon.DefaultPingPath
+	}
+	opts.Path = daemonRuntimeFromRecord(rec).BasePath + opts.Path
 	if authToken == "" {
 		return daemon.Probe(ctx, ep, opts)
 	}
@@ -493,6 +513,11 @@ func (t bearerAuthTransport) RoundTrip(
 }
 
 func daemonRuntimeFromRecord(rec daemon.RuntimeRecord) *DaemonRuntime {
+	// The configured public URL is origin-only; startup appends the server mount path.
+	basePath := ""
+	if browser, err := url.Parse(rec.Metadata[runtimeBrowserURL]); err == nil {
+		basePath = strings.TrimRight(browser.EscapedPath(), "/")
+	}
 	ep := rec.Endpoint()
 	host, portText, _ := net.SplitHostPort(ep.Address)
 	port, _ := strconv.Atoi(portText)
@@ -510,9 +535,13 @@ func daemonRuntimeFromRecord(rec daemon.RuntimeRecord) *DaemonRuntime {
 	requireAuth := false
 	requireAuthKnown := false
 	noSync := false
+	var explicitPort *int
 	apiVersion := 0
 	dataVersion := 0
 	if rec.Metadata != nil {
+		if port, err := strconv.Atoi(rec.Metadata[runtimeExplicitPort]); err == nil {
+			explicitPort = new(port)
+		}
 		readOnly, _ = strconv.ParseBool(rec.Metadata[runtimeReadOnly])
 		if raw, ok := rec.Metadata[runtimeRequireAuth]; ok {
 			requireAuth, _ = strconv.ParseBool(raw)
@@ -525,7 +554,10 @@ func daemonRuntimeFromRecord(rec daemon.RuntimeRecord) *DaemonRuntime {
 	return &DaemonRuntime{
 		Record:           rec,
 		Port:             port,
+		ExplicitPort:     explicitPort,
 		Host:             host,
+		BrowserURL:       rec.Metadata[runtimeBrowserURL],
+		BasePath:         basePath,
 		ReadOnly:         readOnly,
 		RequireAuth:      requireAuth,
 		RequireAuthKnown: requireAuthKnown,

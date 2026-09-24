@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,10 +43,46 @@ func TestDataProjectsEndpoint(t *testing.T) {
 	require.Len(t, inv.Projects, 2)
 }
 
+func TestDataProjectsDateRangeAppliesToFoldersAndPreviews(t *testing.T) {
+	te := setup(t)
+	for _, fixture := range []struct{ id, cwd, started string }{
+		{"august", "/work/august", "2026-08-15T12:00:00Z"},
+		{"september", "/work/september", "2026-09-15T12:00:00Z"},
+	} {
+		te.seedSession(t, fixture.id, "alpha", 1, func(s *db.Session) {
+			s.Cwd = fixture.cwd
+			s.StartedAt = &fixture.started
+			s.EndedAt = &fixture.started
+		})
+	}
+	const dates = "date_from=2026-08-01&date_to=2026-08-31&timezone=UTC"
+	w := te.get(t, "/api/v1/data/projects?"+dates)
+	assertStatus(t, w, http.StatusOK)
+	var inv db.ProjectInventory
+	decodeInto(t, w, &inv)
+	require.Len(t, inv.Projects, 1)
+	assert.Equal(t, 1, inv.TotalSessions)
+	key := url.QueryEscape(inv.Projects[0].ProjectKey)
+	w = te.get(t, "/api/v1/data/project-reclassification/candidates?project_label=alpha&project_key="+key+"&"+dates)
+	assertStatus(t, w, http.StatusOK)
+	var folders struct {
+		Candidates []db.WorktreeReclassificationCandidate `json:"candidates"`
+	}
+	decodeInto(t, w, &folders)
+	require.Len(t, folders.Candidates, 1)
+	assert.Equal(t, "/work/august", folders.Candidates[0].SuggestedPrefix)
+	w = te.get(t, "/api/v1/data/projects/"+url.PathEscape(inv.Projects[0].ProjectKey)+"/sessions?"+dates)
+	assertStatus(t, w, http.StatusOK)
+	var page db.SessionPage
+	decodeInto(t, w, &page)
+	require.Len(t, page.Sessions, 1)
+	assert.Equal(t, "august", page.Sessions[0].ID)
+}
+
 func TestDataProjectRulesEndpoint(t *testing.T) {
 	te := setup(t)
-	require.NoError(t, te.db.SetSyncState(db.MachineAliasKeyPrefix+"old-workstation", "ws"))
-	_, err := te.db.CreateWorktreeProjectMapping(context.Background(), db.WorktreeProjectMapping{
+	require.NoError(t, te.db.SetSyncState(t.Context(), db.MachineAliasKeyPrefix+"old-workstation", "ws"))
+	_, err := te.db.CreateWorktreeProjectMapping(t.Context(), db.WorktreeProjectMapping{
 		Machine: "ws", PathPrefix: "/work", Layout: db.WorktreeMappingLayoutExplicit,
 		Project: "outer", Enabled: true,
 	})
@@ -64,6 +102,98 @@ func TestDataProjectRulesEndpoint(t *testing.T) {
 	require.Len(t, rules.Rules, 1)
 	assert.Equal(t, "/work", rules.Rules[0].PathPrefix)
 	assert.Equal(t, 1, rules.Rules[0].GovernedSessions)
+}
+
+func TestDataProjectSessionsEndpointUsesExactOpaqueIdentity(t *testing.T) {
+	te := setup(t)
+	const targetLabel = "https://one.example/project"
+	const otherLabel = "https://two.example/project"
+	te.seedSession(t, "target-root", targetLabel, 1, func(s *db.Session) {
+		s.Machine = "host-a.example"
+		s.Cwd = "/srv/projects/project-a"
+	})
+	te.seedSession(t, "target-child", targetLabel, 1, func(s *db.Session) {
+		s.Machine = "host-a.example"
+		s.Cwd = "/srv/projects/project-a"
+		s.ParentSessionID = new("target-root")
+		s.RelationshipType = "subagent"
+	})
+	te.seedSession(t, "other-child", otherLabel, 1, func(s *db.Session) {
+		s.Machine = "host-a.example"
+		s.Cwd = "/srv/projects/project-b"
+		s.ParentSessionID = new("target-root")
+		s.RelationshipType = "subagent"
+	})
+
+	projects, err := te.db.BuildProjectIdentityMap(
+		t.Context(), []string{targetLabel, otherLabel},
+	)
+	require.NoError(t, err)
+	require.Empty(t, export.SafeProjectDisplayLabel(targetLabel))
+	require.Empty(t, export.SafeProjectDisplayLabel(otherLabel),
+		"the transport labels deliberately collide after sanitization")
+
+	w := te.get(t, "/api/v1/data/projects/"+
+		url.PathEscape(projects[targetLabel].ProjectKey)+"/sessions")
+	assertStatus(t, w, http.StatusOK)
+	var page db.SessionPage
+	decodeInto(t, w, &page)
+	require.Len(t, page.Sessions, 2)
+	assert.ElementsMatch(t, []string{"target-root", "target-child"}, []string{
+		page.Sessions[0].ID, page.Sessions[1].ID,
+	})
+}
+
+func TestDataProjectSessionsPaginationAndAutomation(t *testing.T) {
+	te := setup(t)
+	for i := range 25 {
+		te.seedSession(t, fmt.Sprintf("preview-%02d", i), "project-a", 1)
+	}
+	te.seedSession(t, "automated-preview", "project-a", 1, func(s *db.Session) {
+		s.IsAutomated = true
+	})
+	identities, err := te.db.BuildProjectIdentityMap(t.Context(), []string{"project-a"})
+	require.NoError(t, err)
+	endpoint := "/api/v1/data/projects/" + url.PathEscape(identities["project-a"].ProjectKey) + "/sessions"
+	w := te.get(t, endpoint+"?limit=20")
+	assertStatus(t, w, http.StatusOK)
+	var first db.SessionPage
+	decodeInto(t, w, &first)
+	require.Len(t, first.Sessions, 20)
+	assert.Equal(t, 25, first.Total)
+	require.NotEmpty(t, first.NextCursor)
+	w = te.get(t, endpoint+"?limit=20&cursor="+url.QueryEscape(first.NextCursor))
+	assertStatus(t, w, http.StatusOK)
+	var last db.SessionPage
+	decodeInto(t, w, &last)
+	require.Len(t, last.Sessions, 5)
+	assert.Empty(t, last.NextCursor)
+	ids := make(map[string]bool)
+	for _, session := range append(first.Sessions, last.Sessions...) {
+		assert.False(t, session.IsAutomated)
+		ids[session.ID] = true
+	}
+	assert.Len(t, ids, 25)
+	w = te.get(t, endpoint+"?include_automated=true")
+	assertStatus(t, w, http.StatusOK)
+	var all db.SessionPage
+	decodeInto(t, w, &all)
+	assert.Equal(t, 26, all.Total)
+	assert.Len(t, all.Sessions, 26)
+}
+
+func TestDataProjectSessionsIncludesEmptySessionsForMapping(t *testing.T) {
+	te := setup(t)
+	te.seedSession(t, "empty-preview", "empty-project", 0)
+	identities, err := te.db.BuildProjectIdentityMap(t.Context(), []string{"empty-project"})
+	require.NoError(t, err)
+	w := te.get(t, "/api/v1/data/projects/"+url.PathEscape(identities["empty-project"].ProjectKey)+"/sessions")
+	assertStatus(t, w, http.StatusOK)
+	var page db.SessionPage
+	decodeInto(t, w, &page)
+	require.Len(t, page.Sessions, 1)
+	assert.Equal(t, "empty-preview", page.Sessions[0].ID)
+	assert.Equal(t, 1, page.Total)
 }
 
 func TestDataProjectRulesDefaultsToLocalMachine(t *testing.T) {
@@ -89,7 +219,7 @@ func TestDataProjectReclassificationCandidatesEndpoint(t *testing.T) {
 		s.Cwd = "/srv/worktrees/example/selected"
 	})
 
-	projects, err := te.db.BuildProjectIdentityMap(context.Background(), []string{rawProject})
+	projects, err := te.db.BuildProjectIdentityMap(t.Context(), []string{rawProject})
 	require.NoError(t, err)
 
 	w := te.get(t, buildPathURL(
@@ -163,7 +293,7 @@ func TestDataStripImagesRejectsNonLocalhost(t *testing.T) {
 		{"/api/v1/data/strip-images/preview", `{}`},
 		{"/api/v1/data/strip-images", `{"confirmed":true}`},
 	} {
-		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, tc.path, strings.NewReader(tc.body))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "198.51.100.7:5555"
 		w := httptest.NewRecorder()
@@ -191,7 +321,7 @@ func TestDataStripImagesRejectsForwardedLoopback(t *testing.T) {
 		{"/api/v1/data/strip-images/preview", `{}`},
 		{"/api/v1/data/strip-images", `{"confirmed":true}`},
 	} {
-		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, tc.path, strings.NewReader(tc.body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Forwarded-For", "10.0.0.1")
 		req.RemoteAddr = "127.0.0.1:5555"
@@ -249,12 +379,13 @@ func seedSessionWithImage(t *testing.T, te *testEnv, sessionID, project string) 
 // rather than positivity.
 func testImgDecodedBytes(t *testing.T) int64 {
 	t.Helper()
+
 	const prefix = `data:image/png;base64,`
 	start := strings.Index(testImgPayload, prefix)
 	require.GreaterOrEqual(t, start, 0, "seed payload must carry a data: URI")
 	encoded := testImgPayload[start+len(prefix):]
 	end := strings.IndexByte(encoded, '"')
-	require.Greater(t, end, 0, "seed payload data: URI must be quoted")
+	require.Positive(t, end, "seed payload data: URI must be quoted")
 	decoded, err := base64.StdEncoding.DecodeString(encoded[:end])
 	require.NoError(t, err, "seed payload must be valid base64")
 	return int64(len(decoded))
@@ -270,7 +401,7 @@ func seedSessionWithImageEndedAt(
 	te.seedSession(t, sessionID, project, 1, func(s *db.Session) {
 		s.EndedAt = &endedAt
 	})
-	require.NoError(t, te.db.ReplaceSessionMessages(sessionID, []db.Message{
+	require.NoError(t, te.db.ReplaceSessionMessages(t.Context(), sessionID, []db.Message{
 		{
 			SessionID:     sessionID,
 			Ordinal:       0,
@@ -296,7 +427,7 @@ func seedSessionWithImageEndedAt(
 func seedSessionWithContent(t *testing.T, te *testEnv, sessionID, project, resultContent string) {
 	t.Helper()
 	te.seedSession(t, sessionID, project, 1)
-	require.NoError(t, te.db.ReplaceSessionMessages(sessionID, []db.Message{
+	require.NoError(t, te.db.ReplaceSessionMessages(t.Context(), sessionID, []db.Message{
 		{
 			SessionID:     sessionID,
 			Ordinal:       0,
@@ -324,14 +455,14 @@ func seedSessionWithContent(t *testing.T, te *testEnv, sessionID, project, resul
 // that should have made no writes.
 func readToolCallContent(t *testing.T, te *testEnv, sessionID string) string {
 	t.Helper()
-	msgs, err := te.db.GetMessages(context.Background(), sessionID, 0, 100, true)
+	msgs, err := te.db.GetMessages(t.Context(), sessionID, 0, 100, true)
 	require.NoError(t, err, "readToolCallContent: GetMessages")
 	for _, msg := range msgs {
 		if len(msg.ToolCalls) > 0 {
 			return msg.ToolCalls[0].ResultContent
 		}
 	}
-	t.Fatal("readToolCallContent: no tool call found in session " + sessionID)
+	require.FailNow(t, "readToolCallContent: no tool call found in session "+sessionID)
 	return ""
 }
 
@@ -406,8 +537,8 @@ func TestDataStripImagesNotifiesAfterPartialCommit(t *testing.T) {
 	originalContent := readToolCallContent(t, te, "img-b")
 	// The cleanup visits sessions by ID within the project. Fail the
 	// second session's write after the first session has committed.
-	require.NoError(t, te.db.Update(func(tx *sql.Tx) error {
-		_, err := tx.Exec(`
+	require.NoError(t, te.db.Update(t.Context(), func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(t.Context(), `
 			CREATE TRIGGER fail_second_image_cleanup
 			BEFORE UPDATE OF result_content ON tool_calls
 			WHEN OLD.session_id = 'img-b'
@@ -437,7 +568,7 @@ func TestDataStripImagesPreviewLeavesArchiveUnchanged(t *testing.T) {
 
 	// Snapshot the stored content and transcript_revision before preview.
 	originalContent := readToolCallContent(t, te, sid)
-	session, err := te.db.GetSession(context.Background(), sid)
+	session, err := te.db.GetSession(t.Context(), sid)
 	require.NoError(t, err, "GetSession before preview")
 	originalRevision := session.TranscriptRevision
 
@@ -446,7 +577,7 @@ func TestDataStripImagesPreviewLeavesArchiveUnchanged(t *testing.T) {
 
 	// Both must be unchanged: preview writes nothing.
 	assert.Equal(t, originalContent, readToolCallContent(t, te, sid), "result_content must not change after preview")
-	sessionAfter, err := te.db.GetSession(context.Background(), sid)
+	sessionAfter, err := te.db.GetSession(t.Context(), sid)
 	require.NoError(t, err, "GetSession after preview")
 	assert.Equal(t, originalRevision, sessionAfter.TranscriptRevision, "transcript_revision must not change after preview")
 }
@@ -568,7 +699,7 @@ func TestDataStripImagesReadOnlyArchive(t *testing.T) {
 	dbPath := filepath.Join(te.dataDir, "test.db")
 
 	// Open the same file as a read-only DB and create a dedicated server.
-	roDb, err := db.OpenReadOnly(dbPath)
+	roDb, err := db.OpenReadOnly(t.Context(), dbPath)
 	require.NoError(t, err, "OpenReadOnly")
 	t.Cleanup(func() { _ = roDb.Close() })
 	cfg := config.Config{Host: "127.0.0.1", Port: 0}
@@ -576,7 +707,7 @@ func TestDataStripImagesReadOnlyArchive(t *testing.T) {
 	handler := wrapTestHandler(cfg, roSrv.Handler())
 
 	postTo := func(path, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
@@ -620,7 +751,7 @@ func TestDataCompactEndpointRejectsClientStagingDir(t *testing.T) {
 		server.WithLocalCompactRunner(func(
 			context.Context, db.CompactOptions,
 		) (db.CompactResult, error) {
-			t.Fatal("client-controlled staging path must be rejected before execution")
+			require.FailNow(t, "client-controlled staging path must be rejected before execution")
 			return db.CompactResult{}, nil
 		}),
 	})
@@ -652,11 +783,11 @@ func TestDataCompactEndpointRejectsNonLocalhost(t *testing.T) {
 		server.WithLocalCompactRunner(func(
 			context.Context, db.CompactOptions,
 		) (db.CompactResult, error) {
-			t.Fatal("non-local request must not invoke the compact runner")
+			require.FailNow(t, "non-local request must not invoke the compact runner")
 			return db.CompactResult{}, nil
 		}),
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/data/compact", strings.NewReader(`{}`))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/data/compact", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "http://127.0.0.1:0")
 	req.RemoteAddr = "203.0.113.10:4242"

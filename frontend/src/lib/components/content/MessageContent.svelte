@@ -1,6 +1,7 @@
 <script lang="ts">
-  import type { Message, Session } from "../../api/types.js";
-  import type { CallTiming, TurnTiming } from "../../api/types/timing.js";
+  import type { Session } from "../../api/types.js";
+import type { DbMessage as Message } from "../../api/generated/index.js";
+  import type { DbCallTiming as CallTiming, DbTurnTiming as TurnTiming } from "../../api/generated/index.js";
   import { parseContent, enrichSegments } from "../../utils/content-parser.js";
   import { formatTimestamp, formatTokenUsage } from "../../utils/format.js";
   import { formatDuration } from "../../utils/duration.js";
@@ -36,8 +37,10 @@
     session?: Session | null;
     isSubagentContext?: boolean;
     searchOrdinal?: number;
+    compact?: boolean;
+    allowMutations?: boolean;
   }
-  let { message, session, isSubagentContext = false, searchOrdinal }: Props = $props();
+  let { message, session, isSubagentContext = false, searchOrdinal, compact = false, allowMutations = true }: Props = $props();
   let copied = $state(false);
   let segments = $derived(enrichSegments(
     parseContent(message.content, message.has_tool_use, message.id, message.content_length),
@@ -155,10 +158,13 @@
     }
     return map;
   });
-  function soloDurationLabel(ct: CallTiming | undefined, turn: TurnTiming | undefined, msg: Message): string | undefined {
-    if (ct?.subagent_session_id && ct.duration_ms != null) return formatDuration(ct.duration_ms);
-    if (turn?.duration_ms != null) return formatDuration(turn.duration_ms);
-    if (sessionTiming.timing?.running && turn != null) {
+  function soloDurationLabel(
+    ct: CallTiming | undefined,
+    turn: TurnTiming | undefined,
+    msg: Message,
+  ): string | undefined {
+    if (ct?.duration_ms != null) return formatDuration(ct.duration_ms);
+    if (sessionTiming.timing?.running && turn != null && turn.duration_ms == null) {
       const startMs = new Date(turn.started_at ?? msg.timestamp).getTime();
       const elapsed = Number.isNaN(startMs) ? 0 : Math.max(0, liveTick.now - startMs);
       return m.message_content_running_duration({ duration: formatDuration(elapsed) });
@@ -203,7 +209,7 @@
       pinTimer = setTimeout(() => { pinFeedback = ""; }, 1500);
     } catch { /* Preserve the existing non-blocking pin interaction. */ }
   }
-  let canForkFromMessage = $derived(owningSession?.agent === "claude" &&
+  let canForkFromMessage = $derived(allowMutations && owningSession?.agent === "claude" &&
     !(owningSession?.id ?? "").includes("~") && !(sync.readOnly && isRemoteConnection()));
   async function handleForkFromHere() {
     if (!canForkFromMessage) return;
@@ -233,17 +239,19 @@
   }
 </script>
 
-<div class="message" class:is-user={isUser} style:border-left-color={accentColor} style:background={roleBg}>
+<div class="message" class:is-user={isUser} class:compact style:border-left-color={accentColor} style:background={roleBg}>
   <div class="message-header">
     <span class="role-icon" style:background={accentColor} style:color={accentForeground}>{roleIcon}</span>
     <span class="role-label" style:color={accentColor}>{roleLabel}</span>
     <CopyButton revealOnHover {copied} ariaLabel={m.message_content_copy_message()}
       copiedAriaLabel={m.message_content_copied_message()} title={m.message_content_copy_message()}
       copiedTitle={m.message_content_copied()} onclick={handleCopy} />
+    {#if allowMutations}
     <button type="button" class="pin-btn" class:pinned
       title={pinned ? m.message_content_unpin_message() : m.message_content_pin_message()} onclick={handleTogglePin}>
       <PinIcon size="14" strokeWidth="1.8" aria-hidden="true" />
     </button>
+    {/if}
     {#if canForkFromMessage}
       <button type="button" class="pin-btn fork-btn" title={m.session_breadcrumb_resume_session()}
         aria-label={m.session_breadcrumb_resume_session()} onclick={handleForkFromHere}>
@@ -328,12 +336,16 @@
       {#if structuredCalls.length === 1}
         {@const soloCall = structuredCalls[0]!}
         <ToolBlock toolCall={soloCall} content="" label={displayToolName(soloCall)}
-          durationLabel={soloDurationLabel(callByToolUseID.get(soloCall.tool_use_id ?? ""), turn, message)}
+          durationLabel={soloDurationLabel(
+            callByToolUseID.get(soloCall.tool_use_id ?? ""),
+            turn,
+            message,
+          )}
           isRunning={isRunningTurn(message)}
           searchScope={activeSearchOrdinal === undefined ? undefined : { ordinal: activeSearchOrdinal, callIdx: 0 }} />
       {:else if structuredCalls.length >= 2}
         <ParallelGroup toolCalls={structuredCalls} callTimingByID={callByToolUseID}
-          turnDurationMs={turn?.duration_ms ?? null} isRunning={isRunningTurn(message)} searchOrdinal={activeSearchOrdinal} />
+          isRunning={isRunningTurn(message)} searchOrdinal={activeSearchOrdinal} />
       {:else}
         {#each segments.filter((s) => s.type === "tool") as seg, segIdx (`${message.id}-${segIdx}`)}
           <ToolBlock content={seg.content} label={seg.label} toolCall={seg.toolCall}
@@ -378,7 +390,7 @@
   @media (hover: none) { .pin-btn { opacity: 1; } }
   .pin-btn:hover { background: var(--bg-surface-hover); color: var(--text-secondary); }
   .pin-btn.pinned { color: var(--accent-blue); }
-  .pin-btn:active { transform: scale(0.92); }
+  .pin-btn:active { transform: var(--press-transform); }
   .pin-feedback, .fork-feedback { font-size: 11px; color: var(--text-muted); animation: fade-in-out 1.5s ease-in-out; }
   @keyframes fade-in-out { 0% { opacity: 0; } 15% { opacity: 1; } 75% { opacity: 1; } 100% { opacity: 0; } }
   .text-content { font-size: 14px; line-height: 1.7; color: var(--text-primary); word-wrap: break-word; }
@@ -420,4 +432,10 @@
   .markdown :global(th) { background: var(--bg-inset); font-weight: 600; }
   .markdown :global(img) { max-width: 100%; border-radius: var(--radius-sm); }
   .markdown :global(strong) { font-weight: 600; }
+  .message.compact { padding: 9px 10px; }
+  .compact .message-header { gap: 6px; margin-bottom: 6px; }
+  .compact .role-icon { width: 18px; height: 18px; font-size: 10px; }
+  .compact .role-label { font-size: 11px; }
+  .compact .timestamp { font-size: 10px; }
+  .compact .text-content { font-size: 12px; line-height: 1.55; }
 </style>

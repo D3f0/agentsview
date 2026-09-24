@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -20,6 +21,7 @@ import (
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/money"
 	pricingpkg "go.kenn.io/agentsview/internal/pricing"
+	"go.kenn.io/agentsview/internal/storage"
 )
 
 func (s *Sync) syncModelPricing(ctx context.Context) error {
@@ -136,7 +138,7 @@ func scanDuckGenAIPricing(
 		&document.Version, &document.SourceRef, &document.Source,
 		&document.Data, &document.UpdatedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -593,10 +595,9 @@ func (s *Sync) loadIdentityPublicationScope(
 		observations = filterIdentityScope(
 			observations, s.projects, s.excludeProjects,
 		)
-		snapshots, err =
-			s.local.ListPublishableSessionProjectIdentitySnapshots(
-				ctx, nil, s.projects, s.excludeProjects,
-			)
+		snapshots, err = s.local.ListPublishableSessionProjectIdentitySnapshots(
+			ctx, nil, s.projects, s.excludeProjects,
+		)
 		if err != nil {
 			return nil, nil, delta, fmt.Errorf(
 				"loading session project identity snapshots: %w", err,
@@ -604,10 +605,9 @@ func (s *Sync) loadIdentityPublicationScope(
 		}
 	}
 	if len(refreshSessionIDs) > 0 {
-		refreshSnapshots, loadErr :=
-			s.local.ListPublishableSessionProjectIdentitySnapshots(
-				ctx, refreshSessionIDs, s.projects, s.excludeProjects,
-			)
+		refreshSnapshots, loadErr := s.local.ListPublishableSessionProjectIdentitySnapshots(
+			ctx, refreshSessionIDs, s.projects, s.excludeProjects,
+		)
 		if loadErr != nil {
 			return nil, nil, delta, fmt.Errorf(
 				"loading refreshed session project identity snapshots: %w",
@@ -797,7 +797,7 @@ func duckFallbackPricingRows() []db.ModelPricing {
 // so a never-mirrored out-of-scope deletion stays invisible to filtered
 // diagnostics. Work stays bounded by the delta either way.
 func (s *Sync) applyDeletionDelta(
-	ctx context.Context, after, through int64, result *PushResult,
+	ctx context.Context, after, through int64, result *storage.MirrorPushResult,
 ) error {
 	tombstones, err := s.local.LoadSessionDeletionDelta(
 		ctx, after, through, nil, nil,
@@ -1172,7 +1172,7 @@ func (s *Sync) upsertSession(
 ) error {
 	query := `
 		INSERT INTO sessions (
-			id, project, machine, agent,
+			id, project, project_assigned, machine, agent,
 			agent_label, entrypoint, session_kind,
 			first_message, display_name, session_name, started_at, ended_at,
 			message_count, user_message_count,
@@ -1196,7 +1196,7 @@ func (s *Sync) upsertSession(
 			termination_status, secret_leak_count, secrets_rules_version,
 			agentsview_push_fingerprint, source_archive_id
 		) VALUES (
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -1204,6 +1204,7 @@ func (s *Sync) upsertSession(
 	query += `
 		ON CONFLICT(id) DO UPDATE SET
 			project = excluded.project,
+			project_assigned = excluded.project_assigned,
 			machine = excluded.machine,
 			agent = excluded.agent,
 			agent_label = excluded.agent_label,
@@ -1288,7 +1289,7 @@ func sessionInsertArgs(
 	fingerprint string,
 ) []any {
 	return []any{
-		sess.ID, sess.Project,
+		sess.ID, sess.Project, sess.ProjectAssigned,
 		mirroredSessionMachine(sess, fallbackMachine), sess.Agent,
 		sess.AgentLabel, sess.Entrypoint, sess.SessionKind,
 		nilString(sess.FirstMessage), nilString(sess.DisplayName),

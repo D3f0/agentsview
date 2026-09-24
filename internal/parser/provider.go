@@ -209,9 +209,9 @@ type ReconciliationSourceState struct {
 // A provider may ignore state when source resolution promotes a candidate to a
 // different representation, such as a storage shadow.
 type ReconciliationSourceStateProvider interface {
-	ReconciliationSourceState(SourceRef) (ReconciliationSourceState, bool)
+	ReconciliationSourceState(context.Context, SourceRef) (ReconciliationSourceState, bool)
 	ApplyReconciliationSourceState(
-		*SourceRef, ReconciliationSourceState,
+		context.Context, *SourceRef, ReconciliationSourceState,
 	) error
 }
 
@@ -1128,9 +1128,7 @@ const (
 // appended tail and the caller must fall back to a full parse that
 // replaces stored rows. It is provider-agnostic; parser-internal
 // fallbacks (Claude, Codex) are mapped to it at the provider seam.
-var ErrIncrementalNeedsFullParse = fmt.Errorf(
-	"incremental parse: appended lines require a replacing full parse",
-)
+var ErrIncrementalNeedsFullParse = errors.New("incremental parse: appended lines require a replacing full parse")
 
 // ProviderFactories returns one provider factory for every registered agent.
 func ProviderFactories() []ProviderFactory {
@@ -1160,10 +1158,14 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newImportOnlyProviderFactory(def)
 	case AgentCommandCode:
 		return newCommandCodeProviderFactory(def)
+	case AgentCrush:
+		return newCrushProviderFactory(def)
 	case AgentCodex:
 		return newCodexProviderFactory(def)
 	case AgentTraeX:
 		return newTraeXProviderFactory(def)
+	case AgentAugureCode:
+		return newAugureCodeProviderFactory(def)
 	case AgentCopilot:
 		return newCopilotProviderFactory(def)
 	case AgentCowork:
@@ -1186,6 +1188,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newDevinProviderFactory(def)
 	case AgentHermes:
 		return newHermesProviderFactory(def)
+	case AgentAugureDesktop:
+		return newAugureDesktopProviderFactory(def)
 	case AgentGrok:
 		return newGrokProviderFactory(def)
 	case AgentGoose:
@@ -1272,12 +1276,16 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newWarpProviderFactory(def)
 	case AgentWorkBuddy:
 		return newWorkBuddyProviderFactory(def)
+	case AgentCodeBuddy:
+		return newCodeBuddyProviderFactory(def)
 	case AgentZencoder:
 		return newZencoderProviderFactory(def)
 	case AgentZed:
 		return newZedProviderFactory(def)
 	case AgentRooCode:
 		return newRooCodeProviderFactory(def)
+	case AgentCline:
+		return newClineProviderFactory(def)
 	case AgentCodebuff:
 		return newCodebuffProviderFactory(def)
 	default:

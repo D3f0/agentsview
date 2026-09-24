@@ -3,13 +3,13 @@
  */
 import type {
   PostApiV1SyncParams,
-  PostApiV1SyncRemotes200One,
   RemoteSyncRequest,
   ServiceSessionDetail,
   ServiceSyncInput,
   SyncStatusResponse,
 } from "../models";
 
+import { orvalRequest } from "../../runtime.ts";
 import { orvalFetch } from "../../runtime.ts";
 
 export const getPostApiV1ResyncUrl = () => {
@@ -20,9 +20,9 @@ export const getPostApiV1ResyncUrl = () => {
  * @summary Trigger full resync
  */
 export const postApiV1Resync = async (
-  options?: Parameters<typeof orvalFetch>[1],
-): Promise<string> => {
-  return orvalFetch<string>(getPostApiV1ResyncUrl(), {
+  options?: Parameters<typeof orvalRequest>[1],
+): Promise<Response> => {
+  return orvalRequest<Response>(getPostApiV1ResyncUrl(), {
     ...options,
     method: "POST",
   });
@@ -44,8 +44,19 @@ export const postApiV1SessionsSync = async (
   ): Record<string, string | readonly string[]> => {
     if (!h) return {};
     if (h instanceof Headers) return Object.fromEntries(h.entries());
-    if (Array.isArray(h)) return Object.fromEntries(h);
-    return h;
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(
+          h as Iterable<Iterable<string>>,
+          (entry) => Array.from(entry) as [string, string],
+        ),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
   };
   return orvalFetch<ServiceSessionDetail>(getPostApiV1SessionsSyncUrl(), {
     ...options,
@@ -74,9 +85,9 @@ export const getPostApiV1SyncUrl = (params?: PostApiV1SyncParams) => {
  */
 export const postApiV1Sync = async (
   params?: PostApiV1SyncParams,
-  options?: Parameters<typeof orvalFetch>[1],
-): Promise<string> => {
-  return orvalFetch<string>(getPostApiV1SyncUrl(params), {
+  options?: Parameters<typeof orvalRequest>[1],
+): Promise<Response> => {
+  return orvalRequest<Response>(getPostApiV1SyncUrl(params), {
     ...options,
     method: "POST",
   });
@@ -91,17 +102,28 @@ export const getPostApiV1SyncRemotesUrl = () => {
  */
 export const postApiV1SyncRemotes = async (
   remoteSyncRequest: RemoteSyncRequest,
-  options?: Parameters<typeof orvalFetch>[1],
-): Promise<PostApiV1SyncRemotes200One | string> => {
+  options?: Parameters<typeof orvalRequest>[1],
+): Promise<Response> => {
   const getHeaders = (
     h?: NonNullable<RequestInit["headers"]>,
   ): Record<string, string | readonly string[]> => {
     if (!h) return {};
     if (h instanceof Headers) return Object.fromEntries(h.entries());
-    if (Array.isArray(h)) return Object.fromEntries(h);
-    return h;
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(
+          h as Iterable<Iterable<string>>,
+          (entry) => Array.from(entry) as [string, string],
+        ),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
   };
-  return orvalFetch<PostApiV1SyncRemotes200One | string>(getPostApiV1SyncRemotesUrl(), {
+  return orvalRequest<Response>(getPostApiV1SyncRemotesUrl(), {
     ...options,
     method: "POST",
     headers: { "Content-Type": "application/json", ...getHeaders(options?.headers) },

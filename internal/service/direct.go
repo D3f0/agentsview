@@ -55,6 +55,16 @@ func NewReadOnlyBackend(d db.Store) SessionService {
 
 func (b *directBackend) SupportsRecallQueries() bool { return b.local != nil }
 
+func (b *directBackend) MachineLabels(
+	ctx context.Context,
+) (MachineLabelCatalog, error) {
+	labels, err := b.db.GetMachineLabels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return MachineLabelCatalog(labels), nil
+}
+
 func (b *directBackend) Get(
 	ctx context.Context, id string,
 ) (*SessionDetail, error) {
@@ -70,6 +80,12 @@ func (b *directBackend) FindSessionIDsByPartial(
 	ctx context.Context, partial string, limit int,
 ) ([]string, error) {
 	return b.db.FindSessionIDsByPartial(ctx, partial, limit)
+}
+
+func (b *directBackend) FindSessionIDsByRawSuffix(
+	ctx context.Context, raw string, limit int,
+) ([]string, error) {
+	return b.db.FindSessionIDsByRawSuffix(ctx, raw, limit)
 }
 
 // buildSessionDetail wraps a db.Session with its computed health
@@ -150,7 +166,7 @@ func (b *directBackend) List(
 	}
 	if _, err := db.ParseSortSpec(f.OrderBy); err != nil {
 		return nil, fmt.Errorf(
-			"list: invalid sort %q: %v (valid keys: %s)",
+			"list: invalid sort %q: %w (valid keys: %s)",
 			f.OrderBy, err, strings.Join(db.SortKeys(), ", "),
 		)
 	}
@@ -415,7 +431,7 @@ func (b *directBackend) Sync(
 
 	path := in.Path
 	if path == "" {
-		storedPath := b.local.GetSessionFilePath(in.ID)
+		storedPath := b.local.GetSessionFilePath(ctx, in.ID)
 		if storedPath == "" {
 			return nil, fmt.Errorf(
 				"sync: no file_path recorded for session %q", in.ID,
@@ -428,8 +444,7 @@ func (b *directBackend) Sync(
 		// nothing if the representative trace was deleted while the
 		// conversation lives on in a sibling. The single-session path keeps the
 		// conversation scope and follows it across sibling trace files.
-		if _, _, ok :=
-			parser.SplitVisualStudioCopilotVirtualPath(storedPath); ok {
+		if _, _, ok := parser.SplitVisualStudioCopilotVirtualPath(storedPath); ok {
 			if err := b.engine.SyncSingleSessionContext(
 				ctx, in.ID,
 			); err != nil {
@@ -668,7 +683,10 @@ func (b *directBackend) Search(
 	if req.DateFrom != "" && req.DateTo != "" && req.DateFrom > req.DateTo {
 		return nil, &db.SearchInputError{Msg: "search: date_from must not be after date_to"}
 	}
-	if !b.db.HasFTS() {
+	if !b.db.HasFTS(ctx) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return nil, ErrSearchUnavailable
 	}
 	// Match the HTTP handler's clampLimit semantics: <=0 -> default,
@@ -1156,11 +1174,11 @@ func (b *directBackend) Stats(
 	if err != nil {
 		return nil, err
 	}
-	stats.CodeAttribution = collectCodeAttribution(f, stats)
+	stats.CodeAttribution = collectCodeAttribution(ctx, f, stats)
 	return stats, nil
 }
 
-func collectCodeAttribution(
+func collectCodeAttribution(ctx context.Context,
 	f StatsFilter,
 	stats *SessionStats,
 ) *db.CodeAttribution {
@@ -1168,7 +1186,7 @@ func collectCodeAttribution(
 		return nil
 	}
 	sources := []db.CodeAttributionSource{}
-	if source, ok := collectCursorAttribution(f, stats); ok {
+	if source, ok := collectCursorAttribution(ctx, f, stats); ok {
 		sources = append(sources, source)
 	}
 	if len(sources) == 0 {
@@ -1186,7 +1204,7 @@ func collectCodeAttribution(
 	return &db.CodeAttribution{Sources: sources}
 }
 
-func collectCursorAttribution(
+func collectCursorAttribution(ctx context.Context,
 	f StatsFilter,
 	stats *SessionStats,
 ) (db.CodeAttributionSource, bool) {
@@ -1198,6 +1216,8 @@ func collectCursorAttribution(
 			"unsupported_filter",
 			"Cursor attribution is machine-local and cannot be scoped by project filters",
 		), true
+	case cursorAttributionLoad:
+		// Load attribution for the supported window below.
 	}
 	from, err := time.Parse(time.RFC3339, stats.Window.Since)
 	if err != nil {
@@ -1213,7 +1233,7 @@ func collectCursorAttribution(
 			"failed to parse stats window for Cursor attribution",
 		), true
 	}
-	attr, status, err := parser.LoadCursorAttribution(from, to)
+	attr, status, err := parser.LoadCursorAttribution(ctx, from, to)
 	if err != nil {
 		return cursorAttributionSource(
 			"error",
