@@ -27,7 +27,7 @@ func TestBobProviderDiscoversAndParsesSQLiteTasks(t *testing.T) {
 	require.Len(t, sources, 1)
 	assert.Equal(t, AgentBob, sources[0].Provider)
 	assert.Equal(t, bobDBVirtualPath(dbPath, "task-1"), sources[0].DisplayPath)
-	assert.Equal(t, "workspace", sources[0].ProjectHint)
+	assert.Equal(t, "project", sources[0].ProjectHint)
 
 	fingerprint, err := provider.Fingerprint(context.Background(), sources[0])
 	require.NoError(t, err)
@@ -41,6 +41,7 @@ func TestBobProviderDiscoversAndParsesSQLiteTasks(t *testing.T) {
 	result := outcome.Results[0].Result
 	assert.Equal(t, "bob:task-1", result.Session.ID)
 	assert.Equal(t, "project", result.Session.Project)
+	assert.Equal(t, "/workspace/project", result.Session.Cwd)
 	assert.Equal(t, "How are the UI components built?", result.Session.FirstMessage)
 	assert.Equal(t, "UI architecture", result.Session.SessionName)
 	assert.Equal(t, 2, result.Session.MessageCount)
@@ -57,6 +58,22 @@ func TestBobProviderDiscoversAndParsesSQLiteTasks(t *testing.T) {
 	assert.Equal(t, int64(1_364_024), result.Session.UsageEvents[0].Cost.Microdollars)
 	assert.Equal(t, "exact", result.Session.UsageEvents[0].CostStatus)
 	assert.Equal(t, "bob-reported", result.Session.UsageEvents[0].CostSource)
+}
+
+func TestBobProviderKeepsLegacyTaskDirectorySupport(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "db", bobDBName)
+	require.NoError(t, writeBobLegacySQLiteFixture(dbPath))
+	provider, ok := NewProvider(AgentBob, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+
+	sources, err := provider.Discover(context.Background())
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+	outcome, err := provider.Parse(context.Background(), ParseRequest{Source: sources[0]})
+	require.NoError(t, err)
+	require.Len(t, outcome.Results, 1)
+	assert.Equal(t, "/legacy/workspace", outcome.Results[0].Result.Session.Cwd)
 }
 
 func TestBobProviderClassifiesSQLiteSidecarChange(t *testing.T) {
@@ -86,7 +103,7 @@ func writeBobSQLiteFixture(path string) error {
 	if _, err := db.Exec(`
 		CREATE TABLE tasks (
 			id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,
-			costs TEXT, created_at INTEGER, updated_at INTEGER
+			env TEXT, costs TEXT, created_at INTEGER, updated_at INTEGER
 		);
 		CREATE TABLE messages (
 			id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER
@@ -95,9 +112,10 @@ func writeBobSQLiteFixture(path string) error {
 		return err
 	}
 	if _, err := db.Exec(`INSERT INTO tasks
-		(id, project_id, directory, title, costs, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"task-1", "workspace", "workspace/project", "UI architecture",
+		(id, project_id, directory, title, env, costs, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"task-1", "file:/workspace/project", "", "UI architecture",
+		`{"workspace":"/workspace/project"}`,
 		`{"input":100,"output":40,"cacheRead":20,"cost":1.364024}`,
 		1785767435000, 1785767513000); err != nil {
 		return err
@@ -124,4 +142,31 @@ func writeBobSQLiteFixture(path string) error {
 		"m-1", "task-1", "user", string(userData), 1785767512922,
 		"m-2", "task-1", "assistant", string(assistantData), 1785767512923)
 	return err
+}
+
+func writeBobLegacySQLiteFixture(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		CREATE TABLE tasks (
+			id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,
+			costs TEXT, created_at INTEGER, updated_at INTEGER
+		);
+		CREATE TABLE messages (
+			id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER
+		);
+		INSERT INTO tasks VALUES
+			('legacy-task', 'legacy', '/legacy/workspace', 'Legacy task', '', 1, 2);
+		INSERT INTO messages VALUES
+			('legacy-message', 'legacy-task', 'user', '{"content":"Legacy prompt"}', 1);
+	`); err != nil {
+		return err
+	}
+	return nil
 }

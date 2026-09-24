@@ -15,6 +15,101 @@ The latest published release is
     run `agentsview clickhouse push`, `status`, `serve`, or `service`. Push
     writes the copy; serve queries it. Rename, trash, and similar stay on
     SQLite. See [ClickHouse Sync](/docs/clickhouse-sync/).
+- See recorded reasoning effort beside the model in Claude Code and Codex
+  session headers. Upgrading triggers a full session resync to populate
+  existing rows, which can take time for large archives. Sessions whose source
+  files are gone remain in the archive. (#1677)
+- Browse and search Open Code Review sessions, including review comments,
+  tools, thinking, recorded token usage, and resumed reviews. (#1660)
+- Search Chinese, Japanese, and Korean text in SQLite message content with
+  the optional CJK full-text search sidecar. Japanese kana and Korean Hangul
+  queries preserve character order within each search term; Han-only queries
+  use Chinese word segmentation. Quoted phrases preserve order in all three
+  languages. ASCII-only searches keep English stemming. Install with
+  `make install-cjk-fts`. (#1491)
+- Browse and search Tau sessions, including the active conversation branch,
+  thinking, tools, session names, and recorded token usage. (#1661)
+- Configure session directories and alternate homes in `[agents.<id>]` tables
+  in `config.toml`. Every locally discovered provider accepts `dirs`; Claude
+  Code, Codex, and Pi also accept `homes`, which add each home's native session
+  directories. Settings can add and remove homes for all three providers.
+  `CODEX_HOME` also changes the default Codex session roots. Existing flat
+  directory and home keys convert on startup, while read-only commands leave
+  files unchanged. Shared roots are scanned once. (#1611, #1681)
+
+**Improvements**
+
+- Sync sessions faster by reusing Git repository lookups for repeated working
+  directories within each sync operation. OpenCode and its Kilo and MiMoCode
+  forks, Command Code, and Kiro CLI now respect disabled filesystem discovery
+  during remote imports and capture. These sessions use recorded paths to name
+  projects, so their project names may change when re-parsed. (#1759)
+- Show current **Bob** sessions under their recorded project again when Bob
+  leaves the legacy task `directory` empty. AgentsView now reads the workspace
+  stored in current task metadata and retains the project-ID fallback.
+
+- Expand a **Cursor CLI** session in the sidebar to read the transcripts of
+  the subagents it delegated to. Transcripts stored in a parent session's
+  `subagents` directory are now discovered, synced, and linked to the
+  delegating session, including from S3 roots. Cursor's `Subagent` tool call
+  now counts as a Task call in transcripts and analytics, but it does not yet
+  link to the child session inline. Existing archives re-parse on the next
+  sync to apply the new category. A machine that only runs `agentsview usage`
+  needs one `agentsview sync` to pick up subagent transcripts that already
+  exist.
+
+- Hosted raw-sync operators now get a startup message identifying missing
+  database privileges when raw-sync routes are disabled. Existing least-privilege
+  runtime roles need `SELECT` and `UPDATE` on `raw_ingest_jobs`, in addition to
+  their existing grants. The internal hosted parse-worker foundation adds job
+  leases, source reconstruction, parsing, and retries; server startup and
+  PostgreSQL session projection are still pending. (#1607)
+
+- Hosted replay keeps skill-name inference within recorded transcript paths,
+  without reading worker-local `SKILL.md` files or cached names from local
+  parses. It also accepts Evener captures from either a home directory or a
+  directly configured sessions directory and preserves the parent history
+  needed to avoid duplicate fork messages. (#1607)
+
+- Hosted Codex forks retain parents from other configured directories, avoiding
+  duplicate parent messages during replay. (#1607)
+
+- Discover Pi sessions stored under `PI_CODING_AGENT_DIR` or
+  `PI_CODING_AGENT_SESSION_DIR`, locally and over SSH. Existing `PI_DIR`
+  overrides retain priority. (#1681)
+
+- Local-only incremental sync now waits with visible status when the default
+  daemon is busy, instead of failing with "sync already in progress". Canceling
+  the wait leaves the existing work running. CLI help and startup guides now
+  explain that the daemon and web server share one process. Sync prints the
+  server URL and stop command because the server keeps running afterward. (#1652)
+- Server startup now distinguishes the listening address from the browser URL.
+  CLI help and remote-access docs explain trusted origins, managed Caddy ports,
+  and the loopback bind default. `--public-url` rejects wildcard bind addresses
+  such as `0.0.0.0` and `::` with guidance on which flags to use. (#1653)
+
+- Session exports now include the transcript revision and local modification
+  time, so analytics can distinguish transcript corrections from session
+  activity. JSON and NDJSON add `transcript_revision` and `local_modified_at`
+  to schema v6. Project and pricing changes remain separate evidence; this
+  does not add an incremental change feed.
+- Browse and search Evener v2 sessions, including thinking, tools, session
+  names, fork relationships, and recorded token usage.
+
+- Session exports now identify the logical archive separately from its database
+  generation, so analytics can recognize the same sessions after a full resync.
+  JSON and NDJSON add `archive_id` to session-summary schema v6; pricing,
+  usage, and cursor-reset behavior are unchanged.
+- Generated API bindings now keep concrete collection element types and match
+  the server's JSON v2 behavior. Ordinary Go slices are documented and encoded
+  as arrays, including when their value is nil, so frontend code no longer
+  needs handwritten copies of those response types. The Orval client is split
+  into small files by API tag and schema.
+- Shrink large archives by storing each **tool result** once instead of also
+  copying it into the call summary. Direct readers of
+  `tool_calls.result_content` now find that text in `tool_result_events`.
+  Existing archives resync on the next start, and a PostgreSQL mirror
+  re-pushes every session once.
 
 **Bug fixes**
 

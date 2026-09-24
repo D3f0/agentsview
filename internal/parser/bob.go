@@ -274,17 +274,26 @@ func bobDBDiscoverSources(root string) []multiSessionMatch {
 		return nil
 	}
 	defer conn.Close()
-	rows, err := conn.Query(`SELECT id, project_id, created_at, updated_at FROM tasks ORDER BY created_at, id`)
+	taskExprs, err := bobDBTaskLocationExpressions(conn)
+	if err != nil {
+		return nil
+	}
+	rows, err := conn.Query(`SELECT id, project_id, ` + taskExprs.directory + `, ` + taskExprs.env + `, created_at, updated_at FROM tasks ORDER BY created_at, id`)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 	var out []multiSessionMatch
 	for rows.Next() {
-		var id, project string
+		var id, projectID, directory, env string
 		var created, updated int64
-		if err := rows.Scan(&id, &project, &created, &updated); err != nil || id == "" {
+		if err := rows.Scan(&id, &projectID, &directory, &env, &created, &updated); err != nil || id == "" {
 			continue
+		}
+		cwd := bobDBTaskWorkspace(directory, projectID, env)
+		project := ExtractProjectFromCwd(cwd)
+		if project == "" {
+			project = projectID
 		}
 		out = append(out, multiSessionMatch{
 			Path: bobDBVirtualPath(dbPath, id), Container: dbPath, MemberID: id,
@@ -348,8 +357,8 @@ func openBobDB(path string) (*sql.DB, error) {
 }
 
 type bobDBTask struct {
-	ID, Project, Directory, Title, Costs string
-	CreatedAt, UpdatedAt                 int64
+	ID, Project, Directory, Title, Env, Costs string
+	CreatedAt, UpdatedAt                      int64
 }
 
 func bobDBTasks(path string) ([]bobDBTask, error) {
@@ -358,7 +367,11 @@ func bobDBTasks(path string) ([]bobDBTask, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	rows, err := conn.Query(`SELECT id, project_id, directory, title, COALESCE(costs, ''), created_at, updated_at FROM tasks ORDER BY created_at, id`)
+	taskExprs, err := bobDBTaskLocationExpressions(conn)
+	if err != nil {
+		return nil, fmt.Errorf("list Bob tasks: %w", err)
+	}
+	rows, err := conn.Query(`SELECT id, project_id, ` + taskExprs.directory + `, title, ` + taskExprs.env + `, COALESCE(costs, ''), created_at, updated_at FROM tasks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list Bob tasks: %w", err)
 	}
@@ -366,7 +379,7 @@ func bobDBTasks(path string) ([]bobDBTask, error) {
 	var tasks []bobDBTask
 	for rows.Next() {
 		var task bobDBTask
-		if err := rows.Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.Costs, &task.CreatedAt, &task.UpdatedAt); err != nil {
+		if err := rows.Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.Env, &task.Costs, &task.CreatedAt, &task.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan Bob task: %w", err)
 		}
 		tasks = append(tasks, task)
@@ -399,8 +412,12 @@ func bobDBParseMember(src multiSessionSource, req ParseRequest) (*ParseResult, e
 	}
 	defer conn.Close()
 	var task bobDBTask
-	err = conn.QueryRow(`SELECT id, project_id, directory, title, COALESCE(costs, ''), created_at, updated_at FROM tasks WHERE id = ?`, src.MemberID).
-		Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.Costs, &task.CreatedAt, &task.UpdatedAt)
+	taskExprs, err := bobDBTaskLocationExpressions(conn)
+	if err != nil {
+		return nil, err
+	}
+	err = conn.QueryRow(`SELECT id, project_id, `+taskExprs.directory+`, title, `+taskExprs.env+`, COALESCE(costs, ''), created_at, updated_at FROM tasks WHERE id = ?`, src.MemberID).
+		Scan(&task.ID, &task.Project, &task.Directory, &task.Title, &task.Env, &task.Costs, &task.CreatedAt, &task.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -456,12 +473,13 @@ func bobDBParseTaskWithDB(conn *sql.DB, path string, task bobDBTask, machine str
 	if len(messages) == 0 {
 		return nil, nil
 	}
-	project := ExtractProjectFromCwd(task.Directory)
+	cwd := bobDBTaskWorkspace(task.Directory, task.Project, task.Env)
+	project := ExtractProjectFromCwd(cwd)
 	if project == "" {
 		project = task.Project
 	}
 	session := ParsedSession{
-		ID: "bob:" + task.ID, Project: project, Cwd: task.Directory, Machine: machine, Agent: AgentBob,
+		ID: "bob:" + task.ID, Project: project, Cwd: cwd, Machine: machine, Agent: AgentBob,
 		SourceSessionID: task.ID, FirstMessage: first, SessionName: task.Title,
 		StartedAt: time.UnixMilli(task.CreatedAt).UTC(), EndedAt: time.UnixMilli(task.UpdatedAt).UTC(),
 		MessageCount: len(messages), File: FileInfo{Path: bobDBVirtualPath(path, task.ID)},
@@ -479,6 +497,46 @@ func bobDBParseTaskWithDB(conn *sql.DB, path string, task bobDBTask, machine str
 		session.UsageEvents = []ParsedUsageEvent{*event}
 	}
 	return &ParseResult{Session: session, Messages: messages}, nil
+}
+
+type bobDBTaskLocationColumns struct {
+	directory string
+	env       string
+}
+
+func bobDBTaskLocationExpressions(conn *sql.DB) (bobDBTaskLocationColumns, error) {
+	hasDirectory, err := openCodeTableHasColumn(context.Background(), conn, "tasks", "directory")
+	if err != nil {
+		return bobDBTaskLocationColumns{}, err
+	}
+	hasEnv, err := openCodeTableHasColumn(context.Background(), conn, "tasks", "env")
+	if err != nil {
+		return bobDBTaskLocationColumns{}, err
+	}
+	expressions := bobDBTaskLocationColumns{directory: `''`, env: `''`}
+	if hasDirectory {
+		expressions.directory = `COALESCE(directory, '')`
+	}
+	if hasEnv {
+		expressions.env = `COALESCE(env, '')`
+	}
+	return expressions, nil
+}
+
+func bobDBTaskWorkspace(directory, projectID, rawEnv string) string {
+	if directory != "" {
+		return directory
+	}
+	var env struct {
+		Workspace string `json:"workspace"`
+	}
+	if json.Unmarshal([]byte(rawEnv), &env) == nil && env.Workspace != "" {
+		return env.Workspace
+	}
+	if strings.HasPrefix(projectID, "file:") {
+		return strings.TrimPrefix(projectID, "file:")
+	}
+	return ""
 }
 
 func bobDBTaskUsageEvent(task bobDBTask, sessionID string, occurredAt time.Time, messages []ParsedMessage) *ParsedUsageEvent {

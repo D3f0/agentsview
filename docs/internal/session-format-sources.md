@@ -3361,10 +3361,12 @@ schemas keep their existing ordering behavior.
   session files under `.bob/tmp/**/chats/`, and a shared SQLite `bob.db` under
   `.bob/db/`. The database stores task metadata in `tasks` and ordered message
   payloads in `messages`; task sources are surfaced as virtual `bob.db#<task-id>`
-  paths.
+  paths. Reverified 2026-09-22 against Bob 2.1.0 artifacts. Current task rows can
+  leave `directory` empty and store the working directory in `env.workspace`,
+  with a `file:` project ID as a second fallback.
 - **Evidence:** `no-public-source`.
 - **Upstream:** Bob's local persistence implementation and session artifacts were
-  searched 2026-08-03 under the user's `.bob` directory and inspected. No public
+  searched 2026-09-22 under the user's `.bob` directory and inspected. No public
   producer repository or authoritative transcript schema was identified; this
   parser is therefore based on observed files and may require updates when Bob
   changes its storage format.
