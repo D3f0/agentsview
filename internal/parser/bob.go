@@ -310,7 +310,7 @@ func bobDBClassifyPath(root, path string, allowMissing bool) (multiSessionMatch,
 	return classifySQLiteContainerPath(root, path, filepath.Join("db", bobDBName), allowMissing, false, bobDBParseVirtualPath)
 }
 
-func bobDBFindMember(root, taskID string) (multiSessionMatch, bool) {
+func bobDBFindMember(ctx context.Context, root, taskID string) (multiSessionMatch, bool) {
 	dbPath := bobDBPath(root)
 	if dbPath == "" || taskID == "" {
 		return multiSessionMatch{}, false
@@ -321,7 +321,7 @@ func bobDBFindMember(root, taskID string) (multiSessionMatch, bool) {
 	}
 	defer conn.Close()
 	var found string
-	if err := conn.QueryRow(`SELECT id FROM tasks WHERE id = ?`, taskID).Scan(&found); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT id FROM tasks WHERE id = ?`, taskID).Scan(&found); err != nil {
 		return multiSessionMatch{}, false
 	}
 	return multiSessionMatch{Path: bobDBVirtualPath(dbPath, found), Container: dbPath, MemberID: found}, true
@@ -410,8 +410,8 @@ func bobDBParseMember(src multiSessionSource, req ParseRequest) (*ParseResult, e
 	return bobDBParseTaskWithDB(conn, src.Container, task, req.Machine)
 }
 
-func bobDBMemberPresent(src multiSessionSource) bool {
-	_, ok := bobDBFindMember(src.Root, src.MemberID)
+func bobDBMemberPresent(ctx context.Context, src multiSessionSource) bool {
+	_, ok := bobDBFindMember(ctx, src.Root, src.MemberID)
 	return ok
 }
 
