@@ -5024,9 +5024,9 @@ schemas keep their existing ordering behavior.
 - **Evidence:** `no-public-source`.
 - **Upstream:** Bob's local persistence implementation and session artifacts
   were searched 2026-09-22; no public producer repository or authoritative
-  transcript schema was identified. The current application version could not
-  be confirmed on 2026-10-23 because `bob --version` fails under the installed
-  Node runtime.
+  transcript schema was identified. The installed `bob` CLI reports `1.0.6`
+  under Node 22; this CLI version is not mapped to the Bob 2.1.0 JSON artifacts
+  used for the earlier format verification.
 - **Usage and cost:** JSON `bob-shell` messages persist input, output, cached,
   and thoughts token counters. SQLite assistant payloads persist model and
   spend metadata, including input, output, and cache-read values. SQLite task

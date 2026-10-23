@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-10-17
+last_edited: 2026-10-23
 title: Changelog
 description: Release history for AgentsView
 ---
