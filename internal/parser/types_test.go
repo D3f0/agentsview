@@ -535,6 +535,7 @@ func TestRegistryCompleteness(t *testing.T) {
 		AgentCodeBuddy,
 		AgentZencoder,
 		AgentGptme,
+		AgentBob,
 		AgentQoder,
 		AgentQwenPaw,
 		AgentShelley,

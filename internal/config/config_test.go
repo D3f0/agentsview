@@ -488,6 +488,27 @@ func TestDefault_SkipsAiderUntilConfigured(t *testing.T) {
 	assert.False(t, cfg.IsUserConfigured(parser.AgentAider))
 }
 
+func TestDefault_BobRootAndOverride(t *testing.T) {
+	home := canonicalTempDir(t)
+	setTestHome(t, home)
+	t.Setenv("BOB_DIR", "")
+	cfg, err := Default()
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join(home, ".bob")}, cfg.ResolveDirs(parser.AgentBob))
+
+	override := canonicalTempDir(t)
+	t.Setenv("BOB_DIR", override)
+	cfg, err = Default()
+	require.NoError(t, err)
+	cfg.loadEnv()
+	assert.Equal(t, []string{override}, cfg.ResolveDirs(parser.AgentBob))
+
+	legacy := canonicalTempDir(t)
+	t.Setenv("BOB_DIR", "")
+	cfg = loadMinimalWithConfig(t, map[string]any{"bob_dirs": []string{legacy}})
+	assert.Equal(t, []string{legacy}, cfg.ResolveDirs(parser.AgentBob))
+}
+
 func TestDefault_IncludesDevinLocalShareRoots(t *testing.T) {
 	cfg, err := Default()
 	require.NoError(t, err)
