@@ -9,6 +9,9 @@ The latest release is
 
 ## Unreleased
 
+- Browse Bob sessions from project JSON chats and the shared SQLite task
+  database. `BOB_DIR` and `agents.bob.dirs` override the `~/.bob/` default.
+
 - Telemetry now honors `DO_NOT_TRACK` and stays off in CI and non-release
   builds.
 

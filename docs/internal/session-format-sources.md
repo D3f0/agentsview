@@ -5014,6 +5014,34 @@ schemas keep their existing ordering behavior.
   not been observed in a published log and are not rendered.
   `session-index.db` is not read.
 
+## Bob (`bob`)
+
+- **Format:** Bob uses two observed persistence families: project-hash JSON
+  session files under `.bob/tmp/**/chats/` and shared SQLite `.bob/db/bob.db`.
+  JSON artifacts were last verified 2026-09-22 against Bob 2.1.0. The local
+  database was rechecked 2026-10-23: `PRAGMA user_version` reports `11`; `tasks`
+  includes `directory` and `env`, and `messages.data` contains JSON.
+- **Evidence:** `no-public-source`.
+- **Upstream:** Bob's local persistence implementation and session artifacts
+  were searched 2026-09-22; no public producer repository or authoritative
+  transcript schema was identified. The current application version could not
+  be confirmed on 2026-10-23 because `bob --version` fails under the installed
+  Node runtime.
+- **Usage and cost:** JSON `bob-shell` messages persist input, output, cached,
+  and thoughts token counters. SQLite assistant payloads persist model and
+  spend metadata, including input, output, and cache-read values. SQLite task
+  rows also persist aggregate `cost` values alongside token totals. AgentsView
+  normalizes token usage and emits task-level cost as provider-reported
+  monetary usage; message-level costs are not summed because they can be
+  incomplete. The persisted `cost` denomination is based on observed Bob
+  artifacts and is not labeled as Bobcoins.
+- **Agentsview:** `internal/parser/bob.go`, `internal/parser/bob_test.go`, and
+  `internal/parser/bob_sqlite_test.go`. Discovery defaults to `.bob`; `BOB_DIR`
+  or `bob_dirs` can override the root. JSON discovery descends only under
+  `.bob/tmp/` and accepts `session-*.json` files under `chats/`. SQLite reads
+  only `.bob/db/bob.db` in read-only mode; unrelated application state and
+  skills are not parser inputs.
+
 [evener-source-1]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/transcript/transcript.go
 [evener-source-2]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/turn.go
 [evener-source-3]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/llm/types.go
