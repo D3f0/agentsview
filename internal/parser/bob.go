@@ -496,7 +496,7 @@ func bobDBParseTaskWithDB(conn *sql.DB, path string, task bobDBTask, machine str
 	if event := bobDBTaskUsageEvent(task, session.ID, session.EndedAt, messages); event != nil {
 		session.UsageEvents = []ParsedUsageEvent{*event}
 	}
-	return &ParseResult{Session: session, Messages: messages}, nil
+	return &ParseResult{Session: session, Messages: messages, UsageEvents: session.UsageEvents}, nil
 }
 
 type bobDBTaskLocationColumns struct {
@@ -797,6 +797,7 @@ func bobProviderCapabilities() Capabilities {
 			FirstMessage: CapabilitySupported, SessionName: CapabilitySupported,
 			Model: CapabilitySupported, Thinking: CapabilitySupported,
 			ToolCalls: CapabilitySupported, PerMessageTokenUsage: CapabilitySupported,
+			AggregateUsageEvents: CapabilitySupported,
 		},
 	}
 }

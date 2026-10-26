@@ -5037,10 +5037,11 @@ schemas keep their existing ordering behavior.
   artifacts and is not labeled as Bobcoins.
 - **Agentsview:** `internal/parser/bob.go`, `internal/parser/bob_test.go`, and
   `internal/parser/bob_sqlite_test.go`. Discovery defaults to `.bob`; `BOB_DIR`
-  or `bob_dirs` can override the root. JSON discovery descends only under
-  `.bob/tmp/` and accepts `session-*.json` files under `chats/`. SQLite reads
-  only `.bob/db/bob.db` in read-only mode; unrelated application state and
-  skills are not parser inputs.
+  or `bob_dirs` can override the root. SQLite project resolution prefers
+  `tasks.directory`, then `env.workspace`, then a `file:` project identifier.
+  JSON discovery descends only under `.bob/tmp/` and accepts `session-*.json`
+  files under `chats/`. SQLite reads only `.bob/db/bob.db` in read-only mode;
+  unrelated application state and skills are not parser inputs.
 
 [evener-source-1]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/transcript/transcript.go
 [evener-source-2]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/turn.go

@@ -86,3 +86,13 @@ func TestBobProviderMissingSourceReturnsError(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
+
+func TestBobProviderCapabilitiesAdvertiseAggregateUsage(t *testing.T) {
+	provider, ok := NewProvider(AgentBob, ProviderConfig{})
+	require.True(t, ok)
+
+	assert.Equal(
+		t, CapabilitySupported,
+		provider.Capabilities().Content.AggregateUsageEvents,
+	)
+}

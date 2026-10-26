@@ -52,6 +52,11 @@ func TestBobProviderDiscoversAndParsesSQLiteTasks(t *testing.T) {
 	assert.Equal(t, 120, result.Messages[1].ContextTokens)
 	assert.Equal(t, 40, result.Messages[1].OutputTokens)
 	assert.Equal(t, fingerprint.Hash, result.Session.File.Hash)
+	require.Len(t, result.UsageEvents, 1)
+	event := result.UsageEvents[0]
+	assert.Equal(t, "bob:task-1", event.SessionID)
+	require.NotNil(t, event.Cost)
+	assert.Equal(t, int64(1_364_024), event.Cost.Microdollars)
 	require.Len(t, result.Session.UsageEvents, 1)
 	require.NotNil(t, result.Session.UsageEvents[0].Cost)
 	assert.Equal(t, int64(1_364_024), result.Session.UsageEvents[0].Cost.Microdollars)
