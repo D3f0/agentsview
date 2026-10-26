@@ -98,8 +98,8 @@ date is fixed to noon UTC on the day after the corpus's newest session, so
 relative dates and default report windows stay stable when the corpus is reused.
 Transcript timestamps remain unchanged. Its frontend build enables
 `VITE_PROJECT_MAPPING_WORKSPACE=true` to show the opt-in project mapping
-workspace. Some captures use fixed response fixtures to illustrate states such
-as image-cleanup totals, token usage, Recall review, and Git/pull-request
+workspace. Code-block copy and the subagent tree use fixed response fixtures,
+along with image-cleanup totals, token usage, Recall review, and Git/pull-request
 totals. The Outcomes capture intercepts GitHub requests; it does not call GitHub
 or require credentials. Captures hide session IDs because imported IDs can
 contain original machine names. See `playwright.config.ts` and

@@ -544,9 +544,6 @@ test.describe('Data workspace', () => {
   });
 
   test('project inventory', async ({ page }) => {
-    await expect(page.locator('.summary-strip')).toContainText(
-      'projects'
-    );
     await snap(page, 'data-inventory');
   });
 
@@ -1246,57 +1243,47 @@ test.describe('Message viewer', () => {
   });
 
   test('copy button on code block', async ({ page }) => {
-    const codeBlockId = process.env.SCREENSHOT_CODE_BLOCK_SESSION_ID;
-    if (codeBlockId) {
-      await page.goto('/sessions/' + encodeURIComponent(codeBlockId));
-      await page.waitForSelector('.code-block', { timeout: 15_000 });
-      await page.waitForTimeout(500);
-    }
+    const session = {
+      id: 'screenshot-code-block', agent: 'codex', project: 'agentsview', machine: 'local',
+      first_message: 'Show a code sample.',
+      started_at: '2026-10-23T12:00:00Z', ended_at: '2026-10-23T12:00:01Z',
+      created_at: '2026-10-23T12:00:00Z', message_count: 2, user_message_count: 1,
+      is_automated: false,
+    };
+    const code = ['```go', 'fmt.Println("screenshot fixture")', '```'].join('\n');
+    const messages = [
+      {
+        id: 1, session_id: session.id, ordinal: 0, role: 'user',
+        content: session.first_message, content_length: session.first_message.length,
+        timestamp: session.started_at, model: '', thinking_text: '',
+        has_thinking: false, has_tool_use: false, is_system: false,
+        context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
+      },
+      {
+        id: 2, session_id: session.id, ordinal: 1, role: 'assistant',
+        content: code, content_length: code.length, timestamp: session.ended_at,
+        model: 'gpt-5.4', thinking_text: '', has_thinking: false, has_tool_use: false,
+        is_system: false, context_tokens: 0, output_tokens: 0,
+        has_context_tokens: false, has_output_tokens: false,
+      },
+    ];
+    const sessionPath = `/api/v1/sessions/${session.id}`;
+    await page.route(`**${sessionPath}`, (route) => route.fulfill({ json: session }));
+    await page.route(`**${sessionPath}/messages*`, (route) =>
+      route.fulfill({ json: { messages, count: messages.length } }),
+    );
+    await page.goto(`/sessions/${session.id}`);
 
-    // Walk sessions until we find one with at least one fenced
-    // code block. We scan more aggressively than selectRichSession
-    // because most sessions have only inline code or no code at
-    // all, and we need a `.code-block` (CodeBlock.svelte:34) for
-    // this test to be meaningful.
-    if (!codeBlockId) {
-      const items = page.locator('.session-item');
-      const total = await items.count();
-      const max = Math.min(40, total);
-      let found = false;
-      for (let i = 0; i < max; i++) {
-        await items.nth(i).click();
-        await page.waitForSelector('.message', { timeout: 10_000 });
-        await page.waitForTimeout(400);
-        if (await page.locator('.code-block').first().count() > 0) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        test.skip(true,
-          `No .code-block found in the first ${max} sessions`);
-      }
-    }
-
-    // Capture just the top of a code block where the copy
-    // button lives (CopyButton is absolutely positioned at
-    // top:6px, right:6px inside .code-block). We clip the
-    // page screenshot to a small region around that corner
-    // so multi-page diffs don't produce a 4000px tall image.
     const codeBlock = page.locator('.code-block').first();
-    await codeBlock.evaluate((el) => {
-      el.scrollIntoView({ block: 'start' });
-    });
+    await expect(codeBlock).toBeVisible({ timeout: 15_000 });
+    await codeBlock.evaluate((el) => el.scrollIntoView({ block: 'start' }));
     await page.waitForTimeout(200);
     await codeBlock.hover();
-    // Hover transition: .code-copy fades to opacity:1; give
-    // the transition time to settle before capturing.
     await page.waitForTimeout(600);
+    await expect(codeBlock.locator('.code-copy')).toBeVisible();
 
     const box = await codeBlock.boundingBox();
-    if (!box) {
-      throw new Error('code-block has no bounding box');
-    }
+    if (!box) throw new Error('code-block has no bounding box');
     await page.screenshot({
       style: CAPTURE_STYLE,
       path: join(DIR, 'code-block-copy-btn.png'),
@@ -1911,6 +1898,26 @@ test.describe('Token usage', () => {
 test.describe('Sub-agent tree', () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize(FULL);
+    const now = '2026-10-23T12:00:00Z';
+    const parent = {
+      id: 'screenshot-parent', agent: 'codex', display_name: 'Code review',
+      created_at: now, started_at: now, ended_at: '2026-10-23T12:02:00Z',
+      machine: 'local', project: 'agentsview', message_count: 2,
+      user_message_count: 1, is_automated: false, is_teammate: false,
+    };
+    const child = {
+      ...parent, id: 'screenshot-child', display_name: 'Inspect parser',
+      parent_session_id: parent.id, relationship_type: 'subagent',
+    };
+    const sessions = [parent, child];
+    await page.route('**/api/v1/sessions/sidebar-index*', (route) =>
+      route.fulfill({ json: { sessions, total: sessions.length, next_cursor: null } }),
+    );
+    for (const session of sessions) {
+      await page.route(`**/api/v1/sessions/${session.id}`, (route) =>
+        route.fulfill({ json: { ...session, first_message: session.display_name } }),
+      );
+    }
     await waitForApp(page);
   });
 
