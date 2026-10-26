@@ -157,7 +157,6 @@ else
   echo "Warning: no message with tool output found; formatted tool-output screenshot may fail"
 fi
 
-
 # Copy screenshot pipeline files
 cp -r "$ROOT/screenshots/" "$CONTEXT/screenshots/"
 cp "$ROOT/screenshots/Dockerfile" "$CONTEXT/Dockerfile"
