@@ -447,10 +447,10 @@ func TestExtractDBSanitizesScreenshotText(t *testing.T) {
 	_, err = conn.ExecContext(t.Context(), `
 		INSERT INTO sessions
 			(id, project, created_at, started_at, message_count,
-			 user_message_count, session_name, first_message, cwd, file_path,
-			 git_branch)
-		VALUES ('safe-session', 'agentsview', ?, '', 2, 1, ?, ?, ?, ?, ?)`,
-		ts, marker+" session title", marker+" user prompt",
+			 user_message_count, session_name, display_name, first_message, cwd,
+			 file_path, git_branch)
+		VALUES ('safe-session', 'agentsview', ?, '', 2, 1, ?, ?, ?, ?, ?, ?)`,
+		ts, marker+" session title", marker+" display name", marker+" user prompt",
 		"/workspace/"+marker, "/workspace/"+marker+"/chat.jsonl", marker+"-branch",
 	)
 	require.NoError(t, err)
@@ -502,12 +502,13 @@ func TestExtractDBSanitizesScreenshotText(t *testing.T) {
 	require.NoError(t, err)
 	defer outConn.Close()
 
-	var sessionName, firstMessage, cwd, filePath, gitBranch string
+	var sessionName, displayName, firstMessage, cwd, filePath, gitBranch string
 	require.NoError(t, outConn.QueryRowContext(t.Context(), `
-		SELECT session_name, first_message, cwd, file_path, git_branch
+		SELECT session_name, display_name, first_message, cwd, file_path, git_branch
 		FROM sessions WHERE id = 'safe-session'`,
-	).Scan(&sessionName, &firstMessage, &cwd, &filePath, &gitBranch))
+	).Scan(&sessionName, &displayName, &firstMessage, &cwd, &filePath, &gitBranch))
 	assert.Equal(t, "Example session 001", sessionName)
+	assert.Equal(t, "Example session 001", displayName)
 	assert.Equal(t, "Review the load-bearing seam in the example implementation and check its blast radius.", firstMessage)
 	assert.Equal(t, "/workspace/example-project", cwd)
 	assert.Equal(t, "/workspace/example-project/session.jsonl", filePath)
@@ -538,7 +539,7 @@ func TestExtractDBSanitizesScreenshotText(t *testing.T) {
 	).Scan(&eventContent, &eventContentLength))
 	assert.Equal(t, "Example tool output for documentation screenshots.", eventContent)
 	assert.Equal(t, len(eventContent), eventContentLength)
-	assert.NotContains(t, sessionName+firstMessage+cwd+filePath+gitBranch+content+thinking+toolPath+skillName+inputJSON+result+eventContent, marker)
+	assert.NotContains(t, sessionName+displayName+firstMessage+cwd+filePath+gitBranch+content+thinking+toolPath+skillName+inputJSON+result+eventContent, marker)
 }
 
 // TestExtractDBKeepsOnlyRootTrees exercises the screenshot fixture's sidebar

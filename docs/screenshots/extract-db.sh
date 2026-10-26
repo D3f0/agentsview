@@ -323,22 +323,22 @@ UPDATE sessions SET machine = 'dev-laptop';
 -- fixture values before the copy enters the Docker build context.
 WITH ordered_sessions AS (
   SELECT id,
-         row_number() OVER (
+         printf('Example session %03d', row_number() OVER (
            ORDER BY COALESCE(NULLIF(started_at, ''), created_at), id
-         ) AS ordinal
+         )) AS label
   FROM sessions
 )
 UPDATE sessions
-SET session_name = (
-      SELECT printf('Example session %03d', ordered_sessions.ordinal)
-      FROM ordered_sessions WHERE ordered_sessions.id = sessions.id
-    ),
+SET session_name = ordered_sessions.label,
+    display_name = ordered_sessions.label,
     first_message = 'Review the load-bearing seam in the example implementation and check its blast radius.',
     cwd = '/workspace/example-project',
     file_path = '/workspace/example-project/session.jsonl',
     git_branch = 'main',
     file_size = 0,
-    file_mtime = 0;
+    file_mtime = 0
+FROM ordered_sessions
+WHERE ordered_sessions.id = sessions.id;
 
 UPDATE messages
 SET content = CASE role
