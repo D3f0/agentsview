@@ -97,13 +97,61 @@ async function selectFirstSession(page: Page) {
 // Find a session likely to have thinking/tool content
 // by looking for ones with higher message counts
 async function selectRichSession(page: Page) {
-  const items = page.locator('.session-item');
-  const count = await items.count();
-  // Try the 3rd session (index 2) for variety, fall back to first
-  const idx = Math.min(2, count - 1);
-  await items.nth(idx).click();
+  const response = await page.request.get('/api/v1/sessions?limit=1&sort=messages:desc');
+  expect(response.ok()).toBeTruthy();
+  const session = (await response.json()).sessions[0];
+  expect(session, 'capture requires a populated session').toBeDefined();
+  await page.goto(`/sessions/${encodeURIComponent(session.id)}`);
   await page.waitForSelector('.message', { timeout: 10_000 });
   await page.waitForTimeout(1000);
+}
+async function openToolSequenceFixture(page: Page) {
+  const session = {
+    id: 'screenshot-tools', agent: 'codex', project: 'agentsview', machine: 'local',
+    display_name: 'Review example source', first_message: 'Inspect the example source.',
+    started_at: '2026-10-23T12:00:00Z', ended_at: '2026-10-23T12:00:03Z',
+    created_at: '2026-10-23T12:00:00Z', message_count: 4, user_message_count: 1,
+    is_automated: false, transcript_revision: 'screenshot-tools-revision',
+  };
+  const calls = [
+    { tool_use_id: 'example-search', tool_name: 'Grep', category: 'Grep', input_json: '{"pattern":"example","path":"example.go"}', result_content: 'No matches found', result_content_length: 16 },
+    { tool_use_id: 'example-read', tool_name: 'Read', category: 'Read', input_json: '{"path":"example.go"}', result_content: 'package example', result_content_length: 15 },
+  ];
+  const messages = [
+    { ordinal: 0, role: 'user', content: session.first_message, has_tool_use: false },
+    { ordinal: 1, role: 'assistant', content: '', has_tool_use: true, tool_calls: [calls[0]] },
+    { ordinal: 2, role: 'assistant', content: '', has_tool_use: true, tool_calls: [calls[1]] },
+    { ordinal: 3, role: 'assistant', content: 'The example source is ready for review.', has_tool_use: false },
+  ].map((message) => ({
+    id: message.ordinal + 1, session_id: session.id,
+    timestamp: `2026-10-23T12:00:0${message.ordinal}Z`,
+    content_length: message.content.length, model: 'gpt-5.4',
+    thinking_text: '', has_thinking: false, is_system: false,
+    context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
+    ...message,
+  }));
+  const sequenceCalls = calls.map((call, index) => ({
+    ordinal: index + 1, call_index: 0, tool_use_id: call.tool_use_id,
+    call_fingerprint: `example-call-${index}`, tool_name: call.tool_name,
+    outcome: index === 0 ? 'empty' : 'content', repeat: 'none', tool_changed: index > 0,
+    input_preview: call.input_json, input_bytes: call.input_json.length, input_omitted_bytes: 0,
+    result_preview: call.result_content, result_bytes: call.result_content_length,
+    result_omitted_bytes: 0, result_content_unknown: false,
+  }));
+  const sessionPath = `/api/v1/sessions/${session.id}`;
+  await page.route(`**${sessionPath}`, (route) => route.fulfill({ json: session }));
+  await page.route(`**${sessionPath}/messages*`, (route) => route.fulfill({
+    json: { messages, count: messages.length, transcript_revision: session.transcript_revision },
+  }));
+  await page.route(`**${sessionPath}/tool-sequences`, (route) => route.fulfill({ json: {
+    session_id: session.id, transcript_revision: session.transcript_revision,
+    total_tool_calls: 2, total_sequences: 1, total_sequence_calls: 2,
+    omitted_sequences: 0, omitted_calls: 0,
+    sequences: [{ ending: 'recovered', identical: false, near_identical: false,
+      tool_changed: true, total_calls: 2, omitted_calls: 0, calls: sequenceCalls }],
+  } }));
+  await page.goto(`/sessions/${session.id}`);
+  await expect(page.locator('.message').first()).toBeVisible();
 }
 
 // ── Dashboard / Analytics ───────────────────────────────
@@ -224,8 +272,6 @@ test.describe('Dashboard', () => {
   });
 
   test('activity timeline', async ({ page }) => {
-    await page.setViewportSize({ width: 1680, height: FULL.height });
-    await page.waitForTimeout(300);
     const timeline = page.locator('.timeline-container');
     if (await timeline.count() > 0) {
       await timeline.scrollIntoViewIfNeeded();
@@ -238,8 +284,6 @@ test.describe('Dashboard', () => {
   });
 
   test('analytics message roles in percent view', async ({ page }) => {
-    await page.setViewportSize({ width: 1680, height: FULL.height });
-    await page.waitForTimeout(300);
     const timeline = page.locator('.timeline-container');
     await timeline.scrollIntoViewIfNeeded();
     await timeline.getByRole('button', { name: 'Messages', exact: true }).click();
@@ -1184,24 +1228,11 @@ test.describe('Message viewer', () => {
   });
 
   test('tool call groups', async ({ page }) => {
-    await selectRichSession(page);
-
+    await openToolSequenceFixture(page);
     const group = page.locator('.tool-group').first();
-    if (await group.isVisible()) {
-      await snapEl(group, 'tool-groups');
-    } else {
-      const messages = page.locator('.virtual-row');
-      const count = await messages.count();
-      for (let i = 0; i < Math.min(count, 30); i++) {
-        await messages.nth(i).scrollIntoViewIfNeeded();
-        await page.waitForTimeout(150);
-        const tg = page.locator('.tool-group').first();
-        if (await tg.isVisible()) {
-          await snapEl(tg, 'tool-groups');
-          break;
-        }
-      }
-    }
+    await expect(group).toBeVisible();
+    await expect(group.locator('.tool-block')).toHaveCount(2);
+    await snapEl(group, 'tool-groups');
   });
 
   test('compact layout', async ({ page }) => {
@@ -2410,24 +2441,7 @@ test.describe('Session intelligence', () => {
   });
 
   test('observed tool sequences', async ({ page }) => {
-    const response = await page.request.get('/api/v1/sessions?limit=100');
-    expect(response.ok()).toBeTruthy();
-    const sessions: { id: string }[] = (await response.json()).sessions;
-    let sessionId = '';
-    for (const session of sessions) {
-      const sequences = await page.request.get(
-        `/api/v1/sessions/${encodeURIComponent(session.id)}/tool-sequences`
-      );
-      if (!sequences.ok()) continue;
-      const data = await sequences.json();
-      if (data.sequences[0]?.calls.length >= 2) {
-        sessionId = session.id;
-        break;
-      }
-    }
-    expect(sessionId, 'fixture needs a session with observed tool sequences').not.toBe('');
-    await page.goto(`/sessions/${encodeURIComponent(sessionId)}`);
-    await expect(page.locator('.message').first()).toBeVisible({ timeout: 10_000 });
+    await openToolSequenceFixture(page);
     await page.getByTitle('Session health and tool sequences', { exact: true }).click();
     const panel = page.locator('.tool-sequences-panel');
     await expect(panel.locator('.sequence-row').first()).toBeVisible();
