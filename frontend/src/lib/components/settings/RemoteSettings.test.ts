@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { tick } from "svelte";
 
 import { initI18n } from "../../i18n/index.js";
+import { getAuthToken, setAuthToken } from "../../api/runtime.js";
 import { settings } from "../../stores/settings.svelte.js";
 import RemoteSettings from "./RemoteSettings.svelte";
 
@@ -25,6 +26,14 @@ afterEach(() => {
 });
 
 describe("RemoteSettings", () => {
+  it("does not reuse the local server token in the remote connection form", () => {
+    setAuthToken("local-api-token");
+    const { getByLabelText } = render(RemoteSettings);
+
+    const tokenInput = getByLabelText("Auth Token") as HTMLInputElement;
+    expect(tokenInput.value).toBe("");
+    expect(getAuthToken()).toBe("local-api-token");
+  });
   it("shows the requested authentication state while saving", async () => {
     let releaseSave!: () => void;
     const saveSpy = vi.spyOn(settings, "save").mockImplementation(async (patch) => {
