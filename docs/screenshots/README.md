@@ -23,11 +23,13 @@ copy, the filtered database, and the Docker build. For a large archive, prepare
 the corpus on a machine with enough space and use that smaller database as
 `SOURCE_DB` on capture machines.
 
-The extractor keeps local transcripts from approved public projects in the
-newest 60-day session window. Override the window with
-`SCREENSHOT_HISTORY_DAYS`. It replaces the current home directory with `~` and
-excludes sessions containing private terms or original remote-machine names. The
-runner uses example machine names for remote screenshots. It reads
+The extractor keeps sessions from approved public projects in the newest 60-day
+window. Before Docker receives the copy, it replaces session labels, transcript
+and thinking text, tool inputs/results, and local paths with generic examples.
+Message roles, timestamps, tool-call structure, and aggregate metrics remain so
+the UI captures stay populated. It also redacts the source home directory and
+excludes sessions containing private terms or original remote-machine names.
+The runner uses example machine names for remote screenshots. It reads
 `~/.config/agentsview-docs/screenshot-blocked-terms.txt` and
 `~/.config/kenn/private-terms.txt` by default. Override these paths with
 `SCREENSHOT_BLOCKED_TERMS_FILE` and `KENN_PRIVATE_TERMS_FILE`, or add terms with

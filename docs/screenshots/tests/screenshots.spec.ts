@@ -18,10 +18,11 @@ test.beforeEach(async ({ page }) => {
   }
 });
 
-async function snap(page: Page, name: string) {
+async function snap(page: Page, name: string, fullPage = false) {
   await page.evaluate(() => document.fonts.ready);
   await page.screenshot({
     animations: 'disabled',
+    fullPage,
     style: CAPTURE_STYLE,
     path: join(DIR, `${name}.png`),
     type: 'png',
@@ -223,6 +224,8 @@ test.describe('Dashboard', () => {
   });
 
   test('activity timeline', async ({ page }) => {
+    await page.setViewportSize({ width: 1680, height: FULL.height });
+    await page.waitForTimeout(300);
     const timeline = page.locator('.timeline-container');
     if (await timeline.count() > 0) {
       await timeline.scrollIntoViewIfNeeded();
@@ -235,6 +238,8 @@ test.describe('Dashboard', () => {
   });
 
   test('analytics message roles in percent view', async ({ page }) => {
+    await page.setViewportSize({ width: 1680, height: FULL.height });
+    await page.waitForTimeout(300);
     const timeline = page.locator('.timeline-container');
     await timeline.scrollIntoViewIfNeeded();
     await timeline.getByRole('button', { name: 'Messages', exact: true }).click();
@@ -829,9 +834,9 @@ test.describe('Session browser', () => {
       await filterBtn.click();
       await page.waitForTimeout(300);
 
-      // Select "Min Prompts 10" filter
+      // Select the lowest Min Prompts threshold so the result list stays populated.
       const minPrompts = page.getByRole('button', {
-        name: '10',
+        name: '2',
         exact: true,
       });
       if (await minPrompts.count() > 0) {
@@ -848,6 +853,7 @@ test.describe('Session browser', () => {
         await page.waitForTimeout(300);
       }
 
+      await expect(page.locator('.session-item').first()).toBeVisible();
       await snap(page, 'session-filters-active');
 
       // Clean up
@@ -1344,6 +1350,14 @@ test.describe('Command palette', () => {
     );
     await expect(setup).toContainText('[vector]');
     await expect(setup).toContainText('agentsview embeddings build');
+    const paletteShell = palette.locator('.palette');
+    await paletteShell.evaluate((el) => {
+      const shell = el as HTMLElement;
+      shell.style.maxHeight = 'none';
+      shell.style.overflow = 'visible';
+      const results = shell.querySelector<HTMLElement>('.palette-results');
+      if (results) results.style.overflow = 'visible';
+    });
     await snapEl(setup, 'semantic-search-setup');
   });
 
@@ -1667,6 +1681,8 @@ test.describe('Settings', () => {
     await remoteSection.scrollIntoViewIfNeeded();
     await page.waitForTimeout(500);
 
+    await expect(remoteSection.locator('#remote-url')).toHaveValue('');
+    await expect(remoteSection.locator('#remote-token')).toHaveValue('');
     await snapEl(remoteSection, 'settings-remote');
   });
 
@@ -1909,7 +1925,13 @@ test.describe('Sub-agent tree', () => {
       ...parent, id: 'screenshot-child', display_name: 'Inspect parser',
       parent_session_id: parent.id, relationship_type: 'subagent',
     };
-    const sessions = [parent, child];
+    const sessions = [
+      parent,
+      child,
+      { ...parent, id: 'screenshot-session-2', display_name: 'Review search filters' },
+      { ...parent, id: 'screenshot-session-3', display_name: 'Check tool results' },
+      { ...parent, id: 'screenshot-session-4', display_name: 'Update documentation' },
+    ];
     await page.route('**/api/v1/sessions/sidebar-index*', (route) =>
       route.fulfill({ json: { sessions, total: sessions.length, next_cursor: null } }),
     );
@@ -1942,8 +1964,10 @@ test.describe('Sub-agent tree', () => {
     }
     expect(found).toBe(true);
 
+    const childLabel = page.getByText('Inspect parser', { exact: true });
+    await expect(childLabel).toBeVisible();
     await treeToggle.first().click();
-    await page.waitForTimeout(500);
+    await expect(childLabel).toBeHidden();
 
     const sidebar = page.locator('.sidebar');
     await snapEl(sidebar, 'subagent-tree');
@@ -2129,14 +2153,9 @@ test.describe('Import conversations', () => {
     );
     await expect(importBtn).toBeVisible({ timeout: 5_000 });
 
-    // Capture a region around the button for context — snap
-    // the header-right section that contains it.
-    const headerRight = page.locator('.header-right');
-    if (await headerRight.count() > 0) {
-      await snapEl(headerRight, 'import-button');
-    } else {
-      await snapEl(importBtn, 'import-button');
-    }
+    const homeButton = page.locator('.header-home');
+    await expect(homeButton).toBeVisible();
+    await snapRange(page, homeButton, importBtn, 'import-button');
   });
 
   test('import modal claude-ai', async ({ page }) => {
@@ -2423,7 +2442,7 @@ test.describe('Usage dashboard', () => {
   });
 
   test('full usage page', async ({ page }) => {
-    await snap(page, 'usage-page');
+    await snap(page, 'usage-page', true);
   });
 
   test('usage summary cards', async ({ page }) => {

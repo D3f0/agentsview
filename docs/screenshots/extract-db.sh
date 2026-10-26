@@ -318,6 +318,75 @@ DELETE FROM local_session_source_baselines;
 -- multi-machine UI remains covered with deterministic example identities.
 UPDATE sessions SET machine = 'dev-laptop';
 
+-- Keep public screenshots independent of local session titles and transcript
+-- text. Preserve the rows and metrics, but replace visible strings with safe
+-- fixture values before the copy enters the Docker build context.
+WITH ordered_sessions AS (
+  SELECT id,
+         row_number() OVER (
+           ORDER BY COALESCE(NULLIF(started_at, ''), created_at), id
+         ) AS ordinal
+  FROM sessions
+)
+UPDATE sessions
+SET session_name = (
+      SELECT printf('Example session %03d', ordered_sessions.ordinal)
+      FROM ordered_sessions WHERE ordered_sessions.id = sessions.id
+    ),
+    first_message = 'Review the load-bearing seam in the example implementation and check its blast radius.',
+    cwd = '/workspace/example-project',
+    file_path = '/workspace/example-project/session.jsonl',
+    git_branch = 'main',
+    file_size = 0,
+    file_mtime = 0;
+
+UPDATE messages
+SET content = CASE role
+      WHEN 'user' THEN 'Review the load-bearing seam in the example implementation and check its blast radius.'
+      WHEN 'assistant' THEN 'The example implementation covers the load-bearing seam; the blast radius stays small.'
+      WHEN 'tool' THEN 'Example tool output for documentation screenshots.'
+      ELSE 'Example message for documentation screenshots.'
+    END,
+    content_length = length(CAST(CASE role
+      WHEN 'user' THEN 'Review the load-bearing seam in the example implementation and check its blast radius.'
+      WHEN 'assistant' THEN 'The example implementation covers the load-bearing seam; the blast radius stays small.'
+      WHEN 'tool' THEN 'Example tool output for documentation screenshots.'
+      ELSE 'Example message for documentation screenshots.'
+    END AS BLOB)),
+    thinking_text = CASE
+      WHEN COALESCE(thinking_text, '') != ''
+      THEN 'Compare the example input and output.'
+      ELSE ''
+    END;
+
+UPDATE tool_calls
+SET file_path = CASE WHEN COALESCE(file_path, '') != '' THEN 'example.go' ELSE file_path END,
+    skill_name = CASE WHEN COALESCE(skill_name, '') != '' THEN 'example-skill' ELSE skill_name END,
+    input_json = CASE WHEN COALESCE(input_json, '') != '' THEN '{"path":"example.go"}' ELSE input_json END,
+    result_content = CASE
+      WHEN COALESCE(result_content, '') != ''
+      THEN 'Example tool output for documentation screenshots.'
+      ELSE result_content
+    END,
+    result_content_length = CASE
+      WHEN COALESCE(result_content, '') != ''
+      THEN length(CAST('Example tool output for documentation screenshots.' AS BLOB))
+      ELSE result_content_length
+    END;
+
+
+UPDATE tool_result_events
+SET content = CASE
+      WHEN COALESCE(content, '') != ''
+      THEN 'Example tool output for documentation screenshots.'
+      ELSE content
+    END,
+    content_length = CASE
+      WHEN COALESCE(content, '') != ''
+      THEN length(CAST('Example tool output for documentation screenshots.' AS BLOB))
+      ELSE content_length
+    END;
+
 -- Redact both plain home paths and encoded Claude project folders.
 UPDATE sessions
 SET first_message = replace(replace(first_message, r.from_text, r.to_text), r.encoded_from_text, '-home-user'),

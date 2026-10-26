@@ -330,8 +330,8 @@ func TestExtractDBRedactsHomePathByDefault(t *testing.T) {
 		 JOIN messages m ON m.session_id = s.id
 		 WHERE s.id = 's_redact'`,
 	).Scan(&firstMessage, &content))
-	assert.Equal(t, "Review work under ~/code/project-a", firstMessage)
-	assert.Equal(t, "Inspect ~/code/project-a/main.go", content)
+	assert.Equal(t, "Review the load-bearing seam in the example implementation and check its blast radius.", firstMessage)
+	assert.Equal(t, "Review the load-bearing seam in the example implementation and check its blast radius.", content)
 	assert.NotContains(t, firstMessage, homePath)
 	assert.NotContains(t, content, homePath)
 
@@ -341,8 +341,10 @@ func TestExtractDBRedactsHomePathByDefault(t *testing.T) {
 		 JOIN messages m ON m.session_id = s.id
 		 WHERE s.id = 's_encoded'`,
 	).Scan(&firstMessage, &content))
-	assert.Equal(t, "Open -home-user-code-project-a", firstMessage)
-	assert.Equal(t, "Inspect ~/.claude/projects/-home-user-code-project-a/session.jsonl", content)
+	assert.Equal(t, "Review the load-bearing seam in the example implementation and check its blast radius.", firstMessage)
+	assert.Equal(t, "Review the load-bearing seam in the example implementation and check its blast radius.", content)
+	assert.NotContains(t, firstMessage, "-home-local-user-name")
+	assert.NotContains(t, content, "-home-local-user-name")
 }
 
 func TestExtractDBUsesPrivateTermsFileWithScreenshotFileOverride(t *testing.T) {
@@ -420,6 +422,123 @@ func TestExtractDBUsesPrivateTermsFileWithScreenshotFileOverride(t *testing.T) {
 	require.NoError(t, rows.Err())
 
 	assert.Equal(t, []string{"s_keep"}, ids)
+}
+
+func TestExtractDBSanitizesScreenshotText(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 CLI not available")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	tempDir := t.TempDir()
+	srcPath := filepath.Join(tempDir, "source.db")
+	d, err := avdb.Open(t.Context(), srcPath)
+	require.NoError(t, err)
+	require.NoError(t, d.Close())
+
+	conn, err := sql.Open("sqlite3", srcPath)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	const ts = "2026-10-01T12:00:00.000Z"
+	const marker = "screenshot-redaction-marker"
+	_, err = conn.ExecContext(t.Context(), `
+		INSERT INTO sessions
+			(id, project, created_at, started_at, message_count,
+			 user_message_count, session_name, first_message, cwd, file_path,
+			 git_branch)
+		VALUES ('safe-session', 'agentsview', ?, '', 2, 1, ?, ?, ?, ?, ?)`,
+		ts, marker+" session title", marker+" user prompt",
+		"/workspace/"+marker, "/workspace/"+marker+"/chat.jsonl", marker+"-branch",
+	)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(t.Context(), `
+		INSERT INTO messages
+			(session_id, ordinal, role, content, thinking_text, has_thinking)
+		VALUES
+			('safe-session', 0, 'user', ?, '', 0),
+			('safe-session', 1, 'assistant', ?, ?, 1)`,
+		marker+" message", marker+" assistant response", marker+" reasoning",
+	)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(t.Context(), `
+		INSERT INTO tool_calls
+			(message_id, session_id, tool_name, category, file_path, skill_name,
+			 input_json, result_content, result_content_length)
+		VALUES (2, 'safe-session', 'Read', 'read', ?, ?, ?, ?, ?)`,
+		"/workspace/"+marker+"/secret.go", marker+"-skill",
+		`{"path":"/workspace/`+marker+`/secret.go","host":"`+marker+`"}`,
+		marker+" tool result", len(marker+" tool result"),
+	)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(t.Context(), `
+		INSERT INTO tool_result_events
+			(session_id, tool_call_message_ordinal, call_index, tool_use_id,
+			 source, status, content, content_length, event_index)
+		VALUES ('safe-session', 1, 0, 'call-1', 'bob', 'success', ?, ?, 0)`,
+		marker+" persisted event", len(marker+" persisted event"),
+	)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(t.Context(), "PRAGMA wal_checkpoint(TRUNCATE)")
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+
+	outPath := filepath.Join(tempDir, "out.db")
+	scriptPath := filepath.Join("..", "docs", "screenshots", "extract-db.sh")
+	cmd := exec.CommandContext(t.Context(), "bash", scriptPath, srcPath, outPath)
+	cmd.Env = append(
+		filteredEnv("SCREENSHOT_BLOCKED_TERMS_FILE", "KENN_PRIVATE_TERMS_FILE"),
+		"HOME="+filepath.Join(tempDir, "home"),
+		"SCREENSHOT_BLOCKED_TERMS=",
+		"SCREENSHOT_BLOCKED_TERMS_FILE="+filepath.Join(tempDir, "absent.txt"),
+		"KENN_PRIVATE_TERMS_FILE="+filepath.Join(tempDir, "absent-private.txt"),
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "extract-db.sh failed: %s", out)
+
+	outConn, err := sql.Open("sqlite3", outPath)
+	require.NoError(t, err)
+	defer outConn.Close()
+
+	var sessionName, firstMessage, cwd, filePath, gitBranch string
+	require.NoError(t, outConn.QueryRowContext(t.Context(), `
+		SELECT session_name, first_message, cwd, file_path, git_branch
+		FROM sessions WHERE id = 'safe-session'`,
+	).Scan(&sessionName, &firstMessage, &cwd, &filePath, &gitBranch))
+	assert.Equal(t, "Example session 001", sessionName)
+	assert.Equal(t, "Review the load-bearing seam in the example implementation and check its blast radius.", firstMessage)
+	assert.Equal(t, "/workspace/example-project", cwd)
+	assert.Equal(t, "/workspace/example-project/session.jsonl", filePath)
+	assert.Equal(t, "main", gitBranch)
+
+	var content, thinking string
+	require.NoError(t, outConn.QueryRowContext(t.Context(), `
+		SELECT content, thinking_text FROM messages
+		WHERE session_id = 'safe-session' AND ordinal = 1`,
+	).Scan(&content, &thinking))
+	assert.Equal(t, "The example implementation covers the load-bearing seam; the blast radius stays small.", content)
+	assert.Equal(t, "Compare the example input and output.", thinking)
+
+	var toolPath, skillName, inputJSON, result string
+	require.NoError(t, outConn.QueryRowContext(t.Context(), `
+		SELECT file_path, skill_name, input_json, result_content
+		FROM tool_calls WHERE session_id = 'safe-session'`,
+	).Scan(&toolPath, &skillName, &inputJSON, &result))
+	assert.Equal(t, "example.go", toolPath)
+	assert.Equal(t, "example-skill", skillName)
+	assert.Equal(t, `{"path":"example.go"}`, inputJSON)
+	assert.Equal(t, "Example tool output for documentation screenshots.", result)
+	var eventContent string
+	var eventContentLength int
+	require.NoError(t, outConn.QueryRowContext(t.Context(), `
+		SELECT content, content_length FROM tool_result_events
+		WHERE session_id = 'safe-session'`,
+	).Scan(&eventContent, &eventContentLength))
+	assert.Equal(t, "Example tool output for documentation screenshots.", eventContent)
+	assert.Equal(t, len(eventContent), eventContentLength)
+	assert.NotContains(t, sessionName+firstMessage+cwd+filePath+gitBranch+content+thinking+toolPath+skillName+inputJSON+result+eventContent, marker)
 }
 
 // TestExtractDBKeepsOnlyRootTrees exercises the screenshot fixture's sidebar
