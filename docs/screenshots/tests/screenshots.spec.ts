@@ -1014,18 +1014,47 @@ test.describe('Message viewer', () => {
   });
 
   test('thinking blocks', async ({ page }) => {
-    // Sessions with thinking blocks are rare and never recent, so run.sh
-    // resolves one session id and passes it in; navigate straight there.
-    // Fall back to a rich session when the id is absent (e.g. local runs).
+    // Privacy filtering can exclude every real thinking session. Use a fixed
+    // transcript in that case so the required capture always has content.
     const thinkingId = process.env.SCREENSHOT_THINKING_SESSION_ID;
     if (thinkingId) {
       await page.goto('/sessions/' + encodeURIComponent(thinkingId));
-      await page.waitForSelector('.message', { timeout: 15_000 });
-      await page.waitForTimeout(500);
     } else {
-      await selectRichSession(page);
-      await page.waitForTimeout(500);
+      const session = {
+        id: 'screenshot-thinking', agent: 'codex', project: 'agentsview', machine: 'local',
+        display_name: 'Example session', first_message: 'Show an example response.',
+        started_at: '2026-10-23T12:00:00Z', ended_at: '2026-10-23T12:00:01Z',
+        created_at: '2026-10-23T12:00:00Z', message_count: 2, user_message_count: 1,
+        is_automated: false,
+      };
+      const thinkingText = 'Compare the example input and output.';
+      const responseText = 'The example is ready.';
+      const content = `[Thinking]\n${thinkingText}\n[/Thinking]\n\n${responseText}`;
+      const messages = [
+        {
+          id: 1, session_id: session.id, ordinal: 0, role: 'user',
+          content: session.first_message, content_length: session.first_message.length,
+          timestamp: session.started_at, model: '', thinking_text: '',
+          has_thinking: false, has_tool_use: false, is_system: false,
+          context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
+        },
+        {
+          id: 2, session_id: session.id, ordinal: 1, role: 'assistant',
+          content, content_length: content.length,
+          timestamp: session.ended_at, model: 'gpt-5.4', thinking_text: thinkingText,
+          has_thinking: true, has_tool_use: false, is_system: false,
+          context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
+        },
+      ];
+      const sessionPath = `/api/v1/sessions/${session.id}`;
+      await page.route(`**${sessionPath}`, (route) => route.fulfill({ json: session }));
+      await page.route(`**${sessionPath}/messages*`, (route) =>
+        route.fulfill({ json: { messages, count: messages.length } }),
+      );
+      await page.goto(`/sessions/${session.id}`);
     }
+    await page.waitForSelector('.message', { timeout: 15_000 });
+    await page.waitForTimeout(500);
 
     // Surface a thinking block, scrolling the virtualized transcript if needed.
     let thinking = page.locator('.thinking-block').first();
@@ -1039,19 +1068,16 @@ test.describe('Message viewer', () => {
       }
       thinking = page.locator('.thinking-block').first();
     }
+    await expect(thinking).toBeVisible();
 
-    if (await thinking.count() > 0) {
-      // Thinking blocks are collapsed by default; expand so the snap shows
-      // the reasoning text and not just the header strip.
-      const header = thinking.locator('.thinking-header');
-      if (await header.count() > 0) {
-        await header.click();
-        await page.waitForTimeout(300);
-      }
-      await thinking.scrollIntoViewIfNeeded();
-      await page.waitForTimeout(200);
-      await snapEl(thinking, 'thinking-blocks');
-    }
+    // Thinking blocks are collapsed by default; expand so the snap shows text.
+    const header = thinking.locator('.thinking-header');
+    await expect(header).toBeVisible();
+    await header.click();
+    await expect(thinking).toContainText('Compare the example input and output.');
+    await thinking.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(200);
+    await snapEl(thinking, 'thinking-blocks');
   });
 
   test('tool blocks', async ({ page }) => {
@@ -1965,10 +1991,18 @@ test.describe('Sub-agent tree', () => {
     expect(found).toBe(true);
 
     const childLabel = page.getByText('Inspect parser', { exact: true });
-    await expect(childLabel).toBeVisible();
+    await expect(childLabel).toBeHidden();
     await treeToggle.first().click();
+    await expect(childLabel).toBeVisible();
+
+    const subagentToggle = page.locator('.sub-group-header');
+    await expect(subagentToggle).toHaveCount(1);
+    await subagentToggle.click();
     await expect(childLabel).toBeHidden();
 
+    // Leave the hierarchy expanded in the capture.
+    await subagentToggle.click();
+    await expect(childLabel).toBeVisible();
     const sidebar = page.locator('.sidebar');
     await snapEl(sidebar, 'subagent-tree');
   });

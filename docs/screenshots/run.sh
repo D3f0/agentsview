@@ -119,7 +119,7 @@ THINKING_SESSION_ID=$(sqlite "$CONTEXT/test-sessions.db" \
 if [ -n "$THINKING_SESSION_ID" ]; then
   echo "Thinking-block session: $THINKING_SESSION_ID"
 else
-  echo "Warning: no session with thinking blocks found; thinking-blocks screenshot may be skipped"
+  echo "No safe thinking session found; the capture will use a fixed transcript"
 fi
 
 # Resolve the exact message whose tool activity includes result content so the

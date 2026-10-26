@@ -100,12 +100,14 @@ date is fixed to noon UTC on the day after the corpus's newest session, so
 relative dates and default report windows stay stable when the corpus is reused.
 Transcript timestamps remain unchanged. Its frontend build enables
 `VITE_PROJECT_MAPPING_WORKSPACE=true` to show the opt-in project mapping
-workspace. Code-block copy and subagent-tree captures use fixed responses, as do
-image-cleanup totals, token usage, Recall review, and Git/pull-request totals.
-The Outcomes capture intercepts GitHub requests; it does not call GitHub
-or require credentials. Captures hide session IDs because imported IDs can
-contain original machine names. See `playwright.config.ts` and
-`tests/screenshots.spec.ts` for the exact setup.
+workspace. Code-block copy and subagent-tree captures use fixed responses. The
+thinking-block capture uses a fixed transcript when privacy filtering leaves no
+safe session. Image-cleanup totals, token usage, Recall review, and
+Git/pull-request totals also use fixed responses. The Outcomes capture
+intercepts GitHub requests; it does not call GitHub or require credentials.
+Captures hide session IDs because imported IDs can contain original machine
+names. See `playwright.config.ts` and `tests/screenshots.spec.ts` for the exact
+setup.
 
 ## How can colleagues repeat a capture?
 
