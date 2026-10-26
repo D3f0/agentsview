@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-10-23
+last_edited: 2026-10-26
 title: Changelog
 description: Release history for AgentsView
 ---
@@ -12,6 +12,8 @@ The latest release is
 - Browse Bob sessions from project JSON chats and the shared SQLite task
   database, including task-reported costs in usage reports. `BOB_DIR` and
   `bob_dirs` override the `~/.bob/` default.
+
+- The remote connection form no longer pre-fills the local server's auth token.
 
 - Telemetry now honors `DO_NOT_TRACK` and stays off in CI and non-release
   builds.
