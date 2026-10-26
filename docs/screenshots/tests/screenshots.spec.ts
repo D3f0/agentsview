@@ -103,7 +103,7 @@ async function selectFirstSession(page: Page) {
 // Find a session likely to have thinking/tool content
 // by looking for ones with higher message counts
 async function selectRichSession(page: Page) {
-  const response = await page.request.get('/api/v1/sessions?limit=1&sort=messages:desc');
+  const response = await page.request.get('/api/v1/sessions?limit=1&order_by=messages:desc');
   expect(response.ok()).toBeTruthy();
   const session = (await response.json()).sessions[0];
   expect(session, 'capture requires a populated session').toBeDefined();
