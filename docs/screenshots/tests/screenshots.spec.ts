@@ -13,6 +13,12 @@ const CAPTURE_STYLE = '.session-id { visibility: hidden !important; }';
 const PG_BASE_URL = process.env.PG_BASE_URL || '';
 
 test.beforeEach(async ({ page }) => {
+  // Local settings include the ephemeral server token. Keep it out of every
+  // screenshot without changing the release application's token behavior.
+  await page.route('**/api/v1/settings', async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), auth_token: '' } });
+  });
   if (process.env.SCREENSHOT_NOW) {
     await page.clock.setFixedTime(new Date(process.env.SCREENSHOT_NOW));
   }
@@ -1058,60 +1064,43 @@ test.describe('Message viewer', () => {
   });
 
   test('thinking blocks', async ({ page }) => {
-    // Privacy filtering can exclude every real thinking session. Use a fixed
-    // transcript in that case so the required capture always has content.
-    const thinkingId = process.env.SCREENSHOT_THINKING_SESSION_ID;
-    if (thinkingId) {
-      await page.goto('/sessions/' + encodeURIComponent(thinkingId));
-    } else {
-      const session = {
-        id: 'screenshot-thinking', agent: 'codex', project: 'agentsview', machine: 'local',
-        display_name: 'Example session', first_message: 'Show an example response.',
-        started_at: '2026-10-23T12:00:00Z', ended_at: '2026-10-23T12:00:01Z',
-        created_at: '2026-10-23T12:00:00Z', message_count: 2, user_message_count: 1,
-        is_automated: false,
-      };
-      const thinkingText = 'Compare the example input and output.';
-      const responseText = 'The example is ready.';
-      const content = `[Thinking]\n${thinkingText}\n[/Thinking]\n\n${responseText}`;
-      const messages = [
-        {
-          id: 1, session_id: session.id, ordinal: 0, role: 'user',
-          content: session.first_message, content_length: session.first_message.length,
-          timestamp: session.started_at, model: '', thinking_text: '',
-          has_thinking: false, has_tool_use: false, is_system: false,
-          context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
-        },
-        {
-          id: 2, session_id: session.id, ordinal: 1, role: 'assistant',
-          content, content_length: content.length,
-          timestamp: session.ended_at, model: 'gpt-5.4', thinking_text: thinkingText,
-          has_thinking: true, has_tool_use: false, is_system: false,
-          context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
-        },
-      ];
-      const sessionPath = `/api/v1/sessions/${session.id}`;
-      await page.route(`**${sessionPath}`, (route) => route.fulfill({ json: session }));
-      await page.route(`**${sessionPath}/messages*`, (route) =>
-        route.fulfill({ json: { messages, count: messages.length } }),
-      );
-      await page.goto(`/sessions/${session.id}`);
-    }
+    // The sanitized archive does not preserve serialized thinking markers.
+    const session = {
+      id: 'screenshot-thinking', agent: 'codex', project: 'agentsview', machine: 'local',
+      display_name: 'Example session', first_message: 'Show an example response.',
+      started_at: '2026-10-23T12:00:00Z', ended_at: '2026-10-23T12:00:01Z',
+      created_at: '2026-10-23T12:00:00Z', message_count: 2, user_message_count: 1,
+      is_automated: false,
+    };
+    const thinkingText = 'Compare the example input and output.';
+    const responseText = 'The example is ready.';
+    const content = `[Thinking]\n${thinkingText}\n[/Thinking]\n\n${responseText}`;
+    const messages = [
+      {
+        id: 1, session_id: session.id, ordinal: 0, role: 'user',
+        content: session.first_message, content_length: session.first_message.length,
+        timestamp: session.started_at, model: '', thinking_text: '',
+        has_thinking: false, has_tool_use: false, is_system: false,
+        context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
+      },
+      {
+        id: 2, session_id: session.id, ordinal: 1, role: 'assistant',
+        content, content_length: content.length,
+        timestamp: session.ended_at, model: 'gpt-5.4', thinking_text: thinkingText,
+        has_thinking: true, has_tool_use: false, is_system: false,
+        context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
+      },
+    ];
+    const sessionPath = `/api/v1/sessions/${session.id}`;
+    await page.route(`**${sessionPath}`, (route) => route.fulfill({ json: session }));
+    await page.route(`**${sessionPath}/messages*`, (route) =>
+      route.fulfill({ json: { messages, count: messages.length } }),
+    );
+    await page.goto(`/sessions/${session.id}`);
     await page.waitForSelector('.message', { timeout: 15_000 });
     await page.waitForTimeout(500);
+    const thinking = page.locator('.thinking-block').first();
 
-    // Surface a thinking block, scrolling the virtualized transcript if needed.
-    let thinking = page.locator('.thinking-block').first();
-    if (await thinking.count() === 0) {
-      const rows = page.locator('.message, .virtual-row');
-      const rowCount = await rows.count();
-      for (let i = 0; i < Math.min(rowCount, 60); i++) {
-        await rows.nth(i).scrollIntoViewIfNeeded();
-        await page.waitForTimeout(100);
-        if (await page.locator('.thinking-block').count() > 0) break;
-      }
-      thinking = page.locator('.thinking-block').first();
-    }
     await expect(thinking).toBeVisible();
 
     // Thinking blocks are collapsed by default; expand so the snap shows text.

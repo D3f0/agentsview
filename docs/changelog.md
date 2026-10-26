@@ -13,8 +13,6 @@ The latest release is
   database, including task-reported costs in usage reports. `BOB_DIR` and
   `bob_dirs` override the `~/.bob/` default.
 
-- The remote connection form no longer pre-fills the local server's auth token.
-
 - Telemetry now honors `DO_NOT_TRACK` and stays off in CI and non-release
   builds.
 

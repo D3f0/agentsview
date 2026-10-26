@@ -106,22 +106,6 @@ if [[ -z "$SCREENSHOT_NOW" ]]; then
   exit 1
 fi
 
-# Resolve a session that contains thinking blocks. Such sessions are rare
-# and never recent, so the thinking-blocks screenshot navigates straight to
-# this id rather than hunting through thousands of list rows. Pick the
-# session with the most thinking messages for a representative capture.
-THINKING_SESSION_ID=$(sqlite "$CONTEXT/test-sessions.db" \
-  "SELECT session_id FROM messages
-   WHERE COALESCE(thinking_text, '') != ''
-   GROUP BY session_id
-   ORDER BY COUNT(*) DESC, session_id
-   LIMIT 1" 2>/dev/null || true)
-if [ -n "$THINKING_SESSION_ID" ]; then
-  echo "Thinking-block session: $THINKING_SESSION_ID"
-else
-  echo "No safe thinking session found; the capture will use a fixed transcript"
-fi
-
 # Resolve the exact message whose tool activity includes result content so the
 # raw/formatted output screenshot can navigate through the virtualized transcript
 # without depending on whichever messages are initially mounted. Prefer output
@@ -181,7 +165,6 @@ echo "Running screenshot capture..."
 docker run --rm \
   -v "$OUTPUT_DIR:/output" \
   -e SCREENSHOT_NOW="$SCREENSHOT_NOW" \
-  -e SCREENSHOT_THINKING_SESSION_ID="$THINKING_SESSION_ID" \
   -e SCREENSHOT_TOOL_OUTPUT_SESSION_ID="$TOOL_OUTPUT_SESSION_ID" \
   -e SCREENSHOT_TOOL_OUTPUT_MESSAGE_ORDINAL="$TOOL_OUTPUT_MESSAGE_ORDINAL" \
   "$IMAGE_NAME" "$@"
