@@ -1,0 +1,124 @@
+name: Bob macOS release artifacts
+
+on:
+  push:
+    branches: [upstream-v0.46.1-bob]
+    paths:
+      - '.github/workflows/bob-macos-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bob-macos-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: v0.47.0-bob.2.1
+  PACKAGE_VERSION: 0.47.0+bob.2.1
+  GOFLAGS: -trimpath
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.12.1'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Build native ARM64 release binary
+        env:
+          CGO_ENABLED: '1'
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+          DO_NOT_TRACK: '1'
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(go env GOHOSTARCH)" = arm64
+          make release-darwin-arm64 VERSION="$RELEASE_TAG" \
+            POSTHOG_PROJECT_KEY= DISTRIBUTION=d3f0
+          mv dist/agentsview-darwin-arm64 dist/agentsview
+          codesign --force --sign - dist/agentsview
+          codesign --verify --strict dist/agentsview
+          test "$(lipo -archs dist/agentsview)" = arm64
+          otool -l dist/agentsview > dist/macho-load-commands.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          load_commands = Path("dist/macho-load-commands.txt").read_text()
+          versions = re.findall(r"\bminos\s+(\d+(?:\.\d+)+)", load_commands)
+          assert versions and all(tuple(map(int, version.split("."))) <= (11, 0) for version in versions), versions
+          PY
+          ./dist/agentsview --version
+          mkdir -p artifacts
+          tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_darwin_arm64.tar.gz" \
+            -C dist agentsview
+          python3 scripts/build_wheels.py --version "$PACKAGE_VERSION" \
+            --input-dir artifacts --output-dir artifacts --readme README.md
+
+      - name: Smoke-check packaged wheel on macOS
+        env:
+          DO_NOT_TRACK: '1'
+          AGENTSVIEW_NO_DAEMON: '1'
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/bob-wheel-smoke"
+          "$RUNNER_TEMP/bob-wheel-smoke/bin/pip" install --no-deps \
+            "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-macosx_11_0_arm64.whl"
+          "$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview" --version
+          "$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview" source list bob --json
+          export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
+          CGO_ENABLED=1 go test -tags fts5 ./internal/parser -run Bob -count=1
+          CGO_ENABLED=1 go test -tags fts5 ./internal/sync -run TestBobVersionUpgrade -count=1
+          cd artifacts
+          shasum -a 256 *.tar.gz *.whl > SHA256SUMS-macos-arm64
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: bob-macos-arm64-release
+          path: artifacts/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: bob-macos-arm64-release
+          path: artifacts
+
+      - name: Attach verified macOS artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum --check SHA256SUMS-macos-arm64
+          gh release upload "$RELEASE_TAG" \
+            "agentsview_${PACKAGE_VERSION}_darwin_arm64.tar.gz" \
+            "agentsview-${PACKAGE_VERSION}-py3-none-macosx_11_0_arm64.whl" \
+            SHA256SUMS-macos-arm64 --clobber

@@ -903,6 +903,19 @@ Pre-commit and pre-push hooks via [prek](https://github.com/j178/prek): run
 `make lint-tools` and `make install-hooks` after cloning (requires `prek` 0.5.7
 or newer and `uv`).
 
+### Bob macOS release artifacts
+
+The fork's `bob-macos-release.yml` workflow builds the existing
+`v0.47.0-bob.2.1` tag on a native macOS ARM64 runner. It attaches a signed
+macOS 11-compatible CLI archive, a `0.47.0+bob.2.1` Python wheel, and platform
+checksums to that release after native executable, wheel, and Bob parser checks.
+The signature is ad hoc, not Developer ID notarization. It does not publish to
+PyPI or move the release tag. Run it from the existing Bob branch:
+
+```bash
+gh workflow run bob-macos-release.yml --ref upstream-v0.46.1-bob --repo OWNER/agentsview
+```
+
 ### Shared Go build cache
 
 `make` targets build and test Go code with `-trimpath`. Compiled packages then
