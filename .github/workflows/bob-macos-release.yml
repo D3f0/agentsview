@@ -48,7 +48,7 @@ jobs:
       - name: Build native ARM64 release binary
         env:
           CGO_ENABLED: '1'
-          MACOSX_DEPLOYMENT_TARGET: '11.0'
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
           DO_NOT_TRACK: '1'
         run: |
           set -euo pipefail
@@ -66,14 +66,20 @@ jobs:
           from pathlib import Path
           load_commands = Path("dist/macho-load-commands.txt").read_text()
           versions = re.findall(r"\bminos\s+(\d+(?:\.\d+)+)", load_commands)
-          assert versions and all(tuple(map(int, version.split("."))) <= (11, 0) for version in versions), versions
+          assert versions and all(tuple(map(int, version.split("."))) == (13, 0) for version in versions), versions
           PY
           ./dist/agentsview --version
           mkdir -p artifacts
           tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_darwin_arm64.tar.gz" \
             -C dist agentsview
-          python3 scripts/build_wheels.py --version "$PACKAGE_VERSION" \
-            --input-dir artifacts --output-dir artifacts --readme README.md
+          python3 - <<'PY'
+          import os
+          import runpy
+          from pathlib import Path
+          builder = runpy.run_path("scripts/build_wheels.py")
+          builder["PLATFORM_MAP"]["darwin_arm64"]["wheel_tag"] = "macosx_13_0_arm64"
+          builder["build_all_wheels"](Path("artifacts"), Path("artifacts"), os.environ["PACKAGE_VERSION"], Path("README.md").read_text())
+          PY
 
       - name: Smoke-check packaged wheel on macOS
         env:
@@ -83,7 +89,7 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/bob-wheel-smoke"
           "$RUNNER_TEMP/bob-wheel-smoke/bin/pip" install --no-deps \
-            "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-macosx_11_0_arm64.whl"
+            "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-macosx_13_0_arm64.whl"
           "$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview" --version
           "$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview" source list bob --json
           export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
@@ -120,5 +126,5 @@ jobs:
           sha256sum --check SHA256SUMS-macos-arm64
           gh release upload "$RELEASE_TAG" \
             "agentsview_${PACKAGE_VERSION}_darwin_arm64.tar.gz" \
-            "agentsview-${PACKAGE_VERSION}-py3-none-macosx_11_0_arm64.whl" \
+            "agentsview-${PACKAGE_VERSION}-py3-none-macosx_13_0_arm64.whl" \
             SHA256SUMS-macos-arm64 --clobber
