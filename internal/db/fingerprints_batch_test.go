@@ -152,7 +152,9 @@ func TestBatchedFingerprintsMatchPerSession(t *testing.T) {
 	for _, id := range ids {
 		sum, maxLen, minLen, err := d.MessageContentFingerprint(t.Context(), id)
 		require.NoError(t, err, id)
-		assert.Equal(t, MessageContentAggregate{Sum: sum, Max: maxLen, Min: minLen},
+		count, err := d.MessageCount(t.Context(), id)
+		require.NoError(t, err)
+		assert.Equal(t, MessageContentAggregate{Count: count, Sum: sum, Max: maxLen, Min: minLen},
 			content[id], "content aggregate %s", id)
 
 		wantToken, err := d.MessageTokenFingerprint(t.Context(), id)
@@ -241,7 +243,7 @@ func TestMessageDialogueFingerprints(t *testing.T) {
 	insertSession(t, d, "legacy", "proj")
 	insertMessages(t, d,
 		Message{SessionID: "classified", Ordinal: 2, Role: "assistant", DialogueText: new("a\x00bc\xff")},
-		Message{SessionID: "classified", Ordinal: 1, Role: "tool", DialogueText: new("")},
+		Message{SessionID: "classified", Ordinal: 1, Role: "tool", Content: "tool output", DialogueText: new("")},
 		Message{SessionID: "classified", Ordinal: 0, Role: "assistant", Content: "unclassified"},
 		Message{SessionID: "legacy", Ordinal: 0, Role: "assistant", Content: "legacy"},
 	)

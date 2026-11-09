@@ -200,9 +200,9 @@ func SanitizeMessage(m *Message) ValidationStats {
 			m.ContentLength -= removed
 		}
 	}
-	if m.DialogueText != nil && *m.DialogueText != "" && *m.DialogueText == m.Content && m.ThinkingText == "" {
-		m.DialogueText = nil
-	}
+	// Keep the parser's classification even when dialogue equals Content.
+	// NULL also represents older or unclassified messages, so storage drops
+	// an equal copy only with a marker (see StoredDialogue).
 	sanitizeStringField(&m.ClaudeMessageID, &stats)
 	sanitizeStringField(&m.ClaudeRequestID, &stats)
 	sanitizeStringField(&m.SourceType, &stats)

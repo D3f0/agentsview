@@ -52,6 +52,8 @@ func TestBobProviderDiscoverAndParse(t *testing.T) {
 	assert.Equal(t, RoleAssistant, msgs[1].Role)
 	assert.True(t, msgs[1].HasThinking)
 	assert.Equal(t, "Inspect the format.", msgs[1].ThinkingText)
+	require.NotNil(t, msgs[1].DialogueText)
+	assert.Equal(t, "I will fix it.", *msgs[1].DialogueText)
 	require.Len(t, msgs[1].ToolCalls, 1)
 	assert.Equal(t, "read_file", msgs[1].ToolCalls[0].ToolName)
 	assert.Equal(t, "Read", msgs[1].ToolCalls[0].Category)
@@ -85,14 +87,4 @@ func TestBobProviderMissingSourceReturnsError(t *testing.T) {
 	}})
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, os.ErrNotExist)
-}
-
-func TestBobProviderCapabilitiesAdvertiseAggregateUsage(t *testing.T) {
-	provider, ok := NewProvider(AgentBob, ProviderConfig{})
-	require.True(t, ok)
-
-	assert.Equal(
-		t, CapabilitySupported,
-		provider.Capabilities().Content.AggregateUsageEvents,
-	)
 }

@@ -59,10 +59,19 @@ func EnsureHostedTenant(ctx context.Context, database *sql.DB, schema, tenant st
 		if err = checkHostedBinding(ctx, tx, schema, tenant); err != nil {
 			return err
 		}
+		if err = checkDataVersionCompat(ctx, tx); err != nil {
+			return err
+		}
+		if err = installAutomationAuditSchemaPG(ctx, tx); err != nil {
+			return err
+		}
 		if err = installHostedCoreUpgrade(ctx, tx, schema, tenant); err != nil {
 			return err
 		}
 		if err = installRawProjectionUpgrade(ctx, tx, schema, tenant); err != nil {
+			return err
+		}
+		if err = migrateAccountUsageCountersPG(ctx, tx); err != nil {
 			return err
 		}
 		if err = installHostedFrictionUpgrade(ctx, tx, schema, tenant); err != nil {
@@ -74,13 +83,13 @@ func EnsureHostedTenant(ctx context.Context, database *sql.DB, schema, tenant st
 		if err = checkHostedCatalog(ctx, tx, schema, tenant); err != nil {
 			return err
 		}
-		if err = checkDataVersionCompat(ctx, tx); err != nil {
-			return err
-		}
 		if err = createHostedContentSearchIndexes(ctx, tx); err != nil {
 			return err
 		}
 		return tx.Commit()
+	}
+	if _, err = tx.ExecContext(ctx, dropUsageChangeJournalSQL); err != nil {
+		return err
 	}
 	if err = preflightHostedAdoption(ctx, tx, schema, tenant); err != nil {
 		return err
@@ -88,7 +97,7 @@ func EnsureHostedTenant(ctx context.Context, database *sql.DB, schema, tenant st
 	if _, err = tx.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+quoted); err != nil {
 		return err
 	}
-	for _, ddl := range []string{coreDDL, frictionDDL, rawIngestDDL, rawIngestAppendOnlyDDL, postgresUsageJSONHelperDDL, rawProjectionDDL, rawLinksDDL} {
+	for _, ddl := range []string{coreDDL, frictionDDL, frictionReviewDDL, rawIngestDDL, rawIngestAppendOnlyDDL, postgresUsageJSONHelperDDL, rawProjectionDDL, rawLinksDDL} {
 		if _, err = tx.ExecContext(ctx, ddl); err != nil {
 			return fmt.Errorf("creating hosted application schema: %w", err)
 		}
@@ -104,7 +113,13 @@ func EnsureHostedTenant(ctx context.Context, database *sql.DB, schema, tenant st
 	if _, err = ensureColumns(ctx, tx, columns, migrations); err != nil {
 		return err
 	}
+	if err = migrateAccountUsageCountersPG(ctx, tx); err != nil {
+		return err
+	}
 	if err = checkDataVersionCompat(ctx, tx); err != nil {
+		return err
+	}
+	if err = installAutomationAuditSchemaPG(ctx, tx); err != nil {
 		return err
 	}
 	if err = createHostedContentSearchIndexes(ctx, tx); err != nil {

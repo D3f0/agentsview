@@ -5,6 +5,7 @@
   import { analytics } from "../../stores/analytics.svelte.js";
   import { settings } from "../../stores/settings.svelte.js";
   import GranularityPicker from "../shared/GranularityPicker.svelte";
+  import PanelStatus from "./PanelStatus.svelte";
   import { formatDateTime, getLocale, m } from "../../i18n/index.js";
   import { parseLocalDate } from "../../utils/dates.js";
   import { chartSeriesColorMap } from "../../utils/chartPalette.js";
@@ -13,6 +14,10 @@
   // Soft cap from the series-count ladder: past six skills the tail folds
   // into "Other" instead of generating more hues.
   const MAX_SERIES = 6;
+  const CHART_SERIES_COLORS = Array.from(
+    { length: MAX_SERIES },
+    (_, index) => `var(--chart-series-${index + 1})`,
+  );
   const OTHER_KEY = "__other__";
   const PLOT_HEIGHT = 120;
   const PLOT_TOP = 8;
@@ -22,7 +27,14 @@
   const PLOT_RIGHT = 10;
   const MAX_X_LABELS = 14;
 
-  const trendEntries = $derived(analytics.skills?.trend ?? []);
+  // The trend belongs to the grouping it was fetched with; hide it while
+  // the selected grouping is loading or has failed.
+  const skills = $derived(
+    analytics.requestedSkillsGranularity === analytics.skillsGranularity
+      ? analytics.skills
+      : null,
+  );
+  const trendEntries = $derived(skills?.trend ?? []);
 
   const skillTotals = $derived.by(() => {
     const totals = new Map<string, number>();
@@ -105,7 +117,7 @@
   const colorMap = $derived(chartSeriesColorMap(
     allSeries.map((series) => series.key),
     settings.chartPalette,
-    (_key, index) => `var(--chart-series-${index + 1})`,
+    CHART_SERIES_COLORS,
     "var(--chart-series-other)",
   ));
 
@@ -261,25 +273,20 @@
   <div class="trend-header">
     <h3 class="chart-title">{m.analytics_skill_trend_title()}</h3>
     <GranularityPicker
-      value={analytics.skillsGranularity}
+      value={analytics.requestedSkillsGranularity}
       onChange={(g) => analytics.setSkillsGranularity(g)}
       disabled={analytics.querying.skills}
     />
   </div>
 
-  {#if analytics.errors.skills}
-    <div class="error">
-      {analytics.errors.skills}
-      <button
-        class="retry-btn"
-        onclick={() => analytics.fetchSkills()}
-      >
-        {m.shared_retry()}
-      </button>
-    </div>
-  {:else if analytics.loading.skills && trendEntries.length === 0}
-    <div class="empty">{m.analytics_skill_trend_loading()}</div>
-  {:else if trendEntries.length > 0 && allSeries.length > 0}
+  <PanelStatus
+    hasData={skills !== null}
+    pending={analytics.querying.skills}
+    error={analytics.errors.skills}
+    onRetry={() => analytics.fetchSkills()}
+    loadingLabel={m.analytics_skill_trend_loading()}
+  />
+  {#if trendEntries.length > 0 && allSeries.length > 0}
     <div
       class="legend"
       role="group"
@@ -436,7 +443,7 @@
         {/each}
       </div>
     {/if}
-  {:else}
+  {:else if skills}
     <div class="empty">{m.analytics_skill_trend_empty()}</div>
   {/if}
 </div>
@@ -595,23 +602,5 @@
     font-size: 12px;
     padding: 24px;
     text-align: center;
-  }
-
-  .error {
-    color: var(--accent-red);
-    font-size: 12px;
-    padding: 12px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .retry-btn {
-    padding: 2px 8px;
-    border: 1px solid currentColor;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    color: inherit;
-    cursor: pointer;
   }
 </style>

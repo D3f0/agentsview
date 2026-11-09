@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.kenn.io/agentsview/internal/money"
+	"go.kenn.io/agentsview/internal/usagefacts"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -94,10 +95,11 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 			}
 			messages = append(messages, ParsedMessage{
 				Ordinal: len(messages), Role: RoleUser, Content: content,
-				Timestamp: ts, ContentLength: len(content),
+				DialogueText: new(content),
+				Timestamp:    ts, ContentLength: len(content),
 			})
 		case "bob-shell":
-			content, thinking := bobVisibleContent(entry.Content)
+			content, thinking, dialogue := bobVisibleContent(entry.Content)
 			toolCalls := bobToolCalls(entry.ToolCalls)
 			if content == "" && len(toolCalls) == 0 {
 				continue
@@ -109,7 +111,8 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 			message := ParsedMessage{
 				Ordinal: len(messages), Role: RoleAssistant, Content: content,
 				ThinkingText: thinking, Timestamp: ts, Model: model,
-				HasThinking: thinking != "", HasToolUse: len(toolCalls) > 0,
+				DialogueText: new(dialogue),
+				HasThinking:  thinking != "", HasToolUse: len(toolCalls) > 0,
 				ContentLength: len(content), ToolCalls: toolCalls,
 			}
 			applyBobTokenUsage(&message, entry.Tokens)
@@ -140,7 +143,7 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 	return session, messages, nil
 }
 
-func bobVisibleContent(content string) (string, string) {
+func bobVisibleContent(content string) (string, string, string) {
 	var thinking []string
 	var visible strings.Builder
 	for {
@@ -164,6 +167,7 @@ func bobVisibleContent(content string) (string, string) {
 	}
 	think := strings.Join(thinking, "\n\n")
 	text := strings.TrimSpace(visible.String())
+	dialogue := text
 	if think != "" {
 		block := "[Thinking]\n" + think + "\n[/Thinking]"
 		if text != "" {
@@ -172,7 +176,7 @@ func bobVisibleContent(content string) (string, string) {
 			text = block
 		}
 	}
-	return text, think
+	return text, think, dialogue
 }
 
 func bobToolCalls(raw []bobToolCallJSON) []ParsedToolCall {
@@ -495,6 +499,9 @@ func bobDBParseTaskWithDB(conn *sql.DB, path string, task bobDBTask, machine str
 	accumulateMessageTokenUsage(&session, messages)
 	if event := bobDBTaskUsageEvent(task, session.ID, session.EndedAt, messages); event != nil {
 		session.UsageEvents = []ParsedUsageEvent{*event}
+		for i := range messages {
+			messages[i].TokenUsage = nil
+		}
 	}
 	return &ParseResult{Session: session, Messages: messages, UsageEvents: session.UsageEvents}, nil
 }
@@ -551,17 +558,25 @@ func bobDBTaskUsageEvent(task bobDBTask, sessionID string, occurredAt time.Time,
 		return nil
 	}
 	model := ""
+	var input, output, cacheRead, cacheWrite, reasoning int
 	for _, message := range messages {
-		if message.Role == RoleAssistant && message.Model != "" {
+		if model == "" && message.Role == RoleAssistant && message.Model != "" {
 			model = message.Model
-			break
 		}
+		usage := usagefacts.ParseTokenUsage(string(message.TokenUsage))
+		input += int(usage.InputTokens)
+		output += int(usage.OutputTokens)
+		cacheRead += int(usage.CacheReadTokens)
+		cacheWrite += int(usage.CacheCreationTokens)
+		reasoning += int(usage.ReasoningTokens)
 	}
 	if model == "" {
 		model = "premium"
 	}
 	return &ParsedUsageEvent{
 		SessionID: sessionID, Source: "bob-task", Model: model,
+		InputTokens: input, OutputTokens: output, ReasoningTokens: reasoning,
+		CacheReadInputTokens: cacheRead, CacheCreationInputTokens: cacheWrite,
 		Cost: &cost, CostStatus: "exact", CostSource: "bob-reported",
 		OccurredAt: occurredAt.Format(time.RFC3339Nano), DedupKey: "task:" + sessionID,
 	}
@@ -570,6 +585,7 @@ func bobDBTaskUsageEvent(task bobDBTask, sessionID string, occurredAt time.Time,
 type bobDBMessagePayload struct {
 	Role      string           `json:"role"`
 	Content   string           `json:"content"`
+	Reasoning string           `json:"reasoning"`
 	Model     string           `json:"model"`
 	ToolCalls []bobDBToolCall  `json:"toolCalls"`
 	Meta      bobDBMessageMeta `json:"_meta"`
@@ -584,6 +600,7 @@ type bobDBSpend struct {
 	CacheRead  int `json:"cacheRead"`
 	CacheWrite int `json:"cacheWrite"`
 	Reasoning  int `json:"reasoningTokens"`
+	Context    int `json:"contextTokens"`
 }
 type bobDBToolCall struct {
 	ID        string          `json:"id"`
@@ -620,16 +637,23 @@ func parseBobDBMessage(role, raw string, createdAt int64, ordinal int) (ParsedMe
 		Ordinal: ordinal, Role: parsedRole, Content: content,
 		Timestamp: time.UnixMilli(createdAt).UTC(), Model: payload.Model,
 		ContentLength: len(content),
+		DialogueText:  new(content),
 	}
 	if payload.Meta.Timestamp != 0 {
 		message.Timestamp = time.UnixMilli(payload.Meta.Timestamp).UTC()
 	}
 	if parsedRole == RoleAssistant {
+		if reasoning := strings.TrimSpace(payload.Reasoning); reasoning != "" {
+			message.ThinkingText = reasoning
+			message.HasThinking = true
+			message.Content = "[Thinking]\n" + reasoning + "\n[/Thinking]\n" + content
+			message.ContentLength = len(message.Content)
+		}
 		message.ToolCalls = bobDBToolCalls(payload.ToolCalls)
 		message.HasToolUse = len(message.ToolCalls) > 0
 		applyBobDBSpend(&message, payload.Meta.Spend)
 	}
-	if content == "" && len(message.ToolCalls) == 0 {
+	if message.Content == "" && len(message.ToolCalls) == 0 {
 		return ParsedMessage{}, false, nil
 	}
 	return message, true, nil
@@ -655,6 +679,11 @@ func bobDBToolCalls(raw []bobDBToolCall) []ParsedToolCall {
 
 func applyBobDBSpend(message *ParsedMessage, spend bobDBSpend) {
 	if spend.Input == 0 && spend.Output == 0 && spend.CacheRead == 0 && spend.CacheWrite == 0 && spend.Reasoning == 0 {
+		message.tokenPresenceKnown = true
+		if spend.Context > 0 {
+			message.ContextTokens = spend.Context
+			message.HasContextTokens = true
+		}
 		return
 	}
 	raw, err := json.Marshal(map[string]int{

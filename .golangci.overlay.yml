@@ -3,6 +3,11 @@ run:
   build-tags:
     - fts5
 linters:
+  enable:
+    - kennnolint
+    # Catches contexts re-derived from themselves in loops and closures,
+    # which grow an ever-deeper parent chain.
+    - fatcontext
   settings:
     forbidigo:
       forbid:

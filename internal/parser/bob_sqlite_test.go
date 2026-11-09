@@ -51,12 +51,16 @@ func TestBobProviderDiscoversAndParsesSQLiteTasks(t *testing.T) {
 	assert.Equal(t, "premium", result.Messages[1].Model)
 	assert.Equal(t, 120, result.Messages[1].ContextTokens)
 	assert.Equal(t, 40, result.Messages[1].OutputTokens)
+	assert.Empty(t, result.Messages[1].TokenUsage, "billing tokens belong to the task cost event")
 	assert.Equal(t, fingerprint.Hash, result.Session.File.Hash)
 	require.Len(t, result.UsageEvents, 1)
 	event := result.UsageEvents[0]
 	assert.Equal(t, "bob:task-1", event.SessionID)
 	require.NotNil(t, event.Cost)
 	assert.Equal(t, int64(1_364_024), event.Cost.Microdollars)
+	assert.Equal(t, 100, event.InputTokens)
+	assert.Equal(t, 40, event.OutputTokens)
+	assert.Equal(t, 20, event.CacheReadInputTokens)
 	require.Len(t, result.Session.UsageEvents, 1)
 	require.NotNil(t, result.Session.UsageEvents[0].Cost)
 	assert.Equal(t, int64(1_364_024), result.Session.UsageEvents[0].Cost.Microdollars)
@@ -137,6 +141,62 @@ func TestBobProviderResolvesSQLiteTaskWorkspace(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, outcome.Results, 1)
 			assert.Equal(t, tt.want, outcome.Results[0].Result.Session.Cwd)
+		})
+	}
+}
+
+func TestBobProviderParsesV21ReasoningAndRedactedUsage(t *testing.T) {
+	for _, tt := range []struct {
+		name, content, reasoning string
+	}{
+		{"answer with reasoning", "Use the shared component.", "Inspect the existing controls."},
+		{"reasoning only", "", "Inspect the existing controls."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			dbPath := filepath.Join(root, "db", bobDBName)
+			require.NoError(t, writeBobSQLiteFixture(dbPath))
+			conn, err := sql.Open("sqlite3", dbPath)
+			require.NoError(t, err)
+			defer conn.Close()
+			payload, err := json.Marshal(map[string]any{
+				"role": "assistant", "content": tt.content, "reasoning": tt.reasoning,
+				"_meta": map[string]any{
+					"timestamp": 1785767512923,
+					"spend":     map[string]any{"cost": 0.25, "contextTokens": 1234},
+				},
+			})
+			require.NoError(t, err)
+			_, err = conn.Exec(`UPDATE messages SET data = ? WHERE id = 'm-2'`, string(payload))
+			require.NoError(t, err)
+			_, err = conn.Exec(`UPDATE tasks SET costs = '{"cost":0.25,"contextTokens":1234}'`)
+			require.NoError(t, err)
+			provider, ok := NewProvider(AgentBob, ProviderConfig{Roots: []string{root}})
+			require.True(t, ok)
+			sources, err := provider.Discover(t.Context())
+			require.NoError(t, err)
+			require.Len(t, sources, 1)
+			outcome, err := provider.Parse(t.Context(), ParseRequest{Source: sources[0]})
+			require.NoError(t, err)
+			require.Len(t, outcome.Results, 1)
+			result := outcome.Results[0].Result
+			require.Len(t, result.Messages, 2)
+			message := result.Messages[1]
+			require.NotNil(t, message.DialogueText)
+			assert.Equal(t, tt.content, *message.DialogueText)
+			assert.Equal(t, tt.reasoning, message.ThinkingText)
+			assert.True(t, message.HasThinking)
+			assert.Contains(t, message.Content, "[Thinking]\nInspect the existing controls.\n[/Thinking]")
+			if tt.content != "" {
+				assert.Contains(t, message.Content, tt.content)
+			}
+			assert.Equal(t, 1234, message.ContextTokens)
+			assert.True(t, message.HasContextTokens)
+			assert.False(t, message.HasOutputTokens)
+			assert.Empty(t, message.TokenUsage, "context size is not billed token usage")
+			require.Len(t, result.UsageEvents, 1)
+			require.NotNil(t, result.UsageEvents[0].Cost)
+			assert.Equal(t, int64(250_000), result.UsageEvents[0].Cost.Microdollars)
 		})
 	}
 }

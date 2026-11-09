@@ -93,7 +93,8 @@ var deepSeekHarnessKnownEvents = map[string]struct{}{
 	"compaction/summary": {}, "deliverables/presented": {}, "developer/message": {},
 	"feedback/message-delete": {}, "feedback/message-put": {},
 	"feedback/record": {}, "goal/change": {},
-	"hook/invoked": {}, "hook/result": {}, "image/offload": {}, "llm/retry": {},
+	"hook/invoked": {}, "hook/result": {}, "image/offload": {},
+	"job/registered": {}, "job/settled": {}, "llm/retry": {},
 	"llm/retry-started": {}, "model/selection": {},
 	"permission/preset": {}, "plan/mode": {},
 	"request/context": {}, "request/header": {}, "sandbox/mode": {},
@@ -299,11 +300,6 @@ func inspectDeepSeekHarnessZstdFrames(
 	}
 	layout, err := zstdframe.Inspect(f, info.Size(), 0)
 	if formatErr, ok := errors.AsType[*zstdframe.FormatError](err); ok {
-		if formatErr.Unsupported {
-			return deepSeekHarnessZstdLayout{}, fmt.Errorf(
-				"unsupported DeepSeek Harness zstd %w", formatErr,
-			)
-		}
 		return deepSeekHarnessZstdLayout{}, fmt.Errorf(
 			"corrupt DeepSeek Harness zstd log: %w", formatErr,
 		)

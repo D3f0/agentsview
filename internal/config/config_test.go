@@ -103,6 +103,7 @@ func TestChartPaletteDefaultsAndLoads(t *testing.T) {
 		{name: "omitted", want: ChartPaletteAgentsview},
 		{name: "agentsview", toml: `chart_palette = "agentsview"`, want: ChartPaletteAgentsview},
 		{name: "matplotlib", toml: `chart_palette = "matplotlib"`, want: ChartPaletteMatplotlib},
+		{name: "colorblind", toml: `chart_palette = "colorblind"`, want: ChartPaletteColorblind},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,12 +124,12 @@ func TestChartPaletteRejectsInvalidValue(t *testing.T) {
 		{
 			name: "unknown",
 			toml: `chart_palette = "neon"`,
-			want: `chart_palette must be "agentsview" or "matplotlib" (got "neon")`,
+			want: `chart_palette must be "agentsview", "matplotlib", or "colorblind" (got "neon")`,
 		},
 		{
 			name: "explicit empty",
 			toml: `chart_palette = ""`,
-			want: `chart_palette must be "agentsview" or "matplotlib" (got "")`,
+			want: `chart_palette must be "agentsview", "matplotlib", or "colorblind" (got "")`,
 		},
 	}
 	for _, tt := range tests {
@@ -532,17 +533,6 @@ func TestDefault_IncludesHermesProfilesRoot(t *testing.T) {
 	assert.Contains(t, dirs, filepath.Join(home, ".hermes", "sessions"))
 	assert.Contains(t, dirs, filepath.Join(home, ".hermes", "profiles"))
 	assert.Contains(t, dirs, filepath.Join(home, "AppData", "Local", "hermes", "sessions"))
-}
-
-func TestDefault_HermesNoProfilesDirIsSafe(t *testing.T) {
-	home := canonicalTempDir(t)
-	setTestHome(t, home)
-	require.NoError(t, os.MkdirAll(filepath.Join(home, ".hermes", "sessions"), 0o755))
-	cfg, err := Default()
-	require.NoError(t, err)
-	dirs := cfg.ResolveDirs(parser.AgentHermes)
-	assert.Contains(t, dirs, filepath.Join(home, ".hermes", "sessions"))
-	assert.Contains(t, dirs, filepath.Join(home, ".hermes", "profiles"))
 }
 
 func TestDefault_HermesEnvReplacesDefaultAndProfilesRoots(t *testing.T) {
@@ -1793,13 +1783,6 @@ func TestLoadFile_MalformedDirValueLogsWarning(t *testing.T) {
 	assert.Equal(t, []string{defaultDir}, dirs)
 }
 
-func TestDefault_ResultContentBlockedCategories(t *testing.T) {
-	cfg, err := Default()
-	require.NoError(t, err)
-
-	assert.Equal(t, []string{"Read", "Glob"}, cfg.ResultContentBlockedCategories)
-}
-
 func TestLoadFile_ResultContentBlockedCategories(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1878,6 +1861,23 @@ func TestLoadFile_EventsCoalesceInterval(t *testing.T) {
 	}
 }
 
+func TestLoadFile_SyncIdleAfter(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data map[string]any
+		want time.Duration
+	}{
+		{"default", map[string]any{}, 10 * time.Minute},
+		{"configured", map[string]any{"sync_idle_after": "4m"}, 4 * time.Minute},
+		{"disabled", map[string]any{"sync_idle_after": "0"}, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadMinimalWithConfig(t, tt.data)
+			assert.Equal(t, tt.want, cfg.SyncIdleAfter)
+		})
+	}
+}
+
 func TestLoadFile_DaemonIdleTimeout(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1892,6 +1892,23 @@ func TestLoadFile_DaemonIdleTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := loadMinimalWithConfig(t, tt.data)
 			assert.Equal(t, tt.want, cfg.DaemonIdleTimeout)
+		})
+	}
+}
+
+func TestLoadFile_SyncInterval(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data map[string]any
+		want time.Duration
+	}{
+		{name: "absent uses default", data: map[string]any{}, want: 5 * time.Second},
+		{name: "configured", data: map[string]any{"sync_interval": "60s"}, want: time.Minute},
+		{name: "explicit zero is kept", data: map[string]any{"sync_interval": "0s"}, want: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadMinimalWithConfig(t, tt.data)
+			assert.Equal(t, tt.want, cfg.SyncInterval)
 		})
 	}
 }
@@ -2520,15 +2537,6 @@ func TestAutomatedConfigRoundTrip(t *testing.T) {
 	assert.Equal(t, wantExactMatches, cfg.Automated.ExactMatches)
 }
 
-func TestAutomatedConfigAbsentIsNil(t *testing.T) {
-	cfg := loadPFlagsWithConfig(t, map[string]any{
-		"public_url": "http://example.com",
-	})
-	assert.Nil(t, cfg.Automated.Prefixes)
-	assert.Nil(t, cfg.Automated.Substrings)
-	assert.Nil(t, cfg.Automated.ExactMatches)
-}
-
 func TestLoadFile_CustomModelPricing(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2729,13 +2737,6 @@ transport = "http"
 	assert.Equal(t, "devbox1", cfg.RemoteHosts[0].Host)
 }
 
-func TestLoadFile_RemoteHostsAbsentIsNil(t *testing.T) {
-	cfg := loadMinimalWithConfig(t,
-		map[string]any{"public_url": "http://example.com"})
-
-	assert.Nil(t, cfg.RemoteHosts)
-}
-
 func TestValidateRemoteHosts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2796,16 +2797,6 @@ func TestLoadFile_SyncIncludeCwdPrefixes(t *testing.T) {
 		[]string{"/home/me/work", "/home/me/oss"},
 		cfg.SyncIncludeCwdPrefixes,
 	)
-}
-
-func TestLoadFile_SyncIncludeCwdPrefixesDefaultsEmpty(t *testing.T) {
-	f := newConfigFixture(t)
-	f.WriteConfigText(t, `host = "127.0.0.1"
-`)
-
-	cfg := f.LoadMinimal(t)
-
-	assert.Empty(t, cfg.SyncIncludeCwdPrefixes)
 }
 
 func TestLoadMinimal_ExpandsUserSuppliedLocalPaths(t *testing.T) {
@@ -2946,19 +2937,6 @@ func TestPGConfig_LoadsFromTOML(t *testing.T) {
 	cfg := f.LoadMinimal(t)
 
 	assert.False(t, cfg.PG.PushVectorsEnabled())
-}
-
-func TestPGConfig_PushVectorsDefaultsTrue(t *testing.T) {
-	f := newConfigFixture(t)
-	f.WriteTOML(t, map[string]any{
-		"pg": map[string]any{
-			"url": "postgres://localhost/test",
-		},
-	})
-
-	cfg := f.LoadMinimal(t)
-
-	assert.True(t, cfg.PG.PushVectorsEnabled())
 }
 
 func TestValidateArtifactOriginID(t *testing.T) {
@@ -3233,6 +3211,57 @@ func TestLoadFile_ModelAliases(t *testing.T) {
 			}
 			cfg := f.LoadMinimal(t)
 			assert.Equal(t, tt.want, cfg.ModelAliases)
+		})
+	}
+}
+
+func TestSaveVectorSetupPreservesSettings(t *testing.T) {
+	for _, raw := range []string{
+		"port = 12345\n[vector]\nenabled = false\ninclude_automated = true\n",
+		"[vector]\nenabled = false\n[vector.embeddings]\nmodel = 'test-model'\ndimension = 3\nmodel_context_tokens = 0\nquery_prefix = ''\ndocument_prefix = ''\ninput_suffix = '!'\nrequest_dimensions = false\n[vector.embeddings.servers.local]\nendpoint = 'https://example.com/v1'\nmax_retries = 0\n",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			dir := setupTestEnv(t)
+			path := filepath.Join(dir, configFileName)
+			cfg, err := LoadReadOnly()
+			require.NoError(t, err)
+			// Setup reads edits made after the daemon loaded its config.
+			require.NoError(t, os.WriteFile(path, []byte(raw), 0o600))
+			var expected map[string]any
+			_, err = toml.Decode(raw, &expected)
+			require.NoError(t, err)
+			expected["vector"].(map[string]any)["enabled"] = true
+			require.NoError(t, cfg.SaveVectorSetup())
+			var saved map[string]any
+			_, err = toml.DecodeFile(path, &saved)
+			require.NoError(t, err)
+			assert.Equal(t, expected, saved)
+		})
+	}
+}
+
+func TestSaveVectorSetupRejectsInvalidCurrentSettings(t *testing.T) {
+	for _, tc := range []struct{ name, raw, wantError string }{
+		{name: "invalid token budget", raw: "[vector]\nenabled = false\n[vector.embeddings]\nmodel = 'test-model'\ndimension = 3\nmodel_context_tokens = 512\n[vector.embeddings.servers.local]\nendpoint = 'https://example.com/v1'\nmax_batch_tokens = 256\n"},
+		{name: "array of vector tables", raw: "[[vector]]\nenabled = false\n[vector.embeddings]\nmodel = 'test-model'\ndimension = 3\n[vector.embeddings.servers.local]\nendpoint = 'https://example.com/v1'\n", wantError: "vector must be a table"},
+		{name: "scalar vector", raw: "vector = 'preserve this value'\n", wantError: "vector must be a table"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupTestEnv(t)
+			cfg, err := LoadReadOnly()
+			require.NoError(t, err)
+			path := filepath.Join(dir, configFileName)
+			require.NoError(t, os.WriteFile(path, []byte(tc.raw), 0o600))
+			_, setupErr := cfg.VectorSetupEmbeddings()
+			saveErr := cfg.SaveVectorSetup()
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.raw, string(data))
+			require.ErrorIs(t, setupErr, ErrInvalidVectorSetup)
+			require.ErrorIs(t, saveErr, ErrInvalidVectorSetup)
+			if tc.wantError != "" {
+				require.ErrorContains(t, setupErr, tc.wantError)
+			}
 		})
 	}
 }

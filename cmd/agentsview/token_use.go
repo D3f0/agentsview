@@ -6,24 +6,20 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/parser"
+	"go.kenn.io/agentsview/internal/service"
 )
 
-// Exit codes for the token-use subcommand.
-const (
-	tokenUseExitOK            = 0
-	tokenUseExitErr           = 1
-	tokenUseExitNotFound      = 2
-	tokenUseExitNoTokenData   = 3
-	tokenUseResolveMatchLimit = 2
-)
+const tokenUseResolveMatchLimit = 2
 
 // resolveRawSessionID translates a user-supplied session ID into
 // the canonical form stored in sessions.id. Callers may pass
@@ -104,7 +100,7 @@ func resolveRawSessionID(
 		}
 		bareID := strings.TrimPrefix(input, def.IDPrefix)
 		for _, dir := range agentDirs[def.Type] {
-			if findAgentSourceFile(def, dir, bareID) != "" {
+			if findAgentSourceFile(ctx, def, dir, bareID) != "" {
 				return input, true
 			}
 		}
@@ -120,7 +116,7 @@ func resolveRawSessionID(
 			continue
 		}
 		for _, dir := range agentDirs[def.Type] {
-			if findAgentSourceFile(def, dir, input) != "" {
+			if findAgentSourceFile(ctx, def, dir, input) != "" {
 				return def.IDPrefix + input, true
 			}
 		}
@@ -147,14 +143,14 @@ func agentHasDiskSourceLookup(def parser.AgentDef) bool {
 // findAgentSourceFile resolves a raw agent session ID to an on-disk source path
 // under dir via the provider's FindSource (RawSessionID lookup). Returns ""
 // when no source resolves or the agent has no on-disk lookup.
-func findAgentSourceFile(def parser.AgentDef, dir, rawID string) string {
+func findAgentSourceFile(ctx context.Context, def parser.AgentDef, dir, rawID string) string {
 	factory, ok := parser.ProviderFactoryByType(def.Type)
 	if !ok {
 		return ""
 	}
 	provider := factory.NewProvider(parser.ProviderConfig{Roots: []string{dir}})
 	source, found, err := provider.FindSource(
-		context.Background(),
+		ctx,
 		parser.FindSourceRequest{RawSessionID: rawID},
 	)
 	if err != nil || !found {
@@ -199,25 +195,13 @@ func usageExitCode(out *sessionUsageOutput) int {
 // sessionUsageOutput is the JSON shape emitted by `session usage`
 // and the deprecated `token-use`. It is a strict superset of the
 // historical token-use output (same fields, plus cost). The shape
-// is experimental and may change.
+// is experimental and may change. The usage document itself is the
+// shared service.SessionUsageReport that the MCP get_session_usage
+// tool also returns.
 type sessionUsageOutput struct {
-	db.SessionUsage
+	service.SessionUsageReport
 	ServerRunning     bool `json:"server_running"`
 	RefreshIncomplete bool `json:"refresh_incomplete,omitzero"`
-	// Plan and Coverage are the session's codex-cloud plan usage and live
-	// capture coverage, with the same names as the HTTP response.
-	Plan     *db.PlanUsageView       `json:"plan_usage,omitempty"`
-	Coverage *db.CaptureCoverageView `json:"capture_coverage,omitempty"`
-}
-
-// newStoreSessionUsageOutput wraps a usage result read straight from a
-// store, exposing its plan usage row the way the HTTP response does.
-func newStoreSessionUsageOutput(u *db.SessionUsage) *sessionUsageOutput {
-	return &sessionUsageOutput{
-		SessionUsage: *u,
-		Plan:         u.PlanUsage.PlanUsageView(),
-		Coverage:     u.PlanUsage.CaptureCoverageView(),
-	}
 }
 
 // startupWaitTimeout is how long CLI subcommands wait for a
@@ -225,28 +209,26 @@ func newStoreSessionUsageOutput(u *db.SessionUsage) *sessionUsageOutput {
 // on-demand sync or direct DB access.
 const startupWaitTimeout = 30 * time.Second
 
-func runTokenUse(ctx context.Context, args []string) {
+func runTokenUse(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr,
-			"usage: agentsview token-use <session-id>")
-		os.Exit(tokenUseExitErr)
+		return withCLIHint(withExitCode(
+			errors.New("usage: agentsview token-use <session-id>"), tokenUseExitErr,
+		), "Run `agentsview token-use --help` for usage.")
 	}
-	fmt.Fprintln(os.Stderr,
-		"note: 'token-use' is deprecated; use 'session usage <id>' instead")
+	fmt.Fprintln(cmd.ErrOrStderr(),
+		"note: 'token-use' is deprecated; use 'agentsview session usage <id> --json' instead")
 
-	out, code, err := sessionUsageData(ctx, args[0])
+	out, code, err := sessionUsageData(cmd.Context(), args[0])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(tokenUseExitErr)
+		return withExitCode(err, tokenUseExitErr)
 	}
 	if out != nil {
-		enc := jsontext.NewEncoder(os.Stdout, jsontext.WithIndent("  "))
+		enc := jsontext.NewEncoder(cmd.OutOrStdout(), jsontext.WithIndent("  "))
 		if encErr := json.MarshalEncode(enc, out); encErr != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", encErr)
-			os.Exit(tokenUseExitErr)
+			return withExitCode(encErr, tokenUseExitErr)
 		}
 	}
-	os.Exit(code)
+	return sessionUsageExitError(args[0], code)
 }
 
 func sessionUsageData(ctx context.Context, sessionID string) (*sessionUsageOutput, int, error) {

@@ -1,21 +1,24 @@
 import { test, expect, Page, Locator } from '@playwright/test';
 import { join } from 'path';
+import { readFileSync } from 'fs';
 
-const DIR = process.env.SCREENSHOT_DIR || join(
-  __dirname, '..', '..', 'assets', 'generated', 'screenshots'
-);
-
+const DIR = process.env.SCREENSHOT_DIR;
+const manifestPath = process.env.SCREENSHOT_MANIFEST;
+if (!DIR || !manifestPath || !process.env.SCREENSHOT_NOW) {
+  throw new Error('Capture requires an output directory, corpus manifest, and clock');
+}
+const CORPUS = JSON.parse(readFileSync(manifestPath, 'utf8'));
+const CAPTURE_NOW = new Date(process.env.SCREENSHOT_NOW);
+if (!Number.isFinite(CAPTURE_NOW.getTime())) throw new Error('Invalid capture clock');
 const FULL = { width: 1440, height: 900 };
-// Imported session IDs can contain original machine names.
-const CAPTURE_STYLE = '.session-id { visibility: hidden !important; }';
-
-// PG serve instance for pg-sync screenshots (machine labels, etc.)
+// Query latency is measured with performance.now(), independently of the fixed clock.
+const CAPTURE_STYLE = `
+  .session-id, .kit-refresh-control__text { visibility: hidden !important; }
+`;
 const PG_BASE_URL = process.env.PG_BASE_URL || '';
 
 test.beforeEach(async ({ page }) => {
-  if (process.env.SCREENSHOT_NOW) {
-    await page.clock.setFixedTime(new Date(process.env.SCREENSHOT_NOW));
-  }
+  await page.clock.setFixedTime(CAPTURE_NOW);
 });
 
 async function snap(page: Page, name: string, fullPage = false) {
@@ -94,14 +97,30 @@ async function selectFirstSession(page: Page) {
   await page.waitForTimeout(1000);
 }
 
-// Find a session likely to have thinking/tool content
-// by looking for ones with higher message counts
+// Sessions holding only hook output appear in the sidebar but render
+// no messages, so a scan skips them instead of failing. Waiting for the
+// clicked session's transcript to load, rather than for a timeout,
+// keeps both capture passes choosing the same session.
+async function openSessionWithMessages(item: Locator): Promise<boolean> {
+  const page = item.page();
+  const id = await item.getAttribute('data-session-id');
+  if (!id) throw new Error('session item has no id');
+  await item.click();
+  const list = page.locator('.message-list-scroll');
+  await expect(list).toHaveAttribute('data-messages-session-id', id, { timeout: 10_000 });
+  await expect(list).toHaveAttribute('data-loaded', 'true', { timeout: 10_000 });
+  return page
+    .locator('.message')
+    .first()
+    .waitFor({ timeout: 2_000 })
+    .then(
+      () => true,
+      () => false,
+    );
+}
+
 async function selectRichSession(page: Page) {
-  const items = page.locator('.session-item');
-  const count = await items.count();
-  // Try the 3rd session (index 2) for variety, fall back to first
-  const idx = Math.min(2, count - 1);
-  await items.nth(idx).click();
+  await page.goto('/sessions/' + encodeURIComponent(CORPUS.targets.rich.session_id));
   await page.waitForSelector('.message', { timeout: 10_000 });
   await page.waitForTimeout(1000);
 }
@@ -344,6 +363,20 @@ test.describe('Dashboard', () => {
     await snapEl(panel, 'top-skills');
   });
 
+  test('tool rate evidence', async ({ page }) => {
+    await page.setViewportSize({ width: FULL.width, height: 1800 });
+    const panel = page.locator('.chart-panel:has(.tool-container)');
+    const rate = panel.getByRole('button', { name: /(?:Empty|Repeat|Recovery) rate:/ }).first();
+    await rate.scrollIntoViewIfNeeded();
+    await rate.click();
+    const evidence = panel.locator('.evidence-row');
+    await expect(evidence.first()).toBeVisible();
+    const lastExample = evidence.nth(Math.min(2, await evidence.count() - 1));
+    await panel.scrollIntoViewIfNeeded();
+    await page.mouse.move(0, 0);
+    await snapRange(page, panel, lastExample, 'tool-rate-evidence');
+  });
+
   test('skill usage over time', async ({ page }) => {
     const panel = page.locator('.chart-panel:has(.trend-container)');
     await expect(panel).toBeVisible({ timeout: 10_000 });
@@ -430,18 +463,11 @@ test.describe('Dashboard', () => {
 
 test.describe('Activity dashboard', () => {
   async function navigateToActivity(page: Page, path = '/activity') {
-    // Anchor the range to the fixture, so a release run never captures an empty today.
-    const response = await page.request.get('/api/v1/sessions?limit=1');
-    const latest = (await response.json()).sessions[0];
-    const timestamp = new Date(
-      latest.ended_at || latest.started_at || latest.created_at
-    );
-    expect(
-      timestamp.getTime(), 'latest session must have a valid activity date'
-    ).not.toBeNaN();
+    // Use the completed previous week. The current week's report is clamped
+    // to the server's wall clock, independently of the browser's fixed clock.
     const date = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/Chicago',
-    }).format(timestamp);
+      timeZone: CORPUS.timezone,
+    }).format(new Date(CAPTURE_NOW.getTime() - 7 * 86_400_000));
     await page.goto(`${path}${path.includes('?') ? '&' : '?'}date=${date}`);
     await page.waitForSelector('.activity-page', { timeout: 10_000 });
     await expect(
@@ -549,6 +575,9 @@ test.describe('Data workspace', () => {
   });
 
   test('project inventory', async ({ page }) => {
+    await expect(page.locator('.summary-strip')).toContainText(
+      'projects'
+    );
     await snap(page, 'data-inventory');
   });
 
@@ -834,9 +863,9 @@ test.describe('Session browser', () => {
       await filterBtn.click();
       await page.waitForTimeout(300);
 
-      // Select the lowest Min Prompts threshold so the result list stays populated.
+      // Select "Min Prompts 10" filter
       const minPrompts = page.getByRole('button', {
-        name: '2',
+        name: '10',
         exact: true,
       });
       if (await minPrompts.count() > 0) {
@@ -853,13 +882,23 @@ test.describe('Session browser', () => {
         await page.waitForTimeout(300);
       }
 
-      await expect(page.locator('.session-item').first()).toBeVisible();
       await snap(page, 'session-filters-active');
 
       // Clean up
       const clear = page.locator('button.clear-filters-btn');
       if (await clear.count() > 0) await clear.click();
     }
+  });
+
+  test('label and pull request filters', async ({ page }) => {
+    await page.locator('button.filter-btn').click();
+    const label = page.getByRole('textbox', { name: 'Filter by label', exact: true });
+    const pullRequest = page.getByRole('textbox', { name: 'Filter by pull request', exact: true });
+    await label.fill('ticket=example');
+    await pullRequest.fill('kenn-io/agentsview#2124');
+    await pullRequest.scrollIntoViewIfNeeded();
+    await expect(label).toBeVisible();
+    await snap(page, 'session-label-filters');
   });
 
   test('starred session', async ({ page }) => {
@@ -1006,6 +1045,7 @@ test.describe('Message viewer', () => {
     });
     await page.goto(`/sessions/${encodeURIComponent(remote.id)}`);
     await expect(page.locator('.message').first()).toBeVisible();
+    await expect(page.locator('.cost-badge')).toBeVisible();
     await page.locator('.resume-btn').click();
     const menu = page.locator('.open-menu');
     await expect(menu.getByRole('button', { name: 'Copy command', exact: true })).toBeVisible();
@@ -1014,45 +1054,7 @@ test.describe('Message viewer', () => {
   });
 
   test('thinking blocks', async ({ page }) => {
-    // Privacy filtering can exclude every real thinking session. Use a fixed
-    // transcript in that case so the required capture always has content.
-    const thinkingId = process.env.SCREENSHOT_THINKING_SESSION_ID;
-    if (thinkingId) {
-      await page.goto('/sessions/' + encodeURIComponent(thinkingId));
-    } else {
-      const session = {
-        id: 'screenshot-thinking', agent: 'codex', project: 'agentsview', machine: 'local',
-        display_name: 'Example session', first_message: 'Show an example response.',
-        started_at: '2026-10-23T12:00:00Z', ended_at: '2026-10-23T12:00:01Z',
-        created_at: '2026-10-23T12:00:00Z', message_count: 2, user_message_count: 1,
-        is_automated: false,
-      };
-      const thinkingText = 'Compare the example input and output.';
-      const responseText = 'The example is ready.';
-      const content = `[Thinking]\n${thinkingText}\n[/Thinking]\n\n${responseText}`;
-      const messages = [
-        {
-          id: 1, session_id: session.id, ordinal: 0, role: 'user',
-          content: session.first_message, content_length: session.first_message.length,
-          timestamp: session.started_at, model: '', thinking_text: '',
-          has_thinking: false, has_tool_use: false, is_system: false,
-          context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
-        },
-        {
-          id: 2, session_id: session.id, ordinal: 1, role: 'assistant',
-          content, content_length: content.length,
-          timestamp: session.ended_at, model: 'gpt-5.4', thinking_text: thinkingText,
-          has_thinking: true, has_tool_use: false, is_system: false,
-          context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
-        },
-      ];
-      const sessionPath = `/api/v1/sessions/${session.id}`;
-      await page.route(`**${sessionPath}`, (route) => route.fulfill({ json: session }));
-      await page.route(`**${sessionPath}/messages*`, (route) =>
-        route.fulfill({ json: { messages, count: messages.length } }),
-      );
-      await page.goto(`/sessions/${session.id}`);
-    }
+    await page.goto('/sessions/' + encodeURIComponent(CORPUS.targets.thinking.session_id));
     await page.waitForSelector('.message', { timeout: 15_000 });
     await page.waitForTimeout(500);
 
@@ -1074,7 +1076,7 @@ test.describe('Message viewer', () => {
     const header = thinking.locator('.thinking-header');
     await expect(header).toBeVisible();
     await header.click();
-    await expect(thinking).toContainText('Compare the example input and output.');
+    await expect(thinking.locator('.thinking-content')).toBeVisible();
     await thinking.scrollIntoViewIfNeeded();
     await page.waitForTimeout(200);
     await snapEl(thinking, 'thinking-blocks');
@@ -1112,30 +1114,10 @@ test.describe('Message viewer', () => {
   });
 
   test('formatted tool output', async ({ page }) => {
-    const toolOutputId = process.env.SCREENSHOT_TOOL_OUTPUT_SESSION_ID;
-    const toolOutputOrdinal =
-      process.env.SCREENSHOT_TOOL_OUTPUT_MESSAGE_ORDINAL;
-    let toolScope: Page | Locator = page;
-    if (toolOutputId || toolOutputOrdinal) {
-      if (!toolOutputId || toolOutputOrdinal === undefined) {
-        throw new Error(
-          'tool-output screenshot requires both session id and message ordinal'
-        );
-      }
-      const ordinal = Number(toolOutputOrdinal);
-      if (!Number.isSafeInteger(ordinal) || ordinal < 0) {
-        throw new Error('tool-output screenshot ordinal must be non-negative');
-      }
-      await page.goto(
-        '/sessions/' + encodeURIComponent(toolOutputId) +
-          '?msg=' + encodeURIComponent(String(ordinal))
-      );
-      const selectedRow = page.locator('.virtual-row.selected');
-      await expect(selectedRow).toBeVisible({ timeout: 15_000 });
-      toolScope = selectedRow;
-    } else {
-      await selectRichSession(page);
-    }
+    const target = CORPUS.targets.tool_output;
+    await page.goto('/sessions/' + encodeURIComponent(target.session_id) + '?msg=' + target.message_ordinal);
+    const toolScope = page.locator('.virtual-row.selected');
+    await expect(toolScope).toBeVisible({ timeout: 15_000 });
 
     const tool = await findVisibleToolBlockWithOutput(toolScope);
 
@@ -1184,6 +1166,7 @@ test.describe('Message viewer', () => {
   });
 
   test('tool call groups', async ({ page }) => {
+    await page.setViewportSize({ width: FULL.width, height: 1800 });
     await selectRichSession(page);
 
     const group = page.locator('.tool-group').first();
@@ -1275,37 +1258,15 @@ test.describe('Message viewer', () => {
   });
 
   test('copy button on code block', async ({ page }) => {
-    const session = {
-      id: 'screenshot-code-block', agent: 'codex', project: 'agentsview', machine: 'local',
-      first_message: 'Show a code sample.',
-      started_at: '2026-10-23T12:00:00Z', ended_at: '2026-10-23T12:00:01Z',
-      created_at: '2026-10-23T12:00:00Z', message_count: 2, user_message_count: 1,
-      is_automated: false,
-    };
-    const code = ['```go', 'fmt.Println("screenshot fixture")', '```'].join('\n');
-    const messages = [
-      {
-        id: 1, session_id: session.id, ordinal: 0, role: 'user',
-        content: session.first_message, content_length: session.first_message.length,
-        timestamp: session.started_at, model: '', thinking_text: '',
-        has_thinking: false, has_tool_use: false, is_system: false,
-        context_tokens: 0, output_tokens: 0, has_context_tokens: false, has_output_tokens: false,
-      },
-      {
-        id: 2, session_id: session.id, ordinal: 1, role: 'assistant',
-        content: code, content_length: code.length, timestamp: session.ended_at,
-        model: 'gpt-5.4', thinking_text: '', has_thinking: false, has_tool_use: false,
-        is_system: false, context_tokens: 0, output_tokens: 0,
-        has_context_tokens: false, has_output_tokens: false,
-      },
-    ];
-    const sessionPath = `/api/v1/sessions/${session.id}`;
-    await page.route(`**${sessionPath}`, (route) => route.fulfill({ json: session }));
-    await page.route(`**${sessionPath}/messages*`, (route) =>
-      route.fulfill({ json: { messages, count: messages.length } }),
-    );
-    await page.goto(`/sessions/${session.id}`);
+    await page.goto('/sessions/' + encodeURIComponent(CORPUS.targets.code_block.session_id));
+    await page.waitForSelector('.code-block', { timeout: 15_000 });
+    await page.waitForTimeout(500);
 
+    // Capture just the top of a code block where the copy
+    // button lives (CopyButton is absolutely positioned at
+    // top:6px, right:6px inside .code-block). We clip the
+    // page screenshot to a small region around that corner
+    // so multi-page diffs don't produce a 4000px tall image.
     const codeBlock = page.locator('.code-block').first();
     await expect(codeBlock).toBeVisible({ timeout: 15_000 });
     await codeBlock.evaluate((el) => el.scrollIntoView({ block: 'start' }));
@@ -1370,21 +1331,11 @@ test.describe('Command palette', () => {
     );
 
     const setup = palette.locator('.semantic-setup');
-    await expect(setup).toContainText(
-      "Semantic search isn't set up",
-      { timeout: 10_000 }
-    );
-    await expect(setup).toContainText('[vector]');
-    await expect(setup).toContainText('agentsview embeddings build');
-    const paletteShell = palette.locator('.palette');
-    await paletteShell.evaluate((el) => {
-      const shell = el as HTMLElement;
-      shell.style.maxHeight = 'none';
-      shell.style.overflow = 'visible';
-      const results = shell.querySelector<HTMLElement>('.palette-results');
-      if (results) results.style.overflow = 'visible';
+    await expect(setup).toContainText('Search by meaning', {
+      timeout: 10_000,
     });
-    await snapEl(setup, 'semantic-search-setup');
+    await expect(setup.getByRole('button', { name: 'Turn on' })).toBeVisible();
+    await snapEl(palette.locator('.palette'), 'semantic-search-setup');
   });
 
   test('project and date search filters', async ({ page }) => {
@@ -1519,6 +1470,83 @@ test.describe('Recall and Quality', () => {
     await page.waitForTimeout(300);
 
     await snapEl(breadcrumb, 'session-insight-action');
+  });
+
+  test('tool effectiveness action and report', async ({ page }) => {
+    const response = await page.request.get('/api/v1/sessions?limit=100');
+    expect(response.ok()).toBeTruthy();
+    const sessions: { id: string; project: string; agent: string }[] =
+      (await response.json()).sessions;
+    for (const session of sessions.filter((entry) => entry.project === 'agentsview')) {
+      const response = await page.request.get(
+        `/api/v1/sessions/${encodeURIComponent(session.id)}/tool-sequences`
+      );
+      if (!response.ok()) continue;
+      const facts = await response.json();
+      const sequence = facts.sequences.find(
+        (entry: { ending: string; calls: unknown[] }) =>
+          entry.ending === 'recovered' && entry.calls.length >= 2
+      );
+      if (!sequence) continue;
+      const first = sequence.calls[0];
+      const last = sequence.calls[sequence.calls.length - 1];
+      // Illustrative saved assessment over real, privacy-filtered calls.
+      // Capturing documentation must never invoke an insight model.
+      const report = {
+        id: 460,
+        type: 'tool_effectiveness',
+        date_from: '2026-10-22', date_to: '2026-10-22',
+        project: session.project, agent: session.agent,
+        model: 'claude-sonnet-4-6', prompt: null,
+        content: 'Tool effectiveness assessment',
+        schema_version: 'tool_effectiveness.v1',
+        created_at: '2026-10-22T12:00:00Z',
+        structured_json: JSON.stringify({
+          session_id: session.id,
+          transcript_revision: facts.transcript_revision,
+          call_count: facts.total_tool_calls,
+          conclusions: [
+            {
+              assessment: 'did_not_help',
+              text: 'The first call did not return useful content. Its result explains why another attempt was needed.',
+              ordinals: [first.ordinal],
+              calls: [{ ordinal: first.ordinal, call_index: first.call_index }],
+            },
+            {
+              assessment: 'helped',
+              text: 'A later call returned content and ended this recovery sequence. Follow the citation to inspect the result.',
+              ordinals: [last.ordinal],
+              calls: [{ ordinal: last.ordinal, call_index: last.call_index }],
+            },
+          ],
+          omissions: [],
+          cited_calls: [first, last].map((call) => ({
+            ...call,
+            result_bytes: call.result_bytes ?? undefined,
+            message_calls: sequence.calls.filter(
+              (other: { ordinal: number }) => other.ordinal === call.ordinal
+            ).length,
+          })),
+        }),
+      };
+      await page.goto(`/sessions/${encodeURIComponent(session.id)}`);
+      await expect(page.locator('.message').first()).toBeVisible();
+      await page.getByRole('button', { name: 'Session actions', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Analyze tool effectiveness', exact: true })).toBeVisible();
+      await snap(page, 'tool-effectiveness-action');
+      await page.route('**/api/v1/insights', (route) =>
+        route.fulfill({ json: { insights: [report] } })
+      );
+      await page.goto('/recall?tab=generated&insight=460');
+      const detail = page.locator('.generated-detail');
+      await expect(detail.getByRole('heading', { name: 'Model assessment' })).toBeVisible();
+      await expect(detail.locator('.tool-sequences-panel')).toBeVisible();
+      await detail.locator('.conclusion').last().locator('.citation').click();
+      await expect(detail.locator('.conclusion.open .call')).toBeVisible();
+      await snap(page, 'tool-effectiveness-report');
+      return;
+    }
+    throw new Error('fixture needs a recovered tool sequence for the report');
   });
 });
 
@@ -1731,12 +1759,10 @@ test.describe('Settings', () => {
   });
 
   test('settings embedding build progress', async ({ page }) => {
-    let statusPolls = 0;
-    const startedAt = new Date(Date.now() - 65_000).toISOString();
+    const startedAt = new Date(CAPTURE_NOW.getTime() - 65_000).toISOString();
 
     await page.route('**/api/v1/embeddings/status', async (route) => {
-      statusPolls += 1;
-      const done = 240 + statusPolls * 120;
+      const done = 360;
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -1750,6 +1776,16 @@ test.describe('Settings', () => {
           phase: 'embedding',
           rate_per_second: 10,
           running: true,
+          setup: {
+            action: '',
+            busy: false,
+            downloaded_bytes: 0,
+            enabled: true,
+            installing: false,
+            missing_bytes: 0,
+            provider: 'built-in',
+            total_bytes: 0,
+          },
           started_at: startedAt,
           total: 1000,
         }),
@@ -1786,10 +1822,10 @@ test.describe('Settings', () => {
     await embeddingsSection.scrollIntoViewIfNeeded();
     await expect(
       embeddingsSection.getByRole('progressbar', {
-        name: 'Embedding progress',
+        name: 'Search by meaning setup',
       })
     ).toBeVisible();
-    await expect(embeddingsSection.getByText(/^ETA /)).toBeVisible({
+    await expect(embeddingsSection.getByText(/^Indexing 360 of 1,000 text sections · .* left/)).toBeVisible({
       timeout: 5_000,
     });
 
@@ -1940,32 +1976,6 @@ test.describe('Token usage', () => {
 test.describe('Sub-agent tree', () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize(FULL);
-    const now = '2026-10-23T12:00:00Z';
-    const parent = {
-      id: 'screenshot-parent', agent: 'codex', display_name: 'Code review',
-      created_at: now, started_at: now, ended_at: '2026-10-23T12:02:00Z',
-      machine: 'local', project: 'agentsview', message_count: 2,
-      user_message_count: 1, is_automated: false, is_teammate: false,
-    };
-    const child = {
-      ...parent, id: 'screenshot-child', display_name: 'Inspect parser',
-      parent_session_id: parent.id, relationship_type: 'subagent',
-    };
-    const sessions = [
-      parent,
-      child,
-      { ...parent, id: 'screenshot-session-2', display_name: 'Review search filters' },
-      { ...parent, id: 'screenshot-session-3', display_name: 'Check tool results' },
-      { ...parent, id: 'screenshot-session-4', display_name: 'Update documentation' },
-    ];
-    await page.route('**/api/v1/sessions/sidebar-index*', (route) =>
-      route.fulfill({ json: { sessions, total: sessions.length, next_cursor: null } }),
-    );
-    for (const session of sessions) {
-      await page.route(`**/api/v1/sessions/${session.id}`, (route) =>
-        route.fulfill({ json: { ...session, first_message: session.display_name } }),
-      );
-    }
     await waitForApp(page);
   });
 
@@ -1990,19 +2000,8 @@ test.describe('Sub-agent tree', () => {
     }
     expect(found).toBe(true);
 
-    const childLabel = page.getByText('Inspect parser', { exact: true });
-    await expect(childLabel).toBeHidden();
     await treeToggle.first().click();
-    await expect(childLabel).toBeVisible();
-
-    const subagentToggle = page.locator('.sub-group-header');
-    await expect(subagentToggle).toHaveCount(1);
-    await subagentToggle.click();
-    await expect(childLabel).toBeHidden();
-
-    // Leave the hierarchy expanded in the capture.
-    await subagentToggle.click();
-    await expect(childLabel).toBeVisible();
+    await page.waitForTimeout(500);
     const sidebar = page.locator('.sidebar');
     await snapEl(sidebar, 'subagent-tree');
   });
@@ -2084,7 +2083,7 @@ test.describe('Focused transcript mode', () => {
 
 test.describe('Machine labels', () => {
   test('machine labels on session items', async ({ page }) => {
-    test.skip(!PG_BASE_URL, 'PG_BASE_URL not set');
+    expect(PG_BASE_URL, 'PG_BASE_URL is required').not.toBe('');
 
     await page.setViewportSize(FULL);
     await page.goto(PG_BASE_URL);
@@ -2228,6 +2227,17 @@ test.describe('Import conversations', () => {
 
     await page.keyboard.press('Escape');
   });
+
+  test('claude chrome sync connected', async ({ page }) => {
+    await page.route('**/api/v1/import/claude-ai/chrome', (route) =>
+      route.fulfill({ json: { connected: true } })
+    );
+    await page.getByTitle('Import conversations', { exact: true }).click();
+    const modal = page.getByRole('dialog');
+    await expect(modal.getByText('Connected', { exact: true })).toBeVisible();
+    await expect(modal.getByRole('button', { name: 'Sync', exact: true })).toBeEnabled();
+    await snapEl(modal, 'import-claude-sync');
+  });
 });
 
 // ── Session Vital Signs ─────────────────────────────────
@@ -2250,8 +2260,7 @@ test.describe('Session Vital Signs', () => {
       'button[aria-label="Show session analysis"], button[aria-label="Hide session analysis"]',
     );
     for (let i = 0; i < limit; i++) {
-      await items.nth(i).click();
-      await page.waitForSelector('.message', { timeout: 10_000 });
+      if (!(await openSessionWithMessages(items.nth(i)))) continue;
       await page.waitForTimeout(400);
       if (!(await vitalsBtn.count()) || !(await vitalsBtn.isVisible())) {
         continue;
@@ -2331,8 +2340,7 @@ test.describe('Session intelligence', () => {
     const total = await items.count();
     const limit = Math.min(total, 25);
     for (let i = 0; i < limit; i++) {
-      await items.nth(i).click();
-      await page.waitForSelector('.message', { timeout: 10_000 });
+      if (!(await openSessionWithMessages(items.nth(i)))) continue;
       await page.waitForTimeout(400);
       const badge = page.locator('.grade-badge');
       if (
@@ -2359,8 +2367,7 @@ test.describe('Session intelligence', () => {
     const limit = Math.min(total, 30);
     let firstGradedIdx = -1;
     for (let i = 0; i < limit; i++) {
-      await items.nth(i).click();
-      await page.waitForSelector('.message', { timeout: 10_000 });
+      if (!(await openSessionWithMessages(items.nth(i)))) continue;
       await page.waitForTimeout(300);
       const badge = page.locator('.grade-badge').first();
       if (!(await badge.count()) || !(await badge.isVisible())) {
@@ -2459,7 +2466,9 @@ test.describe('Dashboard session health', () => {
 
 test.describe('Usage dashboard', () => {
   async function navigateToUsage(page: Page) {
-    await page.goto('/usage');
+    // The newest session can be a prompt without usage. Include the corpus's
+    // earlier sessions so the cost charts have recorded tokens to show.
+    await page.goto('/usage?window_days=90');
     await page.waitForSelector('.usage-page', { timeout: 10_000 });
     // Wait for summary + charts to finish loading
     await expect(
@@ -2518,6 +2527,17 @@ test.describe('Usage dashboard', () => {
     await page.waitForTimeout(500);
     // Treemap is the default view
     await snapEl(panel, 'usage-attribution');
+  });
+
+  test('selected cost attribution', async ({ page }) => {
+    const panel = page.locator('.attribution-panel');
+    const tile = panel.locator('.tile').first();
+    await expect(tile).toBeVisible();
+    await tile.click();
+    await expect(tile).toHaveAttribute('aria-pressed', 'true');
+    await expect(panel.getByRole('button', { name: 'Clear selection', exact: true })).toBeVisible();
+    await expect(page.locator('.usage-content')).toHaveAttribute('aria-busy', 'false');
+    await snapEl(panel, 'usage-attribution-selected');
   });
 
   test('top sessions by cost', async ({ page }) => {

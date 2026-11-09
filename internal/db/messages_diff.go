@@ -18,9 +18,10 @@ const diffDeleteChunkSize = 500
 // declaration order. insertMessagesTx and the diff UPDATE share it
 // so the persisted tuple has exactly one definition.
 func messageInsertArgs(m Message) []any {
+	dialogue, dialogueIsContent := StoredDialogue(m.Content, m.ThinkingText, m.DialogueText)
 	return []any{
 		m.SessionID, m.Ordinal, m.Role, m.Content,
-		m.ThinkingText, m.DialogueText,
+		m.ThinkingText, dialogue, dialogueIsContent,
 		m.Timestamp, m.HasThinking, m.HasToolUse,
 		m.ContentLength, m.IsSystem,
 		m.Model, m.ReasoningEffort, string(m.TokenUsage),
@@ -139,11 +140,9 @@ type messageDiffPlan struct {
 // must use the full replace path; a load failure also degrades to
 // full replace rather than failing the write.
 func (db *DB) planStoredMessageDiff(
-	sessionID string, msgs []Message,
+	ctx context.Context, sessionID string, msgs []Message,
 ) (messageDiffPlan, []Message, bool, bool) {
-	stored, err := db.GetAllMessages(
-		context.Background(), sessionID,
-	)
+	stored, err := db.GetAllMessages(ctx, sessionID)
 	if err != nil {
 		return messageDiffPlan{}, nil, false, false
 	}

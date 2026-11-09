@@ -68,7 +68,7 @@ func (r *embedPushReplica) VectorGenerations(
 	return r.gens, nil
 }
 
-func (r *embedPushReplica) OpenStore(storage.ReplicaTarget) (storage.ReplicaStore, error) {
+func (r *embedPushReplica) OpenStore(context.Context, storage.ReplicaTarget) (storage.ReplicaStore, error) {
 	r.mu.Lock()
 	r.opens++
 	r.mu.Unlock()
@@ -366,7 +366,7 @@ func TestReplicaWatchEmbedSpacesRecipeLookups(t *testing.T) {
 	t.Cleanup(func() { assert.NoError(t, embedder.Close()) })
 	embedder.resolveRetry = time.Hour
 	var logs bytes.Buffer
-	restoreTestLogger(t)
+	restoreTestLogOutput(t)
 	log.SetOutput(&logs)
 
 	embedder.ensureScheduler(t.Context())
@@ -629,7 +629,7 @@ func TestReplicaPushEmbedUsesLocalWriterWithoutDaemon(t *testing.T) {
 		t.Setenv("AGENTSVIEW_NO_DAEMON", "")
 		clearConfiguredAgentEnvVars(t)
 		isolateDefaultAgentDirs(t, dataDir)
-		restoreTestLogger(t)
+		restoreTestLogOutput(t)
 		starts := 0
 		stubStartBackgroundServeForTransport(t, func(
 			context.Context, *config.Config, time.Duration, bool,
@@ -665,7 +665,7 @@ endpoint = %q
 
 		var err error
 		captureStdout(t, func() {
-			err = runReplicaPush(pgReplica{}, ReplicaPushConfig{Embed: true}, "")
+			err = runReplicaPush(t.Context(), pgReplica{}, ReplicaPushConfig{Embed: true}, "")
 		})
 		require.Error(t, err, "the unreachable hub fails before building")
 		require.NotErrorIs(t, err, errEmbedNeedsLocalArchive)
@@ -682,7 +682,7 @@ allow_insecure = true
 `)
 		// Neither [vector] nor a deployment endpoint: the local writer's
 		// embedder rejects the request before the watch loop starts.
-		err := runReplicaPushWatch(pgReplica{}, ReplicaPushConfig{Embed: true}, "")
+		err := runReplicaPushWatch(t.Context(), pgReplica{}, ReplicaPushConfig{Embed: true}, "")
 		require.Error(t, err)
 		require.NotErrorIs(t, err, errEmbedNeedsLocalArchive)
 		assert.Zero(t, *starts)
@@ -708,10 +708,10 @@ allow_insecure = true
 
 			var err error
 			if watch {
-				err = runReplicaPushWatch(pgReplica{}, ReplicaPushConfig{Embed: true}, "")
+				err = runReplicaPushWatch(t.Context(), pgReplica{}, ReplicaPushConfig{Embed: true}, "")
 			} else {
 				captureStdout(t, func() {
-					err = runReplicaPush(pgReplica{}, ReplicaPushConfig{Embed: true}, "")
+					err = runReplicaPush(t.Context(), pgReplica{}, ReplicaPushConfig{Embed: true}, "")
 				})
 			}
 			require.ErrorIs(t, err, errEmbedNeedsLocalArchive)
@@ -748,6 +748,8 @@ func TestReplicaPushEmbedFlagValidation(t *testing.T) {
 		{args: []string{"pg", "push", "--embed", "--no-vectors"}, want: "--embed cannot be combined with --no-vectors"},
 		{args: []string{"pg", "push", "--embed", "--all"}, want: "--embed cannot be combined with --all"},
 		{args: []string{"pg", "push", "--embed", "--all", "--watch"}, want: "--embed cannot be combined with --all"},
+		{args: []string{"pg", "push", "--watch", "--embed", "--no-start-daemon"}, want: "--embed cannot be combined with --no-start-daemon"},
+		{args: []string{"clickhouse", "push", "--no-start-daemon"}, want: "--no-start-daemon requires --watch"},
 		{args: []string{"clickhouse", "push", "--embed"}, want: "unknown flag: --embed"},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {

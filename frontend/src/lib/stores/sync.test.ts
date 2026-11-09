@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
   checkForUpdate: vi.fn(),
   isRemoteConnection: vi.fn(),
   setEventsAvailable: vi.fn(),
+  settleStartup: vi.fn(),
   ApiError: class MockGeneratedApiError extends Error {
     status: number;
 
@@ -57,6 +58,7 @@ vi.mock("../api/generated/index", () => ({
 vi.mock("./events.svelte.js", () => ({
   events: {
     setAvailable: api.setEventsAvailable,
+    settleStartup: api.settleStartup,
   },
 }));
 
@@ -96,6 +98,33 @@ function mockResyncFailure(error: Error): void {
   });
 }
 
+describe("hidden status polling", () => {
+  it("leaves a hidden tab quiet and polls again when visible", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    const load = vi.spyOn(sync, "loadStatus").mockResolvedValue();
+    try {
+      sync.startPolling();
+      sync.startPolling();
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(load).not.toHaveBeenCalled();
+      visibility.mockReturnValue(false);
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(load).toHaveBeenCalledOnce();
+      sync.stopPolling();
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(load).toHaveBeenCalledOnce();
+    } finally {
+      sync.stopPolling();
+      visibility.mockRestore();
+      load.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("session watch visibility", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -105,7 +134,60 @@ describe("session watch visibility", () => {
 
   afterEach(() => {
     sync.unwatchSession();
+    vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it.each(["session_ready", "hidden", "timeout"])(
+    "releases the initial read on %s and keeps ready updates",
+    async (reason) => {
+      vi.useFakeTimers();
+      if (reason === "hidden") vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+      const onUpdate = vi.fn();
+      const settled = vi.fn();
+      const ready = sync.watchSession("session-a", onUpdate);
+      void ready.then(settled);
+      const stream = api.watchSession.mock.results[0]?.value;
+      if (reason === "session_ready") {
+        await Promise.resolve();
+        expect(settled).not.toHaveBeenCalled();
+        stream.dispatchEvent(new Event(reason));
+      } else if (reason === "timeout") {
+        await vi.advanceTimersByTimeAsync(999);
+        expect(settled).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+      } else {
+        expect(api.watchSession).not.toHaveBeenCalled();
+      }
+      expect(await ready).toBe(reason === "session_ready");
+      expect(vi.getTimerCount()).toBe(0);
+      if (stream) {
+        const initialUpdates = reason === "session_ready" ? 1 : 0;
+        expect(onUpdate).toHaveBeenCalledTimes(initialUpdates);
+        stream.dispatchEvent(new Event("session_ready"));
+        stream.dispatchEvent(new Event("session_ready"));
+        expect(onUpdate).toHaveBeenCalledTimes(initialUpdates + 2);
+      }
+    },
+  );
+
+  it("releases the initial read immediately on a watch error", async () => {
+    vi.useFakeTimers();
+    const onUpdate = vi.fn();
+    const settled = vi.fn();
+    const ready = sync.watchSession("session-a", onUpdate);
+    void ready.then(settled);
+    const stream = api.watchSession.mock.results[0]!.value;
+
+    stream.dispatchEvent(new Event("error"));
+    await Promise.resolve();
+
+    expect(settled).toHaveBeenCalledExactlyOnceWith(false);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    stream.dispatchEvent(new Event("session_ready"));
+    expect(onUpdate).toHaveBeenCalledTimes(1);
   });
 
   it("closes a hidden session stream and refreshes on return and every reconnect", () => {
@@ -367,6 +449,86 @@ describe("SyncStore.triggerSync", () => {
   });
 });
 
+describe("SyncStore.triggerSync stale archive", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const s = sync as unknown as Record<string, unknown>;
+    s.syncing = false;
+    s.progress = null;
+    s.serverVersion = null;
+    s.archiveStale = false;
+    s.lastSyncError = null;
+    s.syncCompleteListeners = [];
+  });
+
+  afterEach(() => {
+    const s = sync as unknown as Record<string, unknown>;
+    s.archiveStale = false;
+    s.lastSyncError = null;
+  });
+
+  it("rebuilds the archive instead of syncing when it is stale", async () => {
+    mockResyncSuccess();
+    const s = sync as unknown as Record<string, unknown>;
+    s.archiveStale = true;
+    const onComplete = vi.fn();
+
+    sync.triggerSync(onComplete);
+
+    await vi.waitFor(() => {
+      expect(onComplete).toHaveBeenCalled();
+    });
+    expect(api.triggerSync).not.toHaveBeenCalled();
+    expect(api.triggerResync).toHaveBeenCalledTimes(1);
+  });
+
+  it("rebuilds the archive when the server rejects a sync as needing one", async () => {
+    vi.mocked(api.triggerSync).mockReturnValue({
+      abort: vi.fn(),
+      done: Promise.reject(new api.ApiError(409, "archive data version changed")),
+    });
+    mockResyncSuccess();
+    const onComplete = vi.fn();
+
+    sync.triggerSync(onComplete);
+
+    await vi.waitFor(() => {
+      expect(onComplete).toHaveBeenCalled();
+    });
+    expect(api.triggerSync).toHaveBeenCalledTimes(1);
+    expect(api.triggerResync).toHaveBeenCalledTimes(1);
+    expect(sync.lastSyncStats).toEqual(MOCK_STATS);
+    expect(sync.lastSyncError).toBeNull();
+    expect(reportSyncFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps a sync failure for the status bar until a sync succeeds", async () => {
+    const error = new Error("the required archive rebuild did not complete");
+    vi.mocked(api.triggerSync).mockReturnValue({ abort: vi.fn(), done: Promise.reject(error) });
+
+    sync.triggerSync();
+
+    await vi.waitFor(() => {
+      expect(sync.lastSyncError).toBe(error.message);
+    });
+    expect(api.triggerResync).not.toHaveBeenCalled();
+    expect(sync.syncing).toBe(false);
+
+    vi.mocked(api.triggerSync).mockReturnValue({
+      abort: vi.fn(),
+      done: Promise.resolve(MOCK_STATS),
+    });
+    mockResyncSuccess();
+    const onComplete = vi.fn();
+    sync.triggerSync(onComplete);
+
+    await vi.waitFor(() => {
+      expect(onComplete).toHaveBeenCalled();
+    });
+    expect(sync.lastSyncError).toBeNull();
+  });
+});
+
 describe("SyncStore.triggerResync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -591,6 +753,7 @@ describe("SyncStore.remoteUnreachable", () => {
     s.backendDegraded = false;
     s.backendDegradedMessage = null;
     s.statusHydrated = false;
+    s.syncPending = false;
   });
 
   it("flags unreachable when a remote load fails", async () => {
@@ -869,6 +1032,7 @@ describe("SyncStore.remoteUnreachable", () => {
     await sync.loadVersion();
 
     expect(api.setEventsAvailable).not.toHaveBeenCalled();
+    expect(api.settleStartup).toHaveBeenCalledTimes(1);
 
     await sync.loadStatus();
 

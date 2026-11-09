@@ -71,11 +71,18 @@
 
   let codexCloudLine = $derived(codexCloudStatusLine(codexCloudStatus.rows));
 
+  // Read-only and archive-only backends cannot rebuild the archive.
+  let canRebuildArchive = $derived(!sync.syncing && !sync.readOnly && !sync.archiveOnly);
+
+  let showSyncError = $derived(!sync.syncing && sync.lastSyncError !== null);
+
   onMount(() => {
     const interval = window.setInterval(() => {
       relativeTimeTick = Date.now();
     }, RELATIVE_TIME_REFRESH_MS);
-    const loadCodexCloudStatus = () => void codexCloudStatus.load();
+    const loadCodexCloudStatus = () => {
+      if (!document.hidden) void codexCloudStatus.load();
+    };
     loadCodexCloudStatus();
     const codexCloudInterval = window.setInterval(
       loadCodexCloudStatus,
@@ -211,25 +218,37 @@
         {m.status_bar_version_mismatch()}
       </button>
     {/if}
-    {#if sync.archiveStale}
+    {#if sync.archiveStale || sync.syncPending}
       {#if sync.versionMismatch}<span class="sep">&middot;</span>{/if}
-      <span class="archive-warn" role="status">
-        {sync.syncing && sync.progress?.resync ? m.status_bar_archive_rebuilding() : m.status_bar_archive_stale()}
+      {#if sync.archiveStale && sync.syncing && sync.progress?.resync}
+        <span class="archive-warn" role="status">{m.status_bar_archive_rebuilding()}</span>
+      {:else if sync.archiveStale && canRebuildArchive}
+        <button class="archive-warn archive-rebuild" onclick={() => sync.triggerSync()}>
+          {m.status_bar_archive_stale_rebuild()}
+        </button>
+      {:else}
+        <span class="archive-warn" role="status">{m.status_bar_archive_stale()}</span>
+      {/if}
+    {/if}
+    {#if showSyncError}
+      {#if sync.versionMismatch || sync.archiveStale || sync.syncPending}<span class="sep">&middot;</span>{/if}
+      <span class="sync-error" role="alert" title={sync.lastSyncError ?? undefined}>
+        {m.status_bar_sync_failed()}
       </span>
     {/if}
     {#if progressText}
-      {#if sync.versionMismatch || sync.archiveStale}<span class="sep">&middot;</span>{/if}
+      {#if sync.versionMismatch || sync.archiveStale || sync.syncPending || showSyncError}<span class="sep">&middot;</span>{/if}
       <span class="sync-progress" title={progressTitle ?? undefined}>
         {progressText}
       </span>
     {:else if lastSyncText}
-      {#if sync.versionMismatch || sync.archiveStale}<span class="sep">&middot;</span>{/if}
+      {#if sync.versionMismatch || sync.archiveStale || sync.syncPending || showSyncError}<span class="sep">&middot;</span>{/if}
       <span title={lastSyncTimestamp ?? undefined}>
         {m.status_bar_synced_ago({ time: lastSyncText })}
       </span>
     {/if}
     {#if sync.serverVersion}
-      {#if sync.versionMismatch || sync.archiveStale || progressText || sync.lastSync}
+      {#if sync.versionMismatch || sync.archiveStale || sync.syncPending || showSyncError || progressText || sync.lastSync}
         <span class="sep">&middot;</span>
       {/if}
       <button
@@ -262,6 +281,15 @@
 
   .archive-warn {
     color: var(--accent-orange);
+  }
+
+  .archive-rebuild:hover {
+    text-decoration: underline;
+  }
+
+  .sync-error {
+    color: var(--accent-red);
+    font-weight: 500;
   }
 
   .sync-progress {
