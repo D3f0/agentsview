@@ -78,7 +78,7 @@ def publish(directory: Path, tag: str, source: str, repo: str) -> None:
             "No global PyPI publication.\n\n"
             f"```bash\nuvx --from '{wheel_url}' agentsview --version\n```\n")
     release = gh("api", f"repos/{repo}/releases", "--method", "POST", payload={
-        "tag_name": tag, "target_commitish": source, "name": f"AgentsView {tag} — Bob compatibility",
+        "tag_name": tag, "name": f"AgentsView {tag} — Bob compatibility",
         "body": body, "draft": True, "prerelease": True})
     if not release["draft"] or release["tag_name"] != tag or release["assets"]:
         raise ValueError("New draft release state is not safe for upload")
