@@ -5,48 +5,87 @@ on:
     branches: [upstream-v0.46.1-bob]
     paths:
       - '.github/workflows/bob-macos-release.yml'
+      - 'scripts/bob_release.py'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: New immutable Bob prerelease tag
+        required: true
+        default: v0.47.0-bob.2.2
+      source_sha:
+        description: Exact source commit the tag must identify
+        required: true
+        default: 8823ce27240abacf3ddac4214db70a266941f82e
 
 permissions:
   contents: read
 
 concurrency:
-  group: bob-macos-release
+  group: bob-macos-release-${{ inputs.release_tag || 'v0.47.0-bob.2.2' }}
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: v0.47.0-bob.2.1
-  PACKAGE_VERSION: 0.47.0+bob.2.1
   GOFLAGS: -trimpath
 
 jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 40
+    outputs:
+      tag: ${{ steps.params.outputs.tag }}
+      source: ${{ steps.params.outputs.source }}
+      package: ${{ steps.params.outputs.package }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          path: automation
+          persist-credentials: false
+
+      - name: Validate release target
+        id: params
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag || 'v0.47.0-bob.2.2' }}
+          REQUESTED_SOURCE: ${{ inputs.source_sha || '8823ce27240abacf3ddac4214db70a266941f82e' }}
+        run: python3 automation/scripts/bob_release.py prepare --tag "$REQUESTED_TAG" --source "$REQUESTED_SOURCE"
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ steps.params.outputs.tag }}
+          path: source
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Verify immutable source ancestry
+        working-directory: source
+        env:
+          SOURCE_SHA: ${{ steps.params.outputs.source }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor 8823ce27240abacf3ddac4214db70a266941f82e HEAD
+          git merge-base --is-ancestor ef43f625641297f7818749c48760b46db1afab8a HEAD
+
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: source/go.mod
           cache: false
 
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '26.12.1'
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: source/frontend/package-lock.json
 
       - uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.13'
 
       - name: Build native ARM64 release binary
+        working-directory: source
         env:
+          RELEASE_TAG: ${{ steps.params.outputs.tag }}
+          SOURCE_SHA: ${{ steps.params.outputs.source }}
+          PACKAGE_VERSION: ${{ steps.params.outputs.package }}
           CGO_ENABLED: '1'
           MACOSX_DEPLOYMENT_TARGET: '13.0'
           DO_NOT_TRACK: '1'
@@ -54,7 +93,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = arm64
           test "$(go env GOHOSTARCH)" = arm64
-          make release-darwin-arm64 VERSION="$RELEASE_TAG" \
+          make release-darwin-arm64 VERSION="$RELEASE_TAG" COMMIT="$SOURCE_SHA" \
             POSTHOG_PROJECT_KEY= DISTRIBUTION=d3f0
           mv dist/agentsview-darwin-arm64 dist/agentsview
           codesign --force --sign - dist/agentsview
@@ -64,14 +103,12 @@ jobs:
           python3 - <<'PY'
           import re
           from pathlib import Path
-          load_commands = Path("dist/macho-load-commands.txt").read_text()
-          versions = re.findall(r"\bminos\s+(\d+(?:\.\d+)+)", load_commands)
+          versions = re.findall(r"\bminos\s+(\d+(?:\.\d+)+)", Path("dist/macho-load-commands.txt").read_text())
           assert versions and all(tuple(map(int, version.split("."))) == (13, 0) for version in versions), versions
           PY
           ./dist/agentsview --version
-          mkdir -p artifacts
-          tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_darwin_arm64.tar.gz" \
-            -C dist agentsview
+          mkdir artifacts
+          tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_darwin_arm64.tar.gz" -C dist agentsview
           python3 - <<'PY'
           import os
           import runpy
@@ -81,8 +118,12 @@ jobs:
           builder["build_all_wheels"](Path("artifacts"), Path("artifacts"), os.environ["PACKAGE_VERSION"], Path("README.md").read_text())
           PY
 
-      - name: Smoke-check packaged wheel on macOS
+      - name: Smoke-check exact wheel and release contracts
+        working-directory: source
         env:
+          RELEASE_TAG: ${{ steps.params.outputs.tag }}
+          SOURCE_SHA: ${{ steps.params.outputs.source }}
+          PACKAGE_VERSION: ${{ steps.params.outputs.package }}
           DO_NOT_TRACK: '1'
           AGENTSVIEW_NO_DAEMON: '1'
         run: |
@@ -90,18 +131,54 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/bob-wheel-smoke"
           "$RUNNER_TEMP/bob-wheel-smoke/bin/pip" install --no-deps \
             "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-macosx_13_0_arm64.whl"
-          "$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview" --version
-          "$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview" source list bob --json
+          export BOB_BINARY="$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview"
+          python3 - <<'PY'
+          import json, os, subprocess, tempfile, time, urllib.request
+          from pathlib import Path
+          binary = os.environ["BOB_BINARY"]
+          version = subprocess.check_output([binary, "--version"], text=True)
+          print(version)
+          assert os.environ["RELEASE_TAG"] in version and os.environ["SOURCE_SHA"] in version
+          for args, marker in [(["replica","pg","service","start","--help"], "Start the auto-push"), (["replica","pg","service","stop","--help"], "Stop the auto-push"), (["replica","pg","push","--help"], "--watch")]:
+              assert marker in subprocess.check_output([binary,*args],text=True)
+          home = Path(tempfile.mkdtemp())
+          env = os.environ.copy()
+          env.update(HOME=str(home), AGENTSVIEW_DATA_DIR=str(home / "archive"))
+          process = subprocess.Popen([binary,"serve","--host","127.0.0.1","--port","17439","--no-browser","--no-sync","--no-update-check"],env=env)
+          try:
+              for _ in range(60):
+                  try:
+                      info = json.load(urllib.request.urlopen("http://127.0.0.1:17439/api/v1/version",timeout=2))
+                      break
+                  except OSError:
+                      if process.poll() is not None: raise RuntimeError("Smoke server exited")
+                      time.sleep(1)
+              else: raise RuntimeError("Smoke server did not become ready")
+              assert info["api_version"] == 15 and info["data_version"] == 169
+              assert info["commit"] == os.environ["SOURCE_SHA"]
+              print(json.dumps(info))
+          finally:
+              process.terminate()
+              process.wait(timeout=30)
+          build = {"tag":os.environ["RELEASE_TAG"],"source_sha":os.environ["SOURCE_SHA"],"workflow_sha":os.environ["GITHUB_SHA"],"package_version":os.environ["PACKAGE_VERSION"],"api_version":15,"data_version":169,"minos":"13.0","architecture":"arm64","wheel_runtime":version.strip()}
+          Path("artifacts/BUILD.json").write_text(json.dumps(build,indent=2)+"\n")
+          PY
           export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
-          CGO_ENABLED=1 go test -tags fts5 ./internal/parser -run Bob -count=1
-          CGO_ENABLED=1 go test -tags fts5 ./internal/sync -run TestBobVersionUpgrade -count=1
+          CGO_ENABLED=1 go test -tags fts5 ./internal/parser ./internal/config -run Bob -count=1
+          CGO_ENABLED=1 go test -tags fts5 ./internal/sync -run 'TestBobRelease|TestBobVersionUpgrade' -count=1
           cd artifacts
-          shasum -a 256 *.tar.gz *.whl > SHA256SUMS-macos-arm64
+          shasum -a 256 *.tar.gz *.whl BUILD.json > SHA256SUMS
+
+      - name: Verify complete artifact gate
+        env:
+          RELEASE_TAG: ${{ steps.params.outputs.tag }}
+          SOURCE_SHA: ${{ steps.params.outputs.source }}
+        run: python3 automation/scripts/bob_release.py verify --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --directory source/artifacts
 
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: bob-macos-arm64-release
-          path: artifacts/*
+          path: source/artifacts/*
           if-no-files-found: error
 
   publish:
@@ -111,20 +188,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          path: automation
+          persist-credentials: false
+
       - uses: actions/download-artifact@v8.0.2
         with:
           name: bob-macos-arm64-release
           path: artifacts
 
-      - name: Attach verified macOS artifacts
+      - name: Verify draft, upload, and publish new prerelease
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          cd artifacts
-          sha256sum --check SHA256SUMS-macos-arm64
-          gh release upload "$RELEASE_TAG" \
-            "agentsview_${PACKAGE_VERSION}_darwin_arm64.tar.gz" \
-            "agentsview-${PACKAGE_VERSION}-py3-none-macosx_13_0_arm64.whl" \
-            SHA256SUMS-macos-arm64 --clobber
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          SOURCE_SHA: ${{ needs.build.outputs.source }}
+        run: python3 automation/scripts/bob_release.py publish --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --directory artifacts

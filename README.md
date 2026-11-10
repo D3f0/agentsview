@@ -905,15 +905,18 @@ or newer and `uv`).
 
 ### Bob macOS release artifacts
 
-The fork's `bob-macos-release.yml` workflow builds the existing
-`v0.47.0-bob.2.1` tag on a native macOS ARM64 runner. It attaches a signed
-macOS 13-compatible CLI archive, a `0.47.0+bob.2.1` Python wheel, and platform
-checksums to that release after native executable, wheel, and Bob parser checks.
-The signature is ad hoc, not Developer ID notarization. It does not publish to
-PyPI or move the release tag. Run it from the existing Bob branch:
+The fork's `bob-macos-release.yml` workflow builds a new immutable Bob tag from
+an exact source commit on a native macOS ARM64 runner. It verifies source
+ancestry, macOS 13 deployment metadata, ad-hoc signing, installed-wheel runtime,
+API 15/archive 169, replica commands, and Bob regressions. Only the current run's
+archive, wheel, build provenance, and checksum manifest can enter a new draft.
+The workflow verifies uploaded checksums before publishing a prerelease. It
+never overwrites the existing Bob 2.1 release, moves a tag, or publishes to PyPI.
+Run it from the existing automation branch with matching new tag/source inputs:
 
 ```bash
-gh workflow run bob-macos-release.yml --ref upstream-v0.46.1-bob --repo OWNER/agentsview
+gh workflow run bob-macos-release.yml --ref upstream-v0.46.1-bob --repo OWNER/agentsview \
+  -f release_tag=v0.47.0-bob.2.2 -f source_sha=8823ce27240abacf3ddac4214db70a266941f82e
 ```
 
 ### Shared Go build cache
