@@ -3,6 +3,9 @@ title: Quick Start
 description: Get AgentsView running in under a minute
 ---
 
+CLI examples follow `main`. For older releases, use the legacy spellings in
+the [command migration](commands.md#command-migration).
+
 ## Install
 
 ### Desktop App
@@ -202,13 +205,18 @@ docker run --rm -p 127.0.0.1:8080:8080 \
   ghcr.io/kenn-io/agentsview:latest
 ```
 
+To ingest and publish sessions from the same container, enable the commented
+PostgreSQL and push-watch block in `docker-compose.prod.yaml` and set your
+database URL. That file mounts the session roots and `/data` and gives the
+container 40 seconds to finish its final push.
+
 ## Run
 
 The desktop app handles startup automatically: it attaches to an existing local
 daemon or starts one in the background, then opens the discovered URL. The
-daemon is shared with CLI commands and may outlive the desktop window, but it
-self-exits after an idle period when no client request or daemon-owned job is
-active.
+daemon is shared with CLI commands and may outlive the desktop window.
+Automatically started daemons self-exit after an idle period when no client
+request or daemon-owned job is active.
 
 CLI users can start the web UI explicitly:
 
@@ -263,7 +271,7 @@ archive directly in read-only mode. Commands that need fresh data or need to
 write, including `sync`, `usage`, `token-use`, `pg push`, and `duckdb push`,
 auto-start the detached daemon when needed. The server remains running after
 these commands finish. For scripts or CI jobs that must leave no background
-server, stop the daemon first, then run `AGENTSVIEW_NO_DAEMON=1 agentsview sync`.
+server, stop the daemon first, then run `AGENTSVIEW_NO_DAEMON=1 agentsview source sync`.
 That setting disables auto-start; it does not stop a running daemon or bypass
 its archive lock.
 

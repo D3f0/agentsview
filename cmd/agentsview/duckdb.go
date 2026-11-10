@@ -33,12 +33,8 @@ type DuckDBPushConfig struct {
 	Watch           bool
 	Debounce        time.Duration
 	Interval        time.Duration
-	// Automatic is set by the watch loops' automatic pushes: an
-	// incremental push blocked by read-only serve handles defers instead
-	// of rebuilding the whole archive on every changed batch, and
-	// archive-scale diagnostics are skipped (see
-	// storage.MirrorPushOptions.Automatic). Explicit `duckdb push` runs leave
-	// it false and do neither.
+	// Automatic marks watch-loop pushes, which skip archive-scale diagnostics
+	// and defer on rebuild-lock contention.
 	Automatic bool
 }
 
@@ -66,13 +62,13 @@ type DuckDBQuackServeConfig struct {
 	AllowInsecure bool
 }
 
-func runDuckDBPush(cfg DuckDBPushConfig) {
+func runDuckDBPush(ctx context.Context, cfg DuckDBPushConfig) {
 	appCfg, err := config.LoadMinimalFor(config.ScopeLocal)
 	if err != nil {
-		log.Fatalf("loading config: %v", err)
+		fatal("loading config: %v", err)
 	}
 	if err := os.MkdirAll(appCfg.DataDir, 0o755); err != nil {
-		log.Fatalf("creating data dir: %v", err)
+		fatal("creating data dir: %v", err)
 	}
 	setupLogFile(appCfg.DataDir)
 
@@ -90,7 +86,7 @@ func runDuckDBPush(cfg DuckDBPushConfig) {
 	writeDuckDBPushPlan(os.Stdout, duckCfg, cfg, projects, excludeProjects)
 
 	ctx, stop := signal.NotifyContext(
-		context.Background(), duckDBLongRunningSignals()...,
+		ctx, duckDBLongRunningSignals()...,
 	)
 	defer stop()
 
@@ -263,13 +259,13 @@ func duckDBLongRunningSignals() []os.Signal {
 	return []os.Signal{os.Interrupt, syscall.SIGTERM}
 }
 
-func runDuckDBStatus() {
+func runDuckDBStatus(ctx context.Context) {
 	appCfg, err := config.LoadMinimalFor(config.ScopeLocal)
 	if err != nil {
-		log.Fatalf("loading config: %v", err)
+		fatal("loading config: %v", err)
 	}
 	if err := os.MkdirAll(appCfg.DataDir, 0o755); err != nil {
-		log.Fatalf("creating data dir: %v", err)
+		fatal("creating data dir: %v", err)
 	}
 	setupLogFile(appCfg.DataDir)
 
@@ -278,7 +274,7 @@ func runDuckDBStatus() {
 		fatal("duckdb status: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
 
 	status, err := duckdbsync.ReadStatusFromConfig(ctx, duckCfg)
@@ -287,7 +283,7 @@ func runDuckDBStatus() {
 	}
 	if status.MirrorMissing {
 		fmt.Printf(
-			"DuckDB mirror not found at %s; run 'agentsview duckdb push' to create it\n",
+			"DuckDB mirror not found at %s; run 'agentsview replica duckdb push' to create it\n",
 			duckCfg.Path,
 		)
 		return
@@ -324,7 +320,7 @@ func loadDuckDBServeConfig(cmd *cobra.Command) (config.Config, string, error) {
 	return cfg, basePath, nil
 }
 
-func runDuckDBServe(appCfg config.Config, basePath string) {
+func runDuckDBServe(ctx context.Context, appCfg config.Config, basePath string) {
 	setupLogFile(appCfg.DataDir)
 	if appCfg.RequireAuth {
 		if err := appCfg.EnsureAuthToken(); err != nil {
@@ -344,7 +340,7 @@ func runDuckDBServe(appCfg config.Config, basePath string) {
 	}
 
 	ctx, stop := signal.NotifyContext(
-		context.Background(), duckDBLongRunningSignals()...,
+		ctx, duckDBLongRunningSignals()...,
 	)
 	defer stop()
 
@@ -447,6 +443,9 @@ func openDuckDBServeStore(
 	if len(appCfg.CustomModelPricing) > 0 {
 		store.SetCustomPricing(appCfg.CustomModelPricing)
 	}
+	if err := store.OpenActivityReportDisk(ctx); err != nil {
+		log.Printf("duckdb serve: keeping activity reports in memory only: %v", err)
+	}
 	if appCfg.CursorSecret != "" {
 		secret, decErr := base64.StdEncoding.DecodeString(appCfg.CursorSecret)
 		if decErr != nil {
@@ -464,7 +463,7 @@ func openDuckDBServeStore(
 	if schemaErr != nil {
 		if duckCfg.URL == "" {
 			fatal("duckdb serve: schema incompatible: %v\n"+
-				"Run 'agentsview duckdb push --full' to repopulate the mirror.", schemaErr)
+				"Run 'agentsview replica duckdb push --full' to repopulate the mirror.", schemaErr)
 		}
 		fatal("duckdb serve: schema incompatible: %v", schemaErr)
 	}
@@ -505,7 +504,7 @@ func duckDBMirrorServeProbeError(probe duckdbsync.MirrorProbe) error {
 				"that process if it predates the read-only serve change", reason,
 		)
 	}
-	return fmt.Errorf("%s; rebuild with 'agentsview duckdb push --full'", reason)
+	return fmt.Errorf("%s; rebuild with 'agentsview replica duckdb push --full'", reason)
 }
 
 // duckDBMirrorProbeFailureReason reports why probe is not safe to serve
@@ -530,13 +529,13 @@ func duckDBMirrorProbeFailureReason(probe duckdbsync.MirrorProbe) string {
 	}
 }
 
-func runDuckDBQuackServe(cfg DuckDBQuackServeConfig) {
+func runDuckDBQuackServe(ctx context.Context, cfg DuckDBQuackServeConfig) {
 	appCfg, err := config.LoadMinimalFor(config.ScopeLocal)
 	if err != nil {
-		log.Fatalf("loading config: %v", err)
+		fatal("loading config: %v", err)
 	}
 	if err := os.MkdirAll(appCfg.DataDir, 0o755); err != nil {
-		log.Fatalf("creating data dir: %v", err)
+		fatal("creating data dir: %v", err)
 	}
 	setupLogFile(appCfg.DataDir)
 
@@ -564,7 +563,7 @@ func runDuckDBQuackServe(cfg DuckDBQuackServeConfig) {
 	}
 
 	ctx, stop := signal.NotifyContext(
-		context.Background(), duckDBLongRunningSignals()...,
+		ctx, duckDBLongRunningSignals()...,
 	)
 	defer stop()
 
@@ -681,8 +680,9 @@ func serveQuackOnce(
 	})
 
 	stop := func() {
+		// Stopping runs after ctx is canceled at shutdown.
 		if _, stopErr := conn.ExecContext(
-			context.Background(), `CALL quack_stop(?)`, cfg.Bind,
+			context.WithoutCancel(ctx), `CALL quack_stop(?)`, cfg.Bind,
 		); stopErr != nil {
 			log.Printf("warning: could not stop Quack server: %v", stopErr)
 		}

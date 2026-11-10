@@ -70,6 +70,7 @@
   "header_transcript_blocks_tool": "Appels d'outil",
   "header_transcript_blocks_code": "Blocs de code",
   "header_transcript_blocks_system": "Limites système",
+  "header_transcript_blocks_hook": "Hooks",
   "header_actions_follow_latest": "Suivre les derniers messages",
   "header_actions_toggle_sort": "Inverser l'ordre de tri (o)",
   "header_actions_cycle_layout": "Changer de disposition\u202f: {layout} (l)",
@@ -96,12 +97,15 @@
   "header_actions_import_archive_only": "Import indisponible en mode archive seule",
   "header_actions_import_conversations": "Importer des conversations",
   "header_actions_import": "Importer",
+  "header_actions_import_claude_syncing": "La synchronisation Claude.ai est en cours. Ouvrez Importer pour suivre la progression ou l'arrêter.",
   "header_actions_toggle_theme": "Changer de thème",
   "header_actions_settings": "Paramètres",
   "header_actions_keyboard_shortcuts": "Raccourcis clavier",
   "header_actions_keyboard_shortcuts_shortcut": "Raccourcis clavier (?)",
   "status_bar_archive_stale": "Les résultats des archives peuvent être obsolètes.",
   "status_bar_archive_rebuilding": "Les résultats des archives peuvent être obsolètes. Les modifications sont suspendues jusqu'à la fin de la reconstruction.",
+  "status_bar_archive_stale_rebuild": "Les résultats des archives peuvent être obsolètes. Cliquez pour reconstruire.",
+  "status_bar_sync_failed": "Échec de la synchronisation",
   "status_bar_sessions": [
     {
       "declarations": ["input count", "input countLabel", "local countPlural = count: plural"],
@@ -157,8 +161,10 @@
   "command_palette_search_error": "Recherche indisponible",
   "command_palette_search_failed": "La recherche a échoué. Veuillez réessayer.",
   "command_palette_semantic_setup_title": "La recherche sémantique n'est pas configurée",
-  "command_palette_semantic_setup_config_step": "1. Ajoutez une section [vector] à config.toml, en adaptant le modèle et l'endpoint à votre serveur d'embeddings (tout endpoint compatible OpenAI convient, p. ex. Ollama)\u202f:",
-  "command_palette_semantic_setup_build_step": "2. Redémarrez le démon, puis construisez l'index\u202f:",
+  "command_palette_semantic_setup_config_step": "1. Ajoutez ceci à config.toml :",
+  "command_palette_semantic_setup_local": "Vous utilisez déjà Nomic avec Ollama ? Suivez la configuration complète pour conserver votre index en passant au serveur local partagé.",
+  "command_palette_semantic_setup_local_link": "Paramètres du serveur",
+  "command_palette_semantic_setup_build_step": "2. Redémarrez le démon, puis créez l'index. La CLI demande votre accord avant le premier téléchargement :",
   "command_palette_semantic_copy_config": "Copier l'extrait de configuration",
   "command_palette_semantic_copy_command": "Copier la commande",
   "command_palette_semantic_copied": "Copié !",
@@ -167,9 +173,6 @@
   "command_palette_semantic_ready_intro": "La recherche sémantique est configurée, mais l'index d'embeddings n'a pas encore été construit pour cette archive.",
   "command_palette_semantic_build_button": "Construire les embeddings",
   "command_palette_semantic_build_hint": "La construction s'exécute en arrière-plan sur le serveur ; cette recherche sera relancée une fois terminée.",
-  "command_palette_semantic_building_title": "Construction de l'index d'embeddings...",
-  "command_palette_semantic_building_scanning": "Analyse de l'archive...",
-  "command_palette_semantic_building_progress": "{percentLabel} intégré",
   "command_palette_semantic_failed_title": "Échec de la construction des embeddings",
   "command_palette_search_timeout_title": "La recherche a pris trop de temps",
   "command_palette_search_timeout_detail": "Réessayez. La première recherche sémantique ou hybride peut être plus lente, le temps que le modèle d'embedding démarre.",
@@ -385,9 +388,23 @@
       }
     }
   ],
+  "tool_block_image_alt": "Image issue de la sortie de l'outil",
+  "tool_block_image_open": "Afficher l'image en taille réelle",
+  "tool_block_image_close": "Fermer l'image en taille réelle",
   "thinking_block_label": "Réflexion",
   "compact_boundary_title": "Fenêtre de contexte compactée à ce stade",
   "compact_boundary_label": "Contexte compacté",
+  "transcript_empty_messages": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} message vide",
+        "countPlural=other": "{count} messages vides"
+      }
+    }
+  ],
+  "transcript_empty_messages_title": "Ces messages ne contiennent ni texte, ni réflexion, ni appel d’outil",
   "compact_boundary_show_full_summary": "Afficher le résumé complet",
   "sidebar_session_count": [
     {
@@ -576,6 +593,7 @@
   "analytics_export_csv": "Exporter en CSV",
   "analytics_activity_by_day_hour": "Activité par jour et par heure",
   "analytics_summary_sessions": "Sessions",
+  "analytics_summary_sessions_scope": "{range} · sous-agents inclus",
   "analytics_summary_messages": "Messages",
   "analytics_summary_projects": "Projets",
   "analytics_summary_active_days": "Jours actifs",
@@ -836,6 +854,10 @@
   "usage_tokens_attribution_title": "Répartition des tokens",
   "usage_attribution_treemap": "Treemap",
   "usage_attribution_list": "Liste",
+  "usage_label_scale_title": "Échelle de taille des libellés",
+  "usage_label_scale_linear": "Linéaire",
+  "usage_label_scale_sqrt": "Racine",
+  "usage_label_scale_log": "Log",
   "usage_chart_style": "Style du graphique",
   "usage_chart_style_smooth": "Lissé",
   "usage_chart_style_lines": "Lignes",
@@ -862,7 +884,7 @@
   "settings_search_empty": "Aucun paramètre correspondant",
   "settings_search_clear": "Effacer la recherche",
   "settings_search_result": "Affichage de {category}",
-  "settings_search_keywords_appearance": "thème contraste disposition texte police blocs theme contrast layout text font blocks zoom",
+  "settings_search_keywords_appearance": "thème contraste disposition texte police blocs theme contrast layout text font blocks zoom couleur daltonisme color",
   "settings_search_keywords_language": "langue paramètres régionaux traduction language locale translation",
   "settings_search_keywords_date_ranges": "date plage pages liées date range linked pages",
   "settings_search_keywords_terminal": "terminal reprise lancement exécutable arguments presse-papiers terminal resume launch binary clipboard",
@@ -1721,6 +1743,14 @@
   "insights_page_template_tool_reliability": "Fiabilité des outils",
   "insights_page_template_model_cost": "Modèle et coût",
   "insights_page_template_instruction_opportunities": "Opportunités d'instruction",
+  "insights_page_template_friction_review": "Revue des frictions",
+  "friction_review_summary_title": "Résumé rédigé par un modèle",
+  "friction_review_summary_notice": "Rédigé par un modèle à partir du résumé et des titres de motifs de ce rapport. Il ne modifie ni les constats, ni les rapports, ni les tickets.",
+  "friction_review_summary_empty": "Aucun résumé pour ce rapport pour l'instant.",
+  "friction_review_summary_generate": "Générer le résumé",
+  "friction_review_summary_regenerate": "Régénérer",
+  "friction_review_summary_generating": "Génération : {phase}",
+  "friction_review_summary_unavailable": "La génération de résumés n'est pas disponible pour cette archive.",
   "insights_page_scope_no_automated": "Sans les automatisées",
   "insights_page_scope_both": "Les deux",
   "insights_page_scope_only_automated": "Automatisées uniquement",
@@ -2047,6 +2077,7 @@
   "appearance_chart_palette": "Couleurs des graphiques",
   "appearance_chart_palette_agentsview": "Agentsview",
   "appearance_chart_palette_matplotlib": "Matplotlib",
+  "appearance_chart_palette_colorblind": "Adapté au daltonisme",
   "appearance_message_layout": "Disposition des messages",
   "appearance_block_visibility": "Visibilité des blocs",
   "settings_github_token_saved": "Token GitHub enregistré.",
@@ -2065,56 +2096,32 @@
   "settings_embeddings_load_failed": "Échec du chargement de l'état des embeddings",
   "settings_embeddings_model_label": "Modèle",
   "settings_embeddings_dimension_label": "Dimensions",
-  "settings_embeddings_status_label": "État",
-  "settings_embeddings_status_idle": "Inactif",
-  "settings_embeddings_status_scanning": "Analyse",
-  "settings_embeddings_status_embedding": "Calcul des embeddings",
-  "settings_embeddings_status_running": "En cours",
   "settings_embeddings_scanning_hint": "Analyse des sessions à la recherche de changements - la quantité totale de travail n'est pas encore connue.",
-  "settings_embeddings_progress_chunks": [
-    {
-      "declarations": [
-        "input count",
-        "input doneLabel",
-        "input totalLabel",
-        "local countPlural = count: plural"
-      ],
-      "selectors": ["countPlural"],
-      "match": {
-        "countPlural=one": "{doneLabel} / {totalLabel} chunk",
-        "countPlural=other": "{doneLabel} / {totalLabel} chunks"
-      }
-    }
-  ],
   "settings_embeddings_rate": [
     {
       "declarations": ["input count", "input rateLabel", "local countPlural = count: plural"],
       "selectors": ["countPlural"],
       "match": {
-        "countPlural=one": "{rateLabel} chunk/s",
-        "countPlural=other": "{rateLabel} chunks/s"
+        "countPlural=one": "{rateLabel} section de texte/s",
+        "countPlural=other": "{rateLabel} sections de texte/s"
       }
     }
   ],
   "settings_embeddings_elapsed": "Écoulé {duration}",
-  "settings_embeddings_eta": "ETA {duration}",
-  "settings_embeddings_eta_estimating": "Estimation du temps restant...",
   "settings_embeddings_duration_hours_minutes": "{hours} h {minutes} min",
   "settings_embeddings_duration_minutes_seconds": "{minutes} min {seconds} s",
   "settings_embeddings_duration_seconds": "{seconds} s",
   "settings_embeddings_last_build_label": "Dernière construction",
   "settings_embeddings_last_build_completed": "Terminée",
-  "settings_embeddings_last_build_failed": "Échouée",
   "settings_embeddings_last_build_activated": "nouvelle génération activée",
   "settings_embeddings_last_build_documents": "Documents traités",
-  "settings_embeddings_last_build_chunks": "Chunks traités",
+  "settings_embeddings_last_build_chunks": "Sections de texte indexées",
   "settings_embeddings_generations_title": "Générations",
   "settings_embeddings_generations_empty": "Aucune génération d'embeddings n'existe pour l'instant.",
   "settings_embeddings_state_active": "Active",
   "settings_embeddings_state_building": "En construction",
   "settings_embeddings_state_retired": "Retirée",
   "settings_embeddings_coverage": "{embeddedLabel} traités · {missingLabel} manquants",
-  "settings_embeddings_progress_aria": "Progression du calcul des embeddings",
   "settings_remote_connected_version": "Connecté (v{version})",
   "settings_remote_server_returned": "Le serveur a renvoyé {status}",
   "settings_remote_connection_failed": "Échec de la connexion",
@@ -2197,6 +2204,9 @@
   "system_boundary_interrupted": "Requête interrompue",
   "system_boundary_task_notification": "Notification de tâche",
   "system_boundary_stop_hook": "Retour du hook d'arrêt",
+  "system_boundary_hook_success": "Sortie du hook",
+  "system_boundary_stop_hook_summary": "Résumé des hooks d’arrêt",
+  "system_boundary_hook_cancelled": "Hook annulé",
   "system_boundary_peer_message": "Message d'une autre session",
   "system_boundary_title": "Limite système\u202f: {subtype}",
   "system_boundary_show_content": "Afficher le contenu",
@@ -2621,6 +2631,7 @@
   "import_claude_reload_extension": "Rechargez ensuite l’extension dans {url}.",
   "import_claude_update_app": "Redémarrez AgentsView si vous l'avez mis à jour.",
   "import_claude_syncing": "Synchronisation...",
+  "import_claude_sync_background": "La synchronisation continue si vous fermez cette boîte de dialogue.",
   "import_claude_sync_failed": "Échec de la synchronisation",
   "import_claude_sign_in_failed": "Échec de la connexion",
   "import_claude_desktop_note": "La connexion utilise un code reçu par e-mail. Pour les comptes Google, synchronisez depuis l’interface web dans Chrome.",
@@ -2921,26 +2932,6 @@
       }
     }
   ],
-  "usage_plan_only_sessions": [
-    {
-      "declarations": ["input count", "input countLabel", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
-      "match": {
-        "countPlural=one": "{countLabel} session facturée comme utilisation du forfait, sans prix",
-        "countPlural=other": "{countLabel} sessions facturées comme utilisation du forfait, sans prix"
-      }
-    }
-  ],
-  "usage_partly_captured_sessions": [
-    {
-      "declarations": ["input count", "input countLabel", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
-      "match": {
-        "countPlural=one": "{countLabel} session partiellement capturée ; ses comptes de tokens sont bas.",
-        "countPlural=other": "{countLabel} sessions partiellement capturées ; leurs comptes de tokens sont bas."
-      }
-    }
-  ],
   "status_bar_codex_cloud_waiting": "Codex Cloud\u202f: en attente de la première synchronisation",
   "status_bar_codex_cloud_importing_found": [
     {
@@ -2970,5 +2961,253 @@
   "status_bar_codex_cloud_live_attention": "Codex Cloud\u202f: les jetons en direct demandent votre attention",
   "status_bar_codex_cloud_oldest_failure": "Plus ancien échec\u202f: {time}",
   "status_bar_codex_cloud_last_success": "Dernière synchronisation réussie\u202f: {time}",
-  "status_bar_codex_cloud_homes": "Dossiers Codex\u202f: {homes}"
+  "status_bar_codex_cloud_homes": "Dossiers Codex\u202f: {homes}",
+  "appearance_message_colors": "Couleurs des messages",
+  "appearance_message_colors_description": "Attribuez une couleur à chaque type de message. Le préréglage daltonisme utilise des teintes qui restent distinctes avec les déficiences de la vision des couleurs les plus courantes et ajoute des motifs de ligne, pour distinguer les types par la forme autant que par la couleur.",
+  "appearance_message_colors_preset": "Préréglage des couleurs de message",
+  "appearance_message_colors_preset_default": "Thème par défaut",
+  "appearance_message_colors_preset_colorblind": "Adapté au daltonisme",
+  "appearance_message_colors_preset_custom": "Personnalisé",
+  "appearance_message_colors_patterns": "Distinguer les types de message par des motifs de ligne en plus de la couleur",
+  "appearance_message_colors_reset_all": "Rétablir les valeurs par défaut",
+  "appearance_message_colors_reset_role": "Réinitialiser",
+  "appearance_message_colors_reset_role_label": "Réinitialiser la couleur : {role}",
+  "appearance_message_colors_role_label": "Couleur : {role}",
+  "appearance_message_colors_picker": "Ouvrir le sélecteur de couleur",
+  "appearance_message_colors_hex": "Couleur hexadécimale",
+  "appearance_message_colors_warning_text": "Le texte risque d’être difficile à lire en {modes} ({ratio}:1, minimum {required}:1).",
+  "appearance_message_colors_warning_marker": "Le repère de couleur risque d’être peu visible en {modes} ({ratio}:1, minimum {required}:1).",
+  "appearance_message_colors_mode_light": "mode clair",
+  "appearance_message_colors_mode_dark": "mode sombre",
+  "appearance_message_colors_mode_high_contrast_light": "mode clair à contraste élevé",
+  "appearance_message_colors_mode_high_contrast_dark": "mode sombre à contraste élevé",
+  "appearance_message_colors_swatch_blue": "Bleu",
+  "appearance_message_colors_swatch_vermillion": "Vermillon",
+  "appearance_message_colors_swatch_bluish_green": "Vert bleuté",
+  "appearance_message_colors_swatch_reddish_purple": "Pourpre rougeâtre",
+  "appearance_message_colors_swatch_dark_yellow": "Jaune foncé",
+  "appearance_message_colors_swatch_gray": "Gris",
+  "appearance_message_colors_preview": "Aperçu",
+  "appearance_message_colors_preview_user": "Pourquoi le test de date échoue-t-il ?",
+  "appearance_message_colors_preview_assistant": "Le jeu de test attend l’UTC. Je l’ai corrigé.",
+  "nav_friction": "Journal des frictions",
+  "friction_page_help_docs": "Fonctionnement du journal des frictions",
+  "friction_page_refresh": "Actualiser le journal des frictions",
+  "friction_date_label": "Date du résumé",
+  "friction_date_previous": "Résumé précédent",
+  "friction_date_next": "Résumé suivant",
+  "friction_date_no_match": "Aucune date correspondante",
+  "friction_build_now": "Générer maintenant",
+  "friction_build_title": "Génère un résumé pour chaque journée complète qui n'en a pas encore",
+  "friction_build_done": [
+    {
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural",
+        "local countNumber = count: number"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{countNumber} résumé généré",
+        "countPlural=other": "{countNumber} résumés générés"
+      }
+    }
+  ],
+  "friction_build_nothing": "Chaque journée complète a déjà un résumé.",
+  "friction_build_failed": "Échec de la génération : {error}",
+  "friction_empty_title": "Aucun résumé de frictions pour l'instant",
+  "friction_empty_hint": "Un résumé est généré automatiquement une fois chaque journée locale terminée, et la tâche horaire rattrape toute journée manquée. Utilisez Générer maintenant pour générer tout de suite les journées manquantes.",
+  "friction_empty_hint_remote": "Un résumé est généré automatiquement une fois chaque journée locale terminée, et la tâche horaire rattrape toute journée manquée. Pour générer tout de suite les journées manquantes, ouvrez cette page sur la machine qui exécute AgentsView, ou activez require_auth sur le serveur.",
+  "friction_load_error": "Impossible de charger le journal des frictions",
+  "friction_retry": "Réessayer",
+  "friction_issue_open": "Ouvrir {issue} dans Kata",
+  "friction_issue_file": "Créer dans Kata",
+  "friction_issue_file_title": "Créer un ticket Kata pour ce motif, ou lier celui que Kata possède déjà",
+  "friction_issue_link": "Lier un ticket",
+  "friction_issue_link_label": "Ticket Kata",
+  "friction_issue_link_placeholder": "agentsview#f001",
+  "friction_issue_link_submit": "Lier",
+  "friction_issue_cancel": "Annuler",
+  "friction_issue_unlink": "Délier",
+  "friction_issue_unlink_title": "Supprimer le lien ; le ticket Kata reste inchangé",
+  "friction_filing_retry": "Échec de la création, nouvel essai prévu",
+  "friction_filing_needs_person": "Création arrêtée",
+  "friction_filing_paused": "Création automatique en pause",
+  "friction_filing_paused_title": "La création automatique ignore ce motif, car son lien a été supprimé. Créez ou liez un ticket pour la reprendre.",
+  "friction_digest_heading": "Journal des frictions — {date}",
+  "friction_digest_built": "Généré le {when} ({timezone})",
+  "friction_p0_failed": [
+    {
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural",
+        "local countNumber = count: number"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "a échoué dans {countNumber} session",
+        "countPlural=other": "a échoué dans {countNumber} sessions"
+      }
+    }
+  ],
+  "friction_clean_title": "Aucune friction trouvée",
+  "friction_clean_hint": [
+    {
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural",
+        "local countNumber = count: number"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "Rien n’a été signalé dans la {countNumber} session analysée.",
+        "countPlural=other": "Rien n’a été signalé dans les {countNumber} sessions analysées."
+      }
+    }
+  ],
+  "friction_clean_no_sessions": "Aucune session n’a été active ce jour-là.",
+  "friction_deferral_said": "Travail reporté : « {phrase} »",
+  "friction_pattern_retry_loop": "Boucle de nouvelles tentatives",
+  "friction_pattern_runaway_loop": "Boucle d’outils incontrôlée",
+  "friction_pattern_edit_churn": "Modifications répétées",
+  "friction_pattern_mid_task_compaction": "Compaction en cours de tâche",
+  "friction_pattern_context_pressure": "Pression sur le contexte",
+  "friction_pattern_iteration_runaway": "Longue exécution sans message de l’utilisateur",
+  "friction_digest_missing": "Aucun résumé n'existe pour le {date}.",
+  "friction_scanned": [
+    {
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural",
+        "local countNumber = count: number"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{countNumber} session analysée",
+        "countPlural=other": "{countNumber} sessions analysées"
+      }
+    }
+  ],
+  "friction_headline_title": "À examiner",
+  "friction_p0_title": "Outils en échec dans plusieurs sessions",
+  "friction_patterns_new": "Nouveaux motifs",
+  "friction_patterns_recurring": "Motifs récurrents",
+  "friction_pattern_occurrences": [
+    {
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural",
+        "local countNumber = count: number"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{countNumber} occurrence",
+        "countPlural=other": "{countNumber} occurrences"
+      }
+    }
+  ],
+  "friction_pattern_sessions": [
+    {
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural",
+        "local countNumber = count: number"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{countNumber} session",
+        "countPlural=other": "{countNumber} sessions"
+      }
+    }
+  ],
+  "friction_pattern_first_seen": "Vu pour la première fois le {date}",
+  "friction_section_corrections": "Corrections",
+  "friction_section_errors": "Erreurs",
+  "friction_section_workarounds": "Contournements",
+  "friction_section_deferrals": "Reports",
+  "friction_section_patterns": "Motifs",
+  "friction_section_frustration": "Frustration",
+  "friction_section_interruptions": "Interruptions",
+  "friction_interruption_count": [
+    {
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural",
+        "local countNumber = count: number"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{countNumber} interruption",
+        "countPlural=other": "{countNumber} interruptions"
+      }
+    }
+  ],
+  "friction_kind_correction": "Correction",
+  "friction_kind_error": "Erreur",
+  "friction_kind_workaround": "Contournement",
+  "friction_kind_deferral": "Report",
+  "friction_kind_pattern": "Motif",
+  "friction_kind_frustration": "Frustration",
+  "friction_kind_interruption": "Interruption",
+  "friction_disabled_title": "Le journal des frictions est désactivé sur ce serveur",
+  "friction_disabled_hint": "Ce serveur ne génère pas de résumés. Définissez [friction] enabled = true dans config.toml, puis redémarrez le démon. Une archive en lecture seule ne peut pas générer de résumés.",
+  "friction_markdown_title": "Markdown",
+  "friction_markdown_show": "Afficher le Markdown",
+  "friction_markdown_copy": "Copier le Markdown",
+  "friction_markdown_copied": "Markdown copié",
+  "friction_markdown_download": "Télécharger le Markdown",
+  "friction_markdown_loading": "Chargement du Markdown…",
+  "friction_markdown_error": "Impossible de charger le résumé Markdown.",
+  "friction_open_session": "Ouvrir {session} au message {ordinal}",
+  "friction_open_session_start": "Ouvrir {session}",
+  "friction_quality_card_title": "Journal des frictions",
+  "friction_quality_card_body": "Résumés quotidiens des corrections, erreurs d'outils, contournements, reports et motifs récurrents trouvés dans vos sessions.",
+  "friction_quality_card_open": "Ouvrir le journal des frictions",
+  "friction_session_title": "Constats de friction",
+  "friction_session_loading": "Chargement des constats de friction…",
+  "friction_session_error": "Les constats de friction ne sont pas disponibles.",
+  "friction_session_empty": "Aucun constat de friction dans cette session.",
+  "friction_session_jump": "Message {ordinal}",
+  "friction_session_jump_title": "Aller au message {ordinal}",
+  "docbank_subagent_open_session": "Les fichiers correspondants apparaissent à l’ouverture en tant que session.",
+  "docbank_checking": "Recherche dans Docbank…",
+  "docbank_current": "Version actuelle",
+  "docbank_prior": "Version antérieure",
+  "docbank_trash": "Corbeille",
+  "docbank_not_found": "Absent de Docbank",
+  "docbank_read_unavailable": "Fichiers de session indisponibles",
+  "docbank_unavailable": "Docbank indisponible",
+  "docbank_limit_exceeded": "Limite de recherche Docbank atteinte",
+  "docbank_bytes_not_kept": "Octets de l'image non conservés",
+  "docbank_file": "Fichier {n} · {mediaType} · {size}",
+  "docbank_file_without_size": "Fichier {n} · {mediaType}",
+  "docbank_more": "+{count} dans Docbank",
+  "meaning_name": "Recherche par sens",
+  "meaning_off": "Désactivée",
+  "meaning_on": "Activée",
+  "meaning_uses_ollama": "Utilise Ollama une fois activé",
+  "meaning_ollama": "Activée · Ollama",
+  "meaning_turning_on": "Activation",
+  "meaning_turn_on": "Activer",
+  "meaning_download": "Télécharge {size} une fois, partagés entre les applications Kenn",
+  "meaning_downloaded": "Déjà sur cet ordinateur",
+  "meaning_configured": "Utilise votre serveur configuré",
+  "meaning_downloading": "Téléchargement de {done} sur {total}",
+  "meaning_indexing": "Indexation de {done} sur {total} {items}",
+  "meaning_time_left": "{time} restantes",
+  "meaning_meanwhile": "La recherche par mots reste disponible",
+  "meaning_under_minute": "moins d’une minute",
+  "meaning_about_time": "environ {time}",
+  "meaning_progress": "Configuration de la recherche par sens",
+  "meaning_hint": "La recherche par sens est désactivée",
+  "meaning_chunks": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": { "countPlural=one": "section de texte", "countPlural=other": "sections de texte" }
+    }
+  ],
+  "empty_archive_title": "Aucune session pour l'instant",
+  "empty_archive_desc": "AgentsView lit les sessions dans ces dossiers. Elles apparaîtront ici dès qu'un agent écrira dans l'un d'eux.",
+  "empty_archive_choose_folders": "Choisir les dossiers"
 }

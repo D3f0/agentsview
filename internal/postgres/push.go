@@ -31,6 +31,7 @@ const (
 	sessionAliasBackfillStateKey           = "pg_session_alias_backfill_v1"
 	legacyProjectIdentityStateKey          = "project_identity_publication_revision_v2"
 	projectIdentityPublicationStateKey     = "project_identity_publication_revision_v3"
+	commitLinksBackfillStateKey            = "pg_commit_links_backfill_v1"
 	messageDialogueBackfillStateKey        = "pg_message_dialogue_backfill_v1"
 	transcriptRevisionBackfillStateKey     = "pg_transcript_revision_backfill_v1"
 	sessionProvenanceBackfillStateKey      = "pg_session_provenance_backfill_v2"
@@ -103,6 +104,7 @@ func (s *Sync) PushWithOptions(
 	s.fullRun = nil
 	switch {
 	case err == nil:
+		err = s.replaceRetainedCommitLinks(ctx)
 	case run != nil:
 		// Keep what the run committed since its last checkpoint. The push
 		// may have failed because ctx ended, so save without it, but within
@@ -312,6 +314,14 @@ func (s *Sync) pushWithOptions(
 		)
 		noteFull("backfilling transcript revisions")
 	}
+	var commitLinksBackfillNeeded bool
+	full, commitLinksBackfillNeeded, err = applyBackfillRequirement(ctx, state, commitLinksBackfillStateKey, full)
+	if err != nil {
+		return result, err
+	}
+	if commitLinksBackfillNeeded {
+		noteFull("backfilling commit links")
+	}
 	var messageDialogueBackfillNeeded bool
 	full, messageDialogueBackfillNeeded, err = applyBackfillRequirement(ctx, state, messageDialogueBackfillStateKey, full)
 	if err != nil {
@@ -338,6 +348,7 @@ func (s *Sync) pushWithOptions(
 		transcriptRevisionBackfillStateKey:     transcriptRevisionBackfillNeeded,
 		timestampNormalizationBackfillStateKey: timestampNormalizationBackfillNeeded,
 		messageDialogueBackfillStateKey:        messageDialogueBackfillNeeded,
+		commitLinksBackfillStateKey:            commitLinksBackfillNeeded,
 	} {
 		if needed {
 			backfills = append(backfills, key)
@@ -377,6 +388,11 @@ func (s *Sync) pushWithOptions(
 		full = true
 		noteFull(pendingRun.Reason)
 	}
+	// A full push reconciles every session, but only a requested one, or
+	// the resumption of one, rewrites every transcript. Other full pushes
+	// keep the messages PostgreSQL already holds unchanged, because the
+	// suffix comparison covers every published message field.
+	rewriteTranscripts := opts.Full || (runPending && pendingRun.Reason == "requested")
 	if full {
 		lastPush = ""
 		// Caller requested a full push — the PG schema
@@ -668,6 +684,9 @@ func (s *Sync) pushWithOptions(
 		); err != nil {
 			return result, err
 		}
+		if err := completeBackfill(ctx, state, commitLinksBackfillStateKey, commitLinksBackfillNeeded, result); err != nil {
+			return result, err
+		}
 		if err := completeBackfill(ctx, state, messageDialogueBackfillStateKey, messageDialogueBackfillNeeded, result); err != nil {
 			return result, err
 		}
@@ -718,7 +737,7 @@ func (s *Sync) pushWithOptions(
 		committedBefore := len(pushed)
 
 		batchResult, err := s.pushBatch(
-			ctx, batch, full, markerID, legacyMarkerMachines,
+			ctx, batch, rewriteTranscripts, markerID, legacyMarkerMachines,
 			usageFingerprints, &pushed,
 		)
 		if err != nil {
@@ -734,7 +753,7 @@ func (s *Sync) pushWithOptions(
 			for _, sess := range batch {
 				sr, retryErr := s.pushBatch(
 					ctx, []db.Session{sess},
-					full, markerID, legacyMarkerMachines,
+					rewriteTranscripts, markerID, legacyMarkerMachines,
 					usageFingerprints, &pushed,
 				)
 				if retryErr != nil {
@@ -805,6 +824,9 @@ func (s *Sync) pushWithOptions(
 	if err := completeBackfill(ctx,
 		state, transcriptRevisionBackfillStateKey, transcriptRevisionBackfillNeeded, result,
 	); err != nil {
+		return result, err
+	}
+	if err := completeBackfill(ctx, state, commitLinksBackfillStateKey, commitLinksBackfillNeeded, result); err != nil {
 		return result, err
 	}
 	if err := completeBackfill(ctx, state, messageDialogueBackfillStateKey, messageDialogueBackfillNeeded, result); err != nil {
@@ -1321,15 +1343,15 @@ var errPushComparisonPreload = errors.New(
 func (s *Sync) pushBatch(
 	ctx context.Context,
 	batch []db.Session,
-	full bool,
+	rewriteTranscripts bool,
 	markerID string,
 	legacyMarkerMachines []string,
 	sessionUsageFingerprints map[string]string,
 	pushed *[]db.Session,
 ) (batchResult, error) {
-	preloadComparisons := len(batch) > 0 && !full
+	preloadComparisons := len(batch) > 0 && !rewriteTranscripts
 	result, err := s.pushBatchAttempt(
-		ctx, batch, full, markerID, legacyMarkerMachines,
+		ctx, batch, rewriteTranscripts, markerID, legacyMarkerMachines,
 		sessionUsageFingerprints, pushed, preloadComparisons,
 	)
 	if err == nil || !errors.Is(err, errPushComparisonPreload) {
@@ -1341,7 +1363,7 @@ func (s *Sync) pushBatch(
 		err,
 	)
 	return s.pushBatchAttempt(
-		ctx, batch, full, markerID, legacyMarkerMachines,
+		ctx, batch, rewriteTranscripts, markerID, legacyMarkerMachines,
 		sessionUsageFingerprints, pushed, false,
 	)
 }
@@ -1349,7 +1371,7 @@ func (s *Sync) pushBatch(
 func (s *Sync) pushBatchAttempt(
 	ctx context.Context,
 	batch []db.Session,
-	full bool,
+	rewriteTranscripts bool,
 	markerID string,
 	legacyMarkerMachines []string,
 	sessionUsageFingerprints map[string]string,
@@ -1390,7 +1412,7 @@ func (s *Sync) pushBatchAttempt(
 
 	for _, sess := range batch {
 		frictionUnchanged := false
-		if !full {
+		if !rewriteTranscripts {
 			frictionUnchanged, err = sessionFrictionUnchanged(ctx, tx, sess, comparisons)
 			if err != nil {
 				log.Printf("pgsync: friction metadata %s: %v", sess.ID, err)
@@ -1419,7 +1441,7 @@ func (s *Sync) pushBatchAttempt(
 		}
 
 		msgCount, messagesChanged, err := s.pushMessages(
-			ctx, tx, sess.ID, full,
+			ctx, tx, sess.ID, rewriteTranscripts,
 			sessionUsageFingerprints, comparisons,
 		)
 		if err != nil {
@@ -1438,6 +1460,13 @@ func (s *Sync) pushBatchAttempt(
 				"pgsync: secret findings %s: %v",
 				sess.ID, err,
 			)
+			_ = tx.Rollback()
+			*pushed = (*pushed)[:len(*pushed)-n]
+			return batchResult{}, nil
+		}
+		commitLinksChanged, err := s.pushCommitLinks(ctx, tx, sess.ID)
+		if err != nil {
+			log.Printf("pgsync: commit links %s: %v", sess.ID, err)
 			_ = tx.Rollback()
 			*pushed = (*pushed)[:len(*pushed)-n]
 			return batchResult{}, nil
@@ -1464,11 +1493,9 @@ func (s *Sync) pushBatchAttempt(
 			return batchResult{}, nil
 		}
 
-		// Bump updated_at when messages, secret findings, friction, or
-		// plan usage were rewritten but pushSession was a metadata no-op
-		// (its WHERE clause skips unchanged rows). PG read-mode session
-		// watchers rely on updated_at to surface these changes.
-		if messagesChanged || findingsChanged || frictionChanged || planUsageChanged {
+		// Publish findings, commit links, friction, or plan usage changes to
+		// read-mode watchers unless pushMessages already advanced updated_at.
+		if !messagesChanged && (findingsChanged || commitLinksChanged || frictionChanged || planUsageChanged) {
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE sessions
 				SET updated_at = NOW()
@@ -2142,8 +2169,7 @@ func (s *Sync) reconcilePGMissingSessions(
 			return fmt.Errorf("scanning owned pg session for full push reconciliation: %w", err)
 		}
 		ids = append(ids, id)
-		switch agent {
-		case "codex", "traex", "augure-code":
+		if parser.IsCodexFormatAgent(parser.AgentType(agent)) {
 			codexPaths[id] = path
 		}
 	}
@@ -2153,7 +2179,7 @@ func (s *Sync) reconcilePGMissingSessions(
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	return db.QueryChunkedSize(ids, pushComparisonBatchSize, func(chunk []string) error {
+	err = db.QueryChunkedSize(ids, pushComparisonBatchSize, func(chunk []string) error {
 		// Read live presence, including trashed and out-of-scope local rows.
 		// A sync may have added a session since the push listed its candidates.
 		present, err := s.local.SessionProjectsByIDs(ctx, chunk)
@@ -2256,6 +2282,10 @@ func (s *Sync) reconcilePGMissingSessions(
 		}
 		return tx.Commit()
 	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Sync) reconcilePGProjectScopeMoves(
@@ -3041,14 +3071,15 @@ func writePGSession(ctx context.Context, tx *sql.Tx, sess db.Session, markerID s
 	return nil
 }
 
-// pushMessages replaces a session's changed transcript suffix in PG. It
-// returns the inserted count and whether transcript or usage changes need
-// a session version refresh.
+// pushMessages replaces a session's changed transcript suffix in PG, or the
+// whole transcript when rewriteTranscripts is set. It returns the inserted
+// count and whether transcript or usage changes need a session version
+// refresh.
 func (s *Sync) pushMessages(
 	ctx context.Context,
 	tx *sql.Tx,
 	sessionID string,
-	full bool,
+	rewriteTranscripts bool,
 	sessionUsageFingerprints map[string]string,
 	comparisons *pushMessageComparison,
 ) (count int, changed bool, err error) {
@@ -3057,9 +3088,18 @@ func (s *Sync) pushMessages(
 		return 0, false, err
 	}
 	defer func() { err = errors.Join(err, snapshot.Close()) }()
+	defer func() {
+		if err == nil && changed {
+			// Every caller must publish message changes to read-mode watchers.
+			_, err = tx.ExecContext(ctx, `UPDATE sessions SET updated_at = NOW() WHERE id = $1`, sessionID)
+			if err != nil {
+				err = fmt.Errorf("bumping message session version: %w", err)
+			}
+		}
+	}()
 	boundary := 0
 	usageChanged := true
-	if !full {
+	if !rewriteTranscripts {
 		if comparisons == nil {
 			comparisons, err = readPushSessionMessageComparisons(ctx, tx, []string{sessionID}, false)
 			if err != nil {
@@ -3093,6 +3133,10 @@ func (s *Sync) pushMessages(
 	if err != nil {
 		return 0, false, err
 	}
+	if err := identifyLegacyVSCodePinnedReplies(ctx, tx, sessionID, savedPins, snapshot); err != nil {
+		return 0, false, err
+	}
+
 	if usageChanged {
 		usageChanged, err = s.replaceUsageEvents(ctx, tx, sessionID)
 		if err != nil {
@@ -3404,6 +3448,47 @@ func snapshotPinnedMessages(
 		return nil, fmt.Errorf("iterating pg pin snapshots: %w", err)
 	}
 	return pins, nil
+}
+
+func identifyLegacyVSCodePinnedReplies(ctx context.Context, tx *sql.Tx, sessionID string, pins []savedPostgresPin, snapshot *db.MessageSnapshot) error {
+	if !slices.ContainsFunc(pins, func(p savedPostgresPin) bool { return p.sourceUUID == "" && p.role == "assistant" && p.messageFound }) {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT a.ordinal, u.content, a.timestamp, s.agent
+  FROM messages a JOIN messages u ON u.session_id = a.session_id AND u.ordinal = a.ordinal - 1
+  JOIN sessions s ON s.id = a.session_id
+  WHERE a.session_id = $1 AND s.agent IN ('vscode-copilot', 'positron')
+    AND a.role = 'assistant' AND u.role = 'user' AND NOT a.is_system AND NOT u.is_system
+    AND u.content != '' AND a.timestamp = u.timestamp`, sessionID)
+	if err != nil {
+		return fmt.Errorf("reading pg legacy reply anchors: %w", err)
+	}
+	defer rows.Close()
+	var old []db.LegacyVSCodeReplyAnchor
+	for rows.Next() {
+		var anchor db.LegacyVSCodeReplyAnchor
+		var stamp time.Time
+		if err := rows.Scan(&anchor.Ordinal, &anchor.Prompt, &stamp, &anchor.Agent); err != nil {
+			return err
+		}
+		anchor.Timestamp = stamp.UTC().Format(time.RFC3339Nano)
+		old = append(old, anchor)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	incoming, err := snapshot.LegacyVSCodeReplyAnchors(sessionID)
+	if err != nil {
+		return err
+	}
+	matches := db.MatchLegacyVSCodeReplyAnchors(old, incoming)
+	for i := range pins {
+		pin := &pins[i]
+		if uuid := matches[pin.anchorOrdinal]; uuid != "" && pin.sourceUUID == "" && pin.role == "assistant" && pin.messageFound {
+			pin.sourceUUID, pin.sourceUUIDCount = uuid, 1
+		}
+	}
+	return nil
 }
 
 // restorePinnedMessages moves the snapshotted pins from their saved session
@@ -3736,8 +3821,8 @@ func bulkInsertMessages(
 			// bytes (e.g. raw protobuf fragments), which PG
 			// rejects with SQLSTATE 22021.
 			var dialogue any
-			if m.DialogueText != nil {
-				dialogue = sanitizePG(*m.DialogueText)
+			if stored, _ := db.StoredDialogue(m.Content, m.ThinkingText, m.DialogueText); stored != nil {
+				dialogue = sanitizePG(*stored)
 			}
 			args = append(args,
 				sessionID, m.Ordinal, sanitizePG(m.Role),
@@ -3862,22 +3947,26 @@ func bulkInsertCursorUsageEvents(
 			input_tokens, output_tokens,
 			cache_write_tokens, cache_read_tokens,
 			charged_microdollars, cursor_token_fee_microdollars,
-			user_id, user_email, is_headless, dedup_key
+			user_id, user_email, is_headless, dedup_key, agent
 		) VALUES `)
-		args := make([]any, 0, len(batch)*13)
+		args := make([]any, 0, len(batch)*14)
 		for j, ev := range batch {
 			if j > 0 {
 				b.WriteByte(',')
 			}
-			p := j*13 + 1
+			p := j*14 + 1
 			fmt.Fprintf(&b,
-				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 				p, p+1, p+2, p+3, p+4, p+5, p+6,
-				p+7, p+8, p+9, p+10, p+11, p+12,
+				p+7, p+8, p+9, p+10, p+11, p+12, p+13,
 			)
 			occurredAt, ok := ParseSQLiteTimestamp(ev.OccurredAt)
 			if !ok {
 				return fmt.Errorf("parsing cursor usage occurred_at %q", ev.OccurredAt)
+			}
+			agent := ev.Agent
+			if agent == "" {
+				agent = "cursor"
 			}
 			args = append(args,
 				occurredAt,
@@ -3893,6 +3982,7 @@ func bulkInsertCursorUsageEvents(
 				sanitizePG(ev.UserEmail),
 				ev.IsHeadless,
 				sanitizePG(ev.DedupKey),
+				sanitizePG(agent),
 			)
 		}
 		b.WriteString(` ON CONFLICT DO NOTHING`)

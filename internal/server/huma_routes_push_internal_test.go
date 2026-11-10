@@ -20,6 +20,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/archivesource"
 	"go.kenn.io/agentsview/internal/clickhouse"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
@@ -29,6 +30,7 @@ import (
 	"go.kenn.io/agentsview/internal/postgres"
 	"go.kenn.io/agentsview/internal/storage"
 	syncpkg "go.kenn.io/agentsview/internal/sync"
+	"go.kenn.io/agentsview/internal/testjsonl"
 )
 
 // stubVectorPushSource is a no-op storage.VectorPushSource: the gating test
@@ -64,6 +66,7 @@ func (stubVectorPushSource) BeginExport(
 // TestPGPushProgressLoggerThrottlesAndReportsPhases pins the daemon-side
 // push heartbeat: reports inside the throttle window log nothing, and the
 // vector phase logs its own counters instead of the session line.
+// Serial: replaces the push log interval and process-wide log output.
 func TestPGPushProgressLoggerThrottlesAndReportsPhases(t *testing.T) {
 	origInterval := pushProgressLogInterval
 	pushProgressLogInterval = time.Hour
@@ -337,7 +340,7 @@ func TestDuckDBPushRejectsIncludeAndExcludeProjects(t *testing.T) {
 // route rejects a remote Quack URL as bad request: push writes the local
 // mirror only, so a configured [duckdb].url is never a valid push target.
 func TestDuckDBPushRejectsRemoteURLAsBadRequest(t *testing.T) {
-	s := testServer(t, 30)
+	s := testServer(t, 30*time.Second)
 
 	_, err := s.humaMirrorPush(t.Context(), &daemonPushInput{
 		Body: daemonPushRequest{
@@ -423,7 +426,7 @@ func TestDuckDBPushConfigPinsServerMirrorPath(t *testing.T) {
 // twin of TestDuckDBPushConfigPinsServerMirrorPath: the route surfaces the
 // path mismatch as a 400 instead of writing anywhere.
 func TestDuckDBPushRejectsMismatchedMirrorPathAsBadRequest(t *testing.T) {
-	s := testServer(t, 30)
+	s := testServer(t, 30*time.Second)
 	s.cfg.DuckDB = config.DuckDBConfig{
 		Path:        filepath.Join(t.TempDir(), "server.duckdb"),
 		MachineName: "daemon",
@@ -456,7 +459,8 @@ func TestDuckDBPushSyncOptionsPassesThroughProjectFilters(t *testing.T) {
 }
 
 func TestSyncClaudeAIRouteIsSSEOnly(t *testing.T) {
-	s := testServer(t, 30)
+	t.Parallel()
+	s := testServer(t, 30*time.Second)
 	spec := readOpenAPISpec(t, s.Handler())
 	op := requireOpenAPIOperation(t, spec, "post", "/api/v1/import/claude-ai/sync")
 	require.Contains(t, op.Responses, "200")
@@ -465,7 +469,8 @@ func TestSyncClaudeAIRouteIsSSEOnly(t *testing.T) {
 }
 
 func TestSyncRemotesRouteIsStreaming(t *testing.T) {
-	s := testServer(t, 30)
+	t.Parallel()
+	s := testServer(t, 30*time.Second)
 	spec := readOpenAPISpec(t, s.Handler())
 	op := requireOpenAPIOperation(t, spec, "post", "/api/v1/sync/remotes")
 	require.Contains(t, op.Responses, "200")
@@ -476,7 +481,8 @@ func TestSyncRemotesRouteIsStreaming(t *testing.T) {
 // CLI's daemon-delegated push renders the streamed progress) while still
 // declaring a plain JSON response for non-streaming clients.
 func TestPushRoutesAreStreaming(t *testing.T) {
-	s := testServer(t, 30)
+	t.Parallel()
+	s := testServer(t, 30*time.Second)
 	spec := readOpenAPISpec(t, s.Handler())
 	for _, path := range []string{"/api/v1/push/pg", "/api/v1/push/duckdb"} {
 		op := requireOpenAPIOperation(t, spec, "post", path)
@@ -522,6 +528,7 @@ func TestPushRoutesReturn503WhileWriterClosedForSSE(t *testing.T) {
 // full push forced. Per-batch pushes and runner-less servers keep the
 // in-process SyncThenRun path, whose sync does land the session.
 func TestSyncThenRunForPushWorkerRunnerRouting(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		stale         bool
@@ -562,6 +569,7 @@ func TestSyncThenRunForPushWorkerRunnerRouting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			runnerCalls := 0
 			workCalls := 0
 			var opts []syncRouteFixtureOption
@@ -1046,6 +1054,7 @@ func TestPGPushFullRoutesResyncThroughWorkerRunner(t *testing.T) {
 // TestNewPushProgressStreamSenderThrottles pins the SSE fan-out throttle: the
 // session loop reports per session, and forwarding every report would emit
 // one SSE event per row.
+// Serial: replaces the push stream interval every server reads.
 func TestNewPushProgressStreamSenderThrottles(t *testing.T) {
 	origInterval := pushProgressStreamInterval
 	pushProgressStreamInterval = time.Hour
@@ -1185,8 +1194,10 @@ func TestMirrorPushStreamsWaitingForAnotherPush(t *testing.T) {
 // the result and marks the mirror result. A push that rebuilt nothing reports
 // neither, so a client whose stream drops keeps its --full request.
 func TestMirrorPushReportsArchiveRebuild(t *testing.T) {
+	t.Parallel()
 	for _, rebuild := range []bool{false, true} {
 		t.Run(fmt.Sprintf("rebuild=%t", rebuild), func(t *testing.T) {
+			t.Parallel()
 			var f *syncRouteFixture
 			f = newSyncRouteFixture(t, withLocalResyncRunner(func(
 				ctx context.Context, _ func(syncpkg.Progress),
@@ -1322,6 +1333,7 @@ func (failingPusher) Close() error { return nil }
 // The replica route reports whether the copy started: a failed connect
 // started nothing, and a failed copy may have recorded a full push the mirror
 // resumes.
+// Serial: subtests push through one shared server.
 func TestReplicaPushReportsWhetherTheCopyStarted(t *testing.T) {
 	f := newSyncRouteFixture(t)
 	for _, tt := range []struct {
@@ -1361,6 +1373,7 @@ func TestReplicaPushReportsWhetherTheCopyStarted(t *testing.T) {
 // as started. Every mirror pushes in full after a rebuild, and a client that
 // kept --full would make the daemon rebuild the archive on every retry.
 func TestSyncThenRunForPushCountsARebuildAsStarted(t *testing.T) {
+	t.Parallel()
 	var f *syncRouteFixture
 	f = newSyncRouteFixture(t, withLocalResyncRunner(func(
 		ctx context.Context, _ func(syncpkg.Progress),
@@ -1378,4 +1391,72 @@ func TestSyncThenRunForPushCountsARebuildAsStarted(t *testing.T) {
 		assert.Equal(t, full, pushErrorBody(err.Error(), err).PushStarted,
 			"full=%t: only a push that rebuilt the archive counts as started", full)
 	}
+}
+
+// A rebuild can install while a fork stays deferred. A /resync request accepts
+// that, but a push must not publish the unresolved fork or its copied usage.
+func TestSyncThenRunForPushRejectsDeferredRebuild(t *testing.T) {
+	const parent = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	const child = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	for _, worker := range []bool{true, false} {
+		t.Run(fmt.Sprintf("worker=%v", worker), func(t *testing.T) {
+			root := t.TempDir()
+			const timestamp = "2026-09-01T10:00:00Z"
+			require.NoError(t, os.WriteFile(
+				filepath.Join(root, "rollout-2026-09-01T11-00-00-"+child+".jsonl"),
+				[]byte(testjsonl.JoinJSONL(
+					testjsonl.CodexForkedSessionMetaJSON(child, parent, "/work/project", "user", timestamp),
+					testjsonl.CodexTurnContextWithIDJSON("gpt-5", "child-turn", timestamp),
+					testjsonl.CodexMsgJSON("assistant", "child answer", timestamp),
+				)), 0o600))
+			opts := []syncRouteFixtureOption{
+				withDisabledAgents(nil, map[parser.AgentType][]string{parser.AgentCodex: {root}}),
+			}
+			if worker {
+				opts = append(opts, withLocalResyncRunner(func(
+					context.Context, func(syncpkg.Progress),
+				) (syncpkg.SyncStats, error) {
+					return syncpkg.SyncStats{ArchiveRebuilt: true, Deferred: 1}, nil
+				}))
+			}
+			f := newSyncRouteFixture(t, opts...)
+			engine := f.srv.syncEngineForLocal(t.Context(), f.db)
+			t.Cleanup(engine.Close)
+
+			err := f.srv.syncThenRunForPush(
+				t.Context(), engine, f.db, true, nil, nil, nil,
+				func(bool) error {
+					require.FailNow(t, "push work must not run while a fork is deferred")
+					return nil
+				},
+			)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "local sync processing incomplete")
+		})
+	}
+}
+
+// An offline attachment can fail the drain after a rebuild that kept a
+// deferred fork. Suppressing that attachment error must not let the push run.
+func TestSyncThenRunForPushRejectsDeferredRebuildWithAttachmentFailure(t *testing.T) {
+	f := newSyncRouteFixture(t, withLocalResyncRunner(func(
+		context.Context, func(syncpkg.Progress),
+	) (syncpkg.SyncStats, error) {
+		return syncpkg.SyncStats{ArchiveRebuilt: true, Deferred: 1},
+			archivesource.DrainError{Err: errors.New("attachment offline")}
+	}))
+	engine := f.srv.syncEngineForLocal(t.Context(), f.db)
+	t.Cleanup(engine.Close)
+
+	err := f.srv.syncThenRunForPush(
+		t.Context(), engine, f.db, true, nil, nil, nil,
+		func(bool) error {
+			require.FailNow(t, "push work must not run while a fork is deferred")
+			return nil
+		},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "local sync processing incomplete")
 }

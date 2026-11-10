@@ -59,10 +59,19 @@ func EnsureHostedTenant(ctx context.Context, database *sql.DB, schema, tenant st
 		if err = checkHostedBinding(ctx, tx, schema, tenant); err != nil {
 			return err
 		}
+		if err = checkDataVersionCompat(ctx, tx); err != nil {
+			return err
+		}
+		if err = installAutomationAuditSchemaPG(ctx, tx); err != nil {
+			return err
+		}
 		if err = installHostedCoreUpgrade(ctx, tx, schema, tenant); err != nil {
 			return err
 		}
 		if err = installRawProjectionUpgrade(ctx, tx, schema, tenant); err != nil {
+			return err
+		}
+		if err = migrateAccountUsageCountersPG(ctx, tx); err != nil {
 			return err
 		}
 		if err = installHostedFrictionUpgrade(ctx, tx, schema, tenant); err != nil {
@@ -74,13 +83,13 @@ func EnsureHostedTenant(ctx context.Context, database *sql.DB, schema, tenant st
 		if err = checkHostedCatalog(ctx, tx, schema, tenant); err != nil {
 			return err
 		}
-		if err = checkDataVersionCompat(ctx, tx); err != nil {
-			return err
-		}
 		if err = createHostedContentSearchIndexes(ctx, tx); err != nil {
 			return err
 		}
 		return tx.Commit()
+	}
+	if _, err = tx.ExecContext(ctx, dropUsageChangeJournalSQL); err != nil {
+		return err
 	}
 	if err = preflightHostedAdoption(ctx, tx, schema, tenant); err != nil {
 		return err
@@ -104,7 +113,13 @@ func EnsureHostedTenant(ctx context.Context, database *sql.DB, schema, tenant st
 	if _, err = ensureColumns(ctx, tx, columns, migrations); err != nil {
 		return err
 	}
+	if err = migrateAccountUsageCountersPG(ctx, tx); err != nil {
+		return err
+	}
 	if err = checkDataVersionCompat(ctx, tx); err != nil {
+		return err
+	}
+	if err = installAutomationAuditSchemaPG(ctx, tx); err != nil {
 		return err
 	}
 	if err = createHostedContentSearchIndexes(ctx, tx); err != nil {

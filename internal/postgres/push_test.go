@@ -156,6 +156,11 @@ func (c *pushAliasRoutingConn) QueryContext(
 ) (driver.Rows, error) {
 	normalized := strings.ToLower(query)
 	switch {
+	case strings.Contains(normalized, "select version()"):
+		return &pushAliasRoutingRows{
+			columns: []string{"version"},
+			values:  [][]driver.Value{{"PostgreSQL 18"}},
+		}, nil
 	case strings.Contains(normalized, "agentsview_json_integer"):
 		return &pushAliasRoutingRows{
 			columns: []string{
@@ -173,6 +178,11 @@ func (c *pushAliasRoutingConn) QueryContext(
 		return &pushAliasRoutingRows{
 			columns: []string{"exists"},
 			values:  [][]driver.Value{{1}},
+		}, nil
+	case strings.Contains(normalized, "from information_schema.columns"):
+		return &pushAliasRoutingRows{
+			columns: []string{"wide"},
+			values:  [][]driver.Value{{true}},
 		}, nil
 	case strings.Contains(normalized, "from pg_indexes"):
 		return &pushAliasRoutingRows{

@@ -9,9 +9,13 @@ interface.
 
 ## Dashboard
 
-When you open AgentsView with no session selected, you see the analytics
+If your archive is empty, AgentsView shows **No sessions yet** and lists the
+folders it reads for sessions. **Choose folders** opens **Settings > Session
+Providers**, where you can configure those sources.
+
+With sessions in your archive and no session selected, you see the analytics
 dashboard. It provides a high-level overview of your agent activity across all
-projects.
+projects, including when filters hide every session in the sidebar.
 
 ![Analytics dashboard](/docs/assets/generated/screenshots/dashboard.png)
 
@@ -32,10 +36,14 @@ last sync time, and the build version.
 
 On the normal local `agentsview serve` runtime, the session lists in the sidebar
 update automatically from a global SSE event stream (debounced during busy
-syncs). The dashboard, Usage page, and Activity page do not refetch their charts
+syncs). The dashboard and Activity page do not refetch their charts
 on every sync event — each pairs a manual refresh button with a relative
 "Updated…" timestamp, and the Analytics dashboard also refreshes periodically on
-its own. Click refresh, or change the date range, to pull the latest numbers.
+its own. Use refresh or change the date range for an immediate update.
+
+Usage refreshes after session data changes and on its five-minute timer,
+at most once a minute while visible.
+It pauses while hidden and catches up when you return.
 
 For range-based concurrency and agent-minutes reporting, use the top-level
 [Activity](/docs/activity/) page.
@@ -73,7 +81,7 @@ failed, so partial totals are visible.
 The panel reports when the backend or selected filters cannot provide outcome
 totals. Clear machine, model, termination, minimum-message, recent-activity, and
 time-of-day filters to use it. The CLI exposes the same metrics through
-[`agentsview stats`](/docs/stats/).
+[`agentsview report stats`](/docs/stats/).
 
 ### Date Range Picker
 
@@ -297,7 +305,7 @@ session-intelligence signals. It shows:
 ![Session Health section on the dashboard](/docs/assets/generated/screenshots/session-health.png)
 
 See [Session Intelligence](/docs/session-intelligence/#outcome-classification)
-for the full four-outcome model that both this section and `agentsview stats`
+for the full four-outcome model that both this section and `agentsview report stats`
 derive from.
 
 ### CSV Export
@@ -428,7 +436,7 @@ Each session item shows:
 
 Antigravity sessions show the conversation title Antigravity saves in
 `conversation_summaries.db`. Renames appear shortly after that file changes,
-or on the next `agentsview sync`. Names set in AgentsView still win.
+or on the next `agentsview source sync`. Names set in AgentsView still win.
 
 Qoder's database title lookup applies to `~/.qoder/projects` and
 `~/.qoder-cn/projects`. The Qoder app stores titles in `main.sqlite` under
@@ -443,7 +451,7 @@ precedence in this order:
 3. A file-side name, with a sidecar title ahead of an in-chat rename.
 
 Renames appear at the next sync pass: a watched change in any agent root,
-manual `agentsview sync`, or startup. For these two roots, blank database
+manual `agentsview source sync`, or startup. For these two roots, blank database
 titles or read errors preserve the archived name. A missing database, schema,
 or session row uses non-empty file-side names; an empty file-side name
 preserves the archived title. Other Qoder roots use file-side names, including
@@ -586,6 +594,10 @@ prefix use a single segment after `/sessions/`.
 
 Session URLs work as bookmarks and can be shared with teammates when using
 [PostgreSQL sync](/docs/pg-sync/) for shared deployments.
+
+A link from another tool that carries the agent's bare session UUID (Pi, OMP,
+Codex) opens the matching session. If the ID is ambiguous, use the full ID with
+its provider prefix.
 
 ### Open a session by ID
 
@@ -812,7 +824,7 @@ so matches can be highlighted.
 ### Block-Type Filtering
 
 Click the filter icon in the message viewer header to open a dropdown that
-toggles visibility of six content categories:
+toggles visibility of seven content categories:
 
 | Category  | What It Controls          |
 | --------- | ------------------------- |
@@ -822,6 +834,7 @@ toggles visibility of six content categories:
 | Tool      | Tool call blocks          |
 | Code      | Code blocks               |
 | System    | System boundary cards     |
+| Hooks     | Hook output cards         |
 
 Turning off **Code** collapses each fenced block into an inline placeholder
 showing its language and an **Expand** button. Expand or collapse individual
@@ -914,7 +927,7 @@ with `?breakdown=true` — see
 
 For aggregate token usage and estimated cost reports across all sessions, see
 the [Token Usage & Costs](/docs/token-usage/) page and the
-[`agentsview usage daily`](/docs/commands/#agentsview-usage-daily) CLI command.
+[`agentsview report usage daily`](/docs/commands/#agentsview-usage-daily) CLI command.
 
 For a scriptable report on the current session, use
 [`agentsview session usage <id>`](/docs/session-api/#agentsview-session-usage)
@@ -1169,7 +1182,7 @@ can copy the session directory and open it in detected editors or file browsers.
 Pi sessions use `pi --session` with the transcript path when available, or the
 native session ID. For Pi, **Copy command** includes the working directory so
 you can paste the complete command into a shell. Augure Code sessions use
-`augure resume`. Copying a session's directory path also works when that
+`augure resume`, and Open Interpreter sessions use `interpreter resume`. Copying a session's directory path also works when that
 directory has been deleted.
 
 Local Codex sessions add **Open in Codex Desktop**, which deep-links to the
@@ -1351,7 +1364,7 @@ organized into sections:
 | Section            | What You Can Configure                                                                                   |
 | ------------------ | -------------------------------------------------------------------------------------------------------- |
 | Language           | Interface language (Azerbaijani, English, French, Japanese, Korean, Spanish, Simplified Chinese, or Traditional Chinese)       |
-| Appearance         | Theme (light/dark), high-contrast mode, chart colors, message layout, zoom, block visibility             |
+| Appearance         | Theme (light/dark), high-contrast mode, chart colors, message colors, message layout, zoom, block visibility |
 | Date ranges        | Browser-local checkbox for linking date selections across Sessions, Usage, Activity, Trends, and Quality |
 | Session Providers  | Enable session providers, inspect their session directories, and add alternate agent homes               |
 | Archive content    | Choose whether future imports keep, drop, or offload tool-result images                                  |
@@ -1372,8 +1385,8 @@ load; a saved language preference takes precedence.
 
 ![Chart color palette setting](/docs/assets/generated/screenshots/settings-chart-colors.png)
 
-Language, theme, high contrast, message layout, zoom, block visibility, and
-Date ranges preferences use local storage in the current browser or desktop
+Language, theme, high contrast, message colors, message layout, zoom, block
+visibility, and Date ranges preferences use local storage in the current browser or desktop
 webview profile. Each profile keeps its own choices. The optional `zoom_level`
 setting supplies a default when no local zoom or text-size preference exists.
 
@@ -1430,11 +1443,47 @@ Settings > Appearance also offers a **high-contrast** mode for greater
 legibility. The theme and high-contrast preferences persist across sessions.
 
 The **Chart colors** control selects the categorical palette used by the
-dashboard skill trend, Trends, and Usage charts. Choose **Agentsview** for the
-project palette or **Matplotlib** for its gray-free categorical families. This
-setting is server-wide rather than browser-local, so all clients connected to
+dashboard skill trend, Trends, and Usage charts:
+
+- **Agentsview**: the project palette.
+- **Matplotlib**: matplotlib's categorical families without their grays.
+- **Color-blind safe**: Petroff's color sequences, chosen so series stay
+  distinguishable with common forms of color blindness. Past the tenth series,
+  colors repeat with a pattern: Usage bars, areas, and treemap tiles are
+  hatched, then cross-hatched, then dotted, and Trends lines are dashed.
+  Legends and lists show the same pattern.
+
+This setting is server-wide rather than browser-local, so all clients connected to
 the same server use the same palette. You can change it even when the server
 reads from a read-only store such as PostgreSQL, ClickHouse, or DuckDB.
+
+### Message Colors
+
+**Message colors** in Settings > Appearance sets the color of each message
+type: user messages, assistant text, thinking blocks, tool calls, and code
+blocks. It helps readers who cannot easily tell the default blue and purple
+apart.
+
+- **Color-blind safe** applies hues that stay distinct with the common forms
+  of color blindness: blue for user messages and vermillion for assistant
+  text. The hues are the Okabe-Ito colors behind matplotlib's
+  `seaborn-v0_8-colorblind` style. Thinking and code use darker versions of
+  its pink and yellow, because the originals are too faint on light themes.
+  The preset also turns on line patterns.
+- **Mark message types with line patterns** gives each type its own bar:
+  solid for user messages, double for assistant text, dotted for thinking,
+  and dashed for tool calls. Code blocks get a dashed frame when they have a
+  custom color. Types then differ by shape, not only by color. The patterns
+  also stay visible in the Stream layout, which hides the role header.
+- Each type has a color picker, a hex field, and quick-pick swatches. One
+  color applies to light, dark, and high-contrast modes. The message
+  background is a light tint of the color, and the label text is the color
+  mixed toward the theme's text color.
+- When a color would make label text hard to read (below 4.5:1) or the color
+  bar hard to see (below 3:1) in any mode, the setting names the modes and
+  the measured ratio. The color still applies, so you can decide.
+- **Reset** restores one type's theme color. **Reset to defaults** restores
+  every type and turns off patterns.
 
 ### Iframe Embedding
 
@@ -1467,6 +1516,16 @@ spinning animation while syncing.
 
 The status bar also shows a version mismatch warning (red) if the frontend and
 backend versions differ. Click it to reload.
+
+### History from another machine
+
+[Attach a saved archive](/docs/configuration/#history-from-a-saved-archive) to
+browse a retired machine's Claude and Codex sessions beside your current ones.
+Choose a backup snapshot or an existing archive directory. Use `machine_name`
+to label a single-machine archive without changing its captured identity.
+Ordinary sync reads pending archive sources after local work. Once indexed, the
+history remains browsable with the drive disconnected. Reparsing requires the
+archive to be available again.
 
 ### Full Resync
 

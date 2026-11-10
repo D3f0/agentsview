@@ -8,7 +8,6 @@
     ApiError,
     getServerUrl,
     setServerUrl,
-    getAuthToken,
     setAuthToken,
     isRemoteConnection,
   } from "../../api/runtime.js";
@@ -16,7 +15,8 @@
   import { LatestRead } from "../../utils/latest-read.js";
 
   let serverUrl: string = $state(getServerUrl());
-  let tokenInput: string = $state(getAuthToken());
+  // This form targets another server; keep this server's API token out of it.
+  let tokenInput: string = $state("");
   let testing: boolean = $state(false);
   let testResult: { ok: boolean; message: string } | null = $state(null);
   let saving: boolean = $state(false);

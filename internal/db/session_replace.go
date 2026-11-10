@@ -21,7 +21,11 @@ func (db *DB) ReplaceSessionKeepingTrashedCopy(
 	}
 	write.ReplaceMessages = true
 	write.RejectMessageCountDecrease = false
-	write = db.storageSessionBatchWrite(sanitizeSessionBatchWrite(write))
+	sanitized, err := sanitizeSessionBatchWriteContext(ctx, write)
+	if err != nil {
+		return "", err
+	}
+	write = db.storageSessionBatchWrite(sanitized)
 	id := write.Session.ID
 
 	// Writers hold db.mu, so the row read here matches the messages the transaction reads.
@@ -85,7 +89,7 @@ func (db *DB) ReplaceSessionKeepingTrashedCopy(
 		return "", err
 	}
 	var pins []savedPin
-	if _, err := writeOneSessionBatchTx(
+	if _, err := db.writeOneSessionBatchTx(
 		ctx, tx, ctxTx, write, &pending, db.usageOnlyStorage(), &pins,
 	); err != nil {
 		return "", err
@@ -109,7 +113,7 @@ func (db *DB) ReplaceSessionKeepingTrashedCopy(
 			copyWrite.UsageEvents[i] = ev
 		}
 		copyWrite.PlanUsage = planUsage
-		if _, err := writeOneSessionBatchTx(
+		if _, err := db.writeOneSessionBatchTx(
 			ctx, tx, ctxTx, copyWrite, &pending, db.usageOnlyStorage(), nil,
 		); err != nil {
 			return "", fmt.Errorf("writing replaced session copy: %w", err)

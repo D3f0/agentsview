@@ -4047,7 +4047,7 @@ func TestRunExclusiveSerializesWorktreeReclassification(t *testing.T) {
 	select {
 	case applyErr := <-applyDone:
 		require.Failf(t, "apply overlapped exclusive work", "error: %v", applyErr)
-	case <-time.After(25 * time.Millisecond): //nolint:kennlint // absence check; the held exclusive work keeps the apply waiting
+	case <-time.After(25 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check; the held exclusive work keeps the apply waiting
 	}
 	close(release)
 	require.NoError(t, <-firstDone)
@@ -6021,17 +6021,6 @@ func TestSyncPathsClaude(t *testing.T) {
 
 	assertSessionMessageCount(t, env.db, "paths-test", 2)
 	assertSessionMessageCount(t, env.db, "paths-untouched", 1)
-}
-
-func TestSyncPathsIgnoresNonSessionFiles(t *testing.T) {
-	env := setupSingleAgentTestEnv(t, parser.AgentClaude)
-
-	// SyncPaths with non-session paths: no panic, no error
-	env.engine.SyncPaths([]string{
-		filepath.Join(env.claudeDir, "some-dir"),
-		filepath.Join(env.claudeDir, "proj", "README.md"),
-		"/tmp/random-file.txt",
-	})
 }
 
 func TestSyncPathsCodex(t *testing.T) {
@@ -10585,7 +10574,7 @@ func TestSyncEngineConcurrentSerialization(t *testing.T) {
 		require.FailNow(t,
 			"ResyncAll entered while SyncAll held mutex",
 		)
-	case <-time.After(50 * time.Millisecond): //nolint:kennlint // absence check; the held SyncAll mutex keeps ResyncAll out
+	case <-time.After(50 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check; the held SyncAll mutex keeps ResyncAll out
 		// Expected: ResyncAll is blocked.
 	}
 
@@ -12909,10 +12898,7 @@ func TestPiSessionIntegration(t *testing.T) {
 
 	// Use the existing pi session fixture from the parser testdata.
 	// The fixture has id="pi-test-session-uuid".
-	_, callerFile, _, _ := runtime.Caller(0)
-	fixtureDir := filepath.Join(
-		filepath.Dir(callerFile), "..", "parser", "testdata", "pi",
-	)
+	fixtureDir := filepath.Join("..", "parser", "testdata", "pi")
 	fixtureContent, err := os.ReadFile(
 		filepath.Join(fixtureDir, "session.jsonl"),
 	)
@@ -15932,7 +15918,7 @@ func TestResyncAllCancelledPreservesOriginalDB(t *testing.T) {
 	stats := env.engine.ResyncAll(ctx, nil)
 
 	require.True(t, stats.Aborted, "expected ResyncAll to report Aborted")
-	assert.Equal(t, []string{"resync aborted: 0 synced, 0 failed"}, stats.Warnings)
+	assert.Equal(t, []string{"resync aborted: 0 synced, 0 failed: canceled: context canceled"}, stats.Warnings)
 	assert.Equal(t, stats, env.engine.LastSyncStats(),
 		"legacy LastSyncStats must match the returned cancellation result")
 

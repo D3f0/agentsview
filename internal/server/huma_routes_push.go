@@ -13,6 +13,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"go.kenn.io/agentsview/internal/archivepush"
+	"go.kenn.io/agentsview/internal/archivesource"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/parser"
@@ -211,11 +212,8 @@ type daemonPushRequest struct {
 	// request's fresh pusher can promote to generation-wide when the active
 	// generation id has changed (see storage.PushOptions).
 	LastReconciledVectorGeneration int64 `json:"last_reconciled_vector_generation,omitzero"`
-	// Automatic is set by the CLI's watch-mode mirror pushes: a mirror
-	// held by a live serve process defers instead of rebuilding the whole
-	// archive on every changed batch, and archive-scale diagnostics are
-	// skipped (see storage.MirrorPushOptions.Automatic). Explicit pushes
-	// leave it unset and do neither.
+	// Automatic marks watch-mode mirror pushes, which skip archive-scale
+	// diagnostics and defer on rebuild-lock contention.
 	Automatic     bool                        `json:"automatic,omitzero"`
 	WatchBatch    *syncpkg.WatchBatch         `json:"watch_batch,omitempty"`
 	WatchRecovery *syncpkg.WatchRecoveryScope `json:"watch_recovery,omitempty"`
@@ -248,7 +246,7 @@ func (t daemonReplicaTarget) target() storage.ReplicaTarget {
 
 // WithVectorPushSource wires the local vectors.db push source used by the
 // daemon's replica push handlers. Nil (the default) leaves the vector push
-// phase disabled, e.g. when [vector] is not configured.
+// phase disabled; a live source can also skip export while vectors are off.
 func WithVectorPushSource(src storage.VectorPushSource) Option {
 	return func(s *Server) { s.vectorPushSource = src }
 }
@@ -279,8 +277,8 @@ func (s *Server) localPushTarget(ctx context.Context) (*db.DB, error) {
 }
 
 // replicaPushVectorSource returns the vector push source to attach for this
-// push, or nil when the phase is gated off: no source is wired ([vector]
-// disabled), the target opts out via push_vectors=false, or the caller passed
+// push, or nil when the phase is gated off: no source is wired, the target
+// opts out via push_vectors=false, or the caller passed
 // --no-vectors. A nil source leaves the pusher's vector phase skipped.
 func (s *Server) replicaPushVectorSource(
 	target storage.ReplicaTarget, noVectors bool,
@@ -576,6 +574,12 @@ func (s *Server) syncThenRunForPush(
 	if rebuilt {
 		onPhase(storage.PushPhaseRebuilt)
 	}
+	// Attachment retries do not prevent copying a current local archive.
+	// Keep local sync and rebuild failures fatal.
+	if _, pending := errors.AsType[archivesource.DrainError](err); pending && ctx.Err() == nil && !local.NeedsResync() {
+		incomplete = errors.Join(incomplete, err)
+		err = nil
+	}
 	if err != nil {
 		return markArchiveRebuilt(ctx, local, startDatabaseID, storage.PushNotStartedError{Err: err})
 	}
@@ -659,7 +663,11 @@ func (s *Server) syncForPush(
 				forceFull = f
 				return nil
 			})
-		if err != nil || stats.ProcessingComplete() {
+		if err != nil {
+			return forceFull, nil, err
+		}
+		if stats.ProcessingComplete() {
+			_, err = s.finishLocalSync(ctx, engine, stats, nil, true)
 			return forceFull, nil, err
 		}
 		// Local sync owns retries for failed sources. An unscoped push must
@@ -671,8 +679,19 @@ func (s *Server) syncForPush(
 		}
 		return false, incomplete, nil
 	}
-	if _, err := s.runResyncWithFallback(ctx, engine, nil); err != nil {
-		return false, nil, err
+	stats, err := s.runResyncWithFallback(ctx, engine, nil)
+	// /resync accepts an installed rebuild that still has deferred forks.
+	// A push must not publish them or their copied parent usage. Check this
+	// before any drain error, and do not wrap that error: the caller
+	// tolerates attachment failures it can find in the chain.
+	if stats.Deferred > 0 && ctx.Err() == nil {
+		if err != nil {
+			log.Printf("push resync: %v", err)
+		}
+		return true, nil, requireProcessingComplete(stats)
+	}
+	if err != nil {
+		return true, nil, err
 	}
 	return true, nil, ctx.Err()
 }

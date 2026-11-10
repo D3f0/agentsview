@@ -1366,7 +1366,9 @@ func TestHTTPAntigravityAppliedStatesCoverMultipleRoots(t *testing.T) {
 		require.NoError(t, err)
 		conns = append(conns, conn)
 		require.NoError(t, conn.Raw(func(raw any) error {
-			raw.(*sqlite3.SQLiteConn).RegisterAuthorizer(func(op int, table, column, _ string) int {
+			raw.(interface {
+				RegisterAuthorizer(func(int, string, string, string) int)
+			}).RegisterAuthorizer(func(op int, table, column, _ string) int {
 				if op == sqlite3.SQLITE_READ && table == "sessions" && column == "session_name" {
 					archiveTitleReads.Add(1)
 				}
@@ -1448,8 +1450,8 @@ func TestHTTPUnchangedMirrorImportsIntoNewDatabaseGeneration(t *testing.T) {
 	replacement, err := db.Open(t.Context(), filepath.Join(t.TempDir(), "replacement.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, replacement.Close()) })
-	require.NoError(t, replacement.CopySyncStateFrom(database.Path()))
-	require.NoError(t, replacement.CopySessionMetadataFrom(database.Path()))
+	require.NoError(t, replacement.CopySyncStateFrom(t.Context(), database.Path()))
+	require.NoError(t, replacement.CopySessionMetadataFrom(t.Context(), database.Path()))
 	hs.DB = replacement
 
 	second, err := hs.Run(t.Context())
@@ -3067,7 +3069,7 @@ func TestHTTPSyncHoldsMirrorLockDuringManifestFetch(t *testing.T) {
 	remote.onManifest = func() {
 		// assert, not require: this runs on the server goroutine, where
 		// FailNow must not be called.
-		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond) //nolint:kennlint // the deadline is the expected result; the sync holds the mirror lock, so only the context ends the acquire
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond) //nolint:kennlint // deadlinetest: the deadline is the expected result; the sync holds the mirror lock, so only the context ends the acquire
 		defer cancel()
 		lock, err := AcquireMirrorLock(ctx, mirrorRoot)
 		if lock != nil {
@@ -4617,7 +4619,7 @@ func setPortableTempDir(t *testing.T, dir string) {
 
 func assertMirrorLocked(t *testing.T, mirrorRoot string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond) //nolint:kennlint // the deadline is the expected result; the caller holds the mirror lock, so only the context ends the acquire
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond) //nolint:kennlint // deadlinetest: the deadline is the expected result; the caller holds the mirror lock, so only the context ends the acquire
 	defer cancel()
 	lock, err := AcquireMirrorLock(ctx, mirrorRoot)
 	if lock != nil {
