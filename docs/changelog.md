@@ -9,12 +9,12 @@ The latest release is
 
 ## Unreleased
 
-- Update the Bob branch to AgentsView 0.47.0 and Bob CLI 2.1.0. Browse project
-  JSON chats and SQLite tasks, including separately persisted reasoning and
-  task-reported costs without adding a second model-priced charge. Context-only
-  spend does not invent billed token counts. Unchanged Bob sources reparse in
-  place, preserving archived sessions. `BOB_DIR` and `bob_dirs` override the
-  `~/.bob/` default.
+- Restore legacy Bob CLI thought streams, response text, and raw tool results,
+  and discover legacy IDE API/UI task histories alongside Bob 2.x SQLite.
+  Preserve per-format dialogue, timing, usage, and distinct resumed segments.
+  Thinking-plus-tool messages no longer hide reasoning in compact tool groups.
+  Bob-only parser version 169 upgrades version-168 archives in place without
+  dropping source-less sessions. Configure roots with `[agents.bob] dirs`.
 
 - The remote connection form no longer pre-fills the local server's auth token.
 

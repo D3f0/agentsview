@@ -103,6 +103,13 @@ describe("buildDisplayItems", () => {
     expect(items[0]).toMatchObject({ kind: "message" });
   });
 
+  it("retains thinking beside tools while preserving empty-message grouping", () => {
+    const thinking = msg({ ordinal: 1, content: "[Thinking]\nInspect the schema.\n[/Thinking]", has_thinking: true, thinking_text: "Inspect the schema.", has_tool_use: true });
+    const items = buildDisplayItems([toolMsg(0), thinking, toolMsg(2)]);
+    expect(items.map((item) => item.kind)).toEqual(["tool-group", "message", "tool-group"]);
+    expect(items[1]).toMatchObject({ kind: "message", message: { thinking_text: "Inspect the schema." } });
+  });
+
   it("user messages are always individual items", () => {
     const msgs = [
       msg({
@@ -215,11 +222,6 @@ describe("skipToolGrouping preserves thinking in tool-only messages", () => {
     return (type: string) => visible.has(type);
   }
 
-  it("thinking+tool message is grouped as tool-group by default", () => {
-    const items = buildDisplayItems([thinkingToolMsg(0)]);
-    expect(items).toHaveLength(1);
-    expect(items[0]!.kind).toBe("tool-group");
-  });
 
   it("individual thinking+tool message stays visible when tool hidden but thinking visible", () => {
     const items = buildDisplayItems([thinkingToolMsg(0)], { skipToolGrouping: true });

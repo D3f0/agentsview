@@ -1552,6 +1552,20 @@ rewrites TOML formatting and comments.
 
 All listed directories are discovered, watched, and synced independently.
 
+Bob roots can combine CLI JSON history, legacy IDE tasks, and current SQLite:
+
+```toml
+[agents.bob]
+dirs = ["~/.bob", "~/Library/Application Support/Code/User/globalStorage/ibm.bob-code"]
+```
+
+CLI chats live below `tmp/**/chats/`; SQLite tasks below `db/bob.db`. Legacy
+IDE tasks are read below the extension-storage root's `tasks/` directory, or a
+directly configured `tasks/` directory. API/UI companions are required; optional
+`task_metadata.json` does not replace transcript or workspace evidence. Parser
+upgrades preserve archive session identities and source-less history.
+
+
 Pi also honors its native `PI_CODING_AGENT_DIR` and
 `PI_CODING_AGENT_SESSION_DIR` variables in local discovery. The agent
 home variable changes the default to `<agent-home>/sessions`; the session

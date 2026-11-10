@@ -28,18 +28,23 @@ type bobSessionJSON struct {
 
 type bobMessageJSON struct {
 	Type      string            `json:"type"`
+	ID        string            `json:"id"`
 	Content   string            `json:"content"`
 	Timestamp string            `json:"timestamp"`
 	Model     string            `json:"model"`
 	Tokens    bobTokensJSON     `json:"tokens"`
 	ToolCalls []bobToolCallJSON `json:"toolCalls"`
+	Thoughts  []bobThoughtJSON  `json:"thoughts"`
 }
 
 type bobTokensJSON struct {
-	Input    int `json:"input"`
-	Output   int `json:"output"`
-	Cached   int `json:"cached"`
-	Thoughts int `json:"thoughts"`
+	Input    int  `json:"input"`
+	Output   int  `json:"output"`
+	Cached   int  `json:"cached"`
+	Thoughts int  `json:"thoughts"`
+	Tool     int  `json:"tool"`
+	Total    int  `json:"total"`
+	Present  bool `json:"-"`
 }
 
 type bobToolCallJSON struct {
@@ -49,6 +54,7 @@ type bobToolCallJSON struct {
 	Status        string          `json:"status"`
 	Timestamp     string          `json:"timestamp"`
 	ResultDisplay string          `json:"resultDisplay"`
+	Result        []bobResultJSON `json:"result"`
 }
 
 func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, error) {
@@ -95,11 +101,12 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 			}
 			messages = append(messages, ParsedMessage{
 				Ordinal: len(messages), Role: RoleUser, Content: content,
+				SourceUUID:   entry.ID,
 				DialogueText: new(content),
 				Timestamp:    ts, ContentLength: len(content),
 			})
 		case "bob-shell":
-			content, thinking, dialogue := bobVisibleContent(entry.Content)
+			content, thinking, dialogue := bobLegacyMessageProjection(entry)
 			toolCalls := bobToolCalls(entry.ToolCalls)
 			if content == "" && len(toolCalls) == 0 {
 				continue
@@ -110,6 +117,7 @@ func parseBobSession(path, machine string) (*ParsedSession, []ParsedMessage, err
 			}
 			message := ParsedMessage{
 				Ordinal: len(messages), Role: RoleAssistant, Content: content,
+				SourceUUID:   entry.ID,
 				ThinkingText: thinking, Timestamp: ts, Model: model,
 				DialogueText: new(dialogue),
 				HasThinking:  thinking != "", HasToolUse: len(toolCalls) > 0,
@@ -180,37 +188,18 @@ func bobVisibleContent(content string) (string, string, string) {
 }
 
 func bobToolCalls(raw []bobToolCallJSON) []ParsedToolCall {
-	calls := make([]ParsedToolCall, 0, len(raw))
-	for _, call := range raw {
-		if call.Name == "" {
-			continue
-		}
-		input := ""
-		if len(call.Args) > 0 && string(call.Args) != "null" {
-			input = string(call.Args)
-		}
-		parsed := ParsedToolCall{
-			ToolUseID: call.ID, ToolName: call.Name,
-			Category: NormalizeToolCategory(call.Name), InputJSON: input,
-		}
-		if display := strings.TrimSpace(call.ResultDisplay); display != "" {
-			parsed.ResultEvents = []ParsedToolResultEvent{{
-				ToolUseID: call.ID, Source: "bob", Status: call.Status,
-				Content: display, Timestamp: parseTimestamp(call.Timestamp),
-			}}
-		}
-		calls = append(calls, parsed)
-	}
-	return calls
+	return bobLegacyToolCalls(raw)
 }
 
 func applyBobTokenUsage(message *ParsedMessage, tokens bobTokensJSON) {
-	if tokens.Input == 0 && tokens.Output == 0 && tokens.Cached == 0 && tokens.Thoughts == 0 {
+	if !tokens.Present {
+		message.tokenPresenceKnown = true
 		return
 	}
 	raw, err := json.Marshal(map[string]int{
 		"input_tokens": tokens.Input, "output_tokens": tokens.Output,
 		"cache_read_input_tokens": tokens.Cached, "reasoning_tokens": tokens.Thoughts,
+		"tool_tokens": tokens.Tool, "total_tokens": tokens.Total,
 	})
 	if err != nil {
 		return
@@ -218,8 +207,8 @@ func applyBobTokenUsage(message *ParsedMessage, tokens bobTokensJSON) {
 	message.TokenUsage = raw
 	message.ContextTokens = tokens.Input + tokens.Cached
 	message.OutputTokens = tokens.Output
-	message.HasContextTokens = tokens.Input != 0 || tokens.Cached != 0
-	message.HasOutputTokens = tokens.Output != 0
+	message.HasContextTokens = true
+	message.HasOutputTokens = true
 	message.tokenPresenceKnown = true
 }
 
@@ -715,6 +704,7 @@ func (f bobProviderFactory) NewProvider(cfg ProviderConfig) Provider {
 	return &bobProvider{
 		ProviderBase: ProviderBase{Def: cloneAgentDef(f.def), Caps: bobProviderCapabilities(), Config: cfg},
 		jsonSources:  newBobSourceSet(cfg.Roots), dbSources: newBobDBSourceSet(cfg.Roots),
+		ideSources: newBobIDESourceSet(cfg.Roots),
 	}
 }
 
@@ -722,6 +712,7 @@ type bobProvider struct {
 	ProviderBase
 	jsonSources JSONLSourceSet
 	dbSources   bobDBSourceSet
+	ideSources  singleFileSourceSet
 }
 
 func (p *bobProvider) Discover(ctx context.Context) ([]SourceRef, error) {
@@ -733,18 +724,29 @@ func (p *bobProvider) Discover(ctx context.Context) ([]SourceRef, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(jsonSources, dbSources...), nil
+	ideSources, err := p.ideSources.Discover(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(append(jsonSources, dbSources...), ideSources...), nil
 }
 func (p *bobProvider) DiscoverEach(ctx context.Context, yield func(SourceRef) error) error {
 	if err := p.jsonSources.DiscoverEach(ctx, yield); err != nil {
 		return err
 	}
-	return p.dbSources.DiscoverEach(ctx, yield)
+	if err := p.dbSources.DiscoverEach(ctx, yield); err != nil {
+		return err
+	}
+	return p.ideSources.DiscoverEach(ctx, yield)
 }
 func (p *bobProvider) SourceForReconciliation(
 	ctx context.Context, path, project string,
 ) (SourceRef, bool, error) {
 	if source, ok, err := p.dbSources.SourceForReconciliation(ctx, path, project); err != nil || ok {
+		return source, ok, err
+	}
+	if source, ok, err := p.ideSources.FindSource(ctx, FindSourceRequest{StoredFilePath: path}); err != nil || ok {
+		source.ProjectHint = project
 		return source, ok, err
 	}
 	return p.jsonSources.SourceForReconciliation(ctx, path, project)
@@ -758,10 +760,17 @@ func (p *bobProvider) WatchPlan(ctx context.Context) (WatchPlan, error) {
 	if err != nil {
 		return WatchPlan{}, err
 	}
-	return WatchPlan{Roots: append(jsonPlan.Roots, dbPlan.Roots...)}, nil
+	idePlan, err := p.ideSources.WatchPlan(ctx)
+	if err != nil {
+		return WatchPlan{}, err
+	}
+	return WatchPlan{Roots: append(append(jsonPlan.Roots, dbPlan.Roots...), idePlan.Roots...)}, nil
 }
 func (p *bobProvider) SourcesForChangedPath(ctx context.Context, req ChangedPathRequest) ([]SourceRef, error) {
 	if sources, err := p.dbSources.SourcesForChangedPath(ctx, req); err != nil || len(sources) > 0 {
+		return sources, err
+	}
+	if sources, err := p.ideSources.SourcesForChangedPath(ctx, req); err != nil || len(sources) > 0 {
 		return sources, err
 	}
 	return p.jsonSources.SourcesForChangedPath(ctx, req)
@@ -771,11 +780,17 @@ func (p *bobProvider) FindSource(ctx context.Context, req FindSourceRequest) (So
 	if source, ok, err := p.dbSources.FindSource(ctx, req); err != nil || ok {
 		return source, ok, err
 	}
+	if source, ok, err := p.ideSources.FindSource(ctx, req); err != nil || ok {
+		return source, ok, err
+	}
 	return p.jsonSources.FindSource(ctx, req)
 }
 func (p *bobProvider) Fingerprint(ctx context.Context, source SourceRef) (SourceFingerprint, error) {
 	if _, ok := source.Opaque.(multiSessionSource); ok {
 		return p.dbSources.Fingerprint(ctx, source)
+	}
+	if _, ok := source.Opaque.(singleFileSource); ok {
+		return p.ideSources.Fingerprint(ctx, source)
 	}
 	return p.jsonSources.Fingerprint(ctx, source)
 }
@@ -783,6 +798,9 @@ func (p *bobProvider) Parse(ctx context.Context, req ParseRequest) (ParseOutcome
 	req.Machine = firstNonEmptyJSONLString(req.Machine, p.Config.Machine)
 	if _, ok := req.Source.Opaque.(multiSessionSource); ok {
 		return p.dbSources.Parse(ctx, req)
+	}
+	if _, ok := req.Source.Opaque.(singleFileSource); ok {
+		return p.ideSources.Parse(ctx, req)
 	}
 	return p.jsonSources.Parse(ctx, req)
 }

@@ -5731,10 +5731,12 @@ schemas keep their existing ordering behavior.
 
 ## Bob (`bob`)
 
-- **Format:** Bob uses two observed persistence families: project-hash JSON
-  session files under `.bob/tmp/**/chats/` and shared SQLite `.bob/db/bob.db`.
-  JSON artifacts were last verified 2026-09-22 against Bob 2.1.0. The SQLite
-  format was reverified 2026-11-09 against Bob CLI 2.1.0 (commit `8afc0007b`):
+- **Format:** Bob uses project-hash JSON chats under `.bob/tmp/**/chats/`,
+  legacy IDE API/UI task companions under `ibm.bob-code/tasks/<task-id>/`,
+  and shared SQLite `.bob/db/bob.db`. Legacy CLI/IDE artifacts were checked
+  2026-11-10: 180 CLI files hold 2,697 messages across 168 native IDs, with
+  nine disjoint resumed-segment groups; 60 IDE tasks hold 1,353 API rows.
+  The SQLite format was reverified 2026-11-09 against Bob CLI 2.1.0 (commit `8afc0007b`):
   `PRAGMA user_version` reports `18`; `tasks` retains `directory` and `env`,
   and `messages.data` contains JSON with a separate `reasoning` field.
 - **Evidence:** `no-public-source`.
@@ -5755,12 +5757,17 @@ schemas keep their existing ordering behavior.
   The persisted `cost` denomination is based on observed Bob artifacts and
   is not labeled as Bobcoins.
 - **Agentsview:** `internal/parser/bob.go`, `internal/parser/bob_test.go`, and
-  `internal/parser/bob_sqlite_test.go`. Discovery defaults to `.bob`; `BOB_DIR`
-  or `bob_dirs` can override the root. SQLite project resolution prefers
-  `tasks.directory`, then `env.workspace`, then a `file:` project identifier.
-  JSON discovery descends only under `.bob/tmp/` and accepts `session-*.json`
-  files under `chats/`. SQLite reads only `.bob/db/bob.db` in read-only mode;
-  unrelated application state and skills are not parser inputs.
+  `internal/parser/bob_ide.go` and their regressions. Discovery defaults to
+  `.bob`; `BOB_DIR` overrides one root and `[agents.bob] dirs` configures
+  several CLI, IDE, and SQLite roots. Legacy IDE API rows own roles and text;
+  UI companions supplement ordered tool results, diagnostics, and 671 request
+  usage records. Optional task metadata remains opaque. Structured CLI thoughts
+  collapse streaming prefixes while retaining named reasoning and response text;
+  raw function responses supply results when display text is absent. Existing
+  filename-derived CLI IDs preserve disjoint resume segments. Scoped parser
+  version 169 reparses Bob sources in place from archive version 168; missing
+  source sessions remain archived. SQLite location/cost and dialogue support,
+  current provider config, CLI, and server API remain unchanged.
 
 [evener-source-1]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/transcript/transcript.go
 [evener-source-2]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/turn.go

@@ -659,7 +659,11 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (168: preserve Bob 2.1 reasoning, dialogue, and context-only spend; reconcile
 // task-reported cost with observed tokens. Re-parse Bob sources in place without
 // changing source or session identities.)
-const dataVersion = 168
+// (169: restore Bob 1.x CLI structured reasoning, answer streams, native message
+// identities, and tool results, and discover Bob IDE task histories. Re-parse
+// Bob sources in place; CLI snapshot, SQLite task, and source identities stay
+// unchanged.)
+const dataVersion = 169
 
 const archiveOnlyVersionBase = 1 << 20
 
