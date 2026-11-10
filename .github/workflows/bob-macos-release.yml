@@ -1,4 +1,4 @@
-name: Bob macOS release artifacts
+name: Bob release artifacts
 
 on:
   push:
@@ -16,6 +16,11 @@ on:
         description: Exact source commit the tag must identify
         required: true
         default: 8823ce27240abacf3ddac4214db70a266941f82e
+      operating_system:
+        description: Release operating system
+        type: choice
+        options: [linux, darwin]
+        default: linux
       architecture:
         description: Intel appends to an existing prerelease; ARM64 publishes a new one
         type: choice
@@ -32,14 +37,20 @@ concurrency:
 env:
   GOFLAGS: -trimpath
   RELEASE_ARCH: ${{ inputs.architecture || 'amd64' }}
+  RELEASE_OS: ${{ inputs.operating_system || 'linux' }}
   WHEEL_ARCH: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'x86_64' || 'arm64' }}
-  BUILD_MANIFEST: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'BUILD-darwin-amd64.json' || 'BUILD.json' }}
-  CHECKSUM_MANIFEST: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'SHA256SUMS-darwin-amd64' || 'SHA256SUMS' }}
-  PUBLISH_COMMAND: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'append-intel' || 'publish' }}
+  WHEEL_TAG: ${{ (inputs.operating_system || 'linux') == 'linux' && 'manylinux_2_28_x86_64' || ((inputs.architecture || 'amd64') == 'amd64' && 'macosx_13_0_x86_64' || 'macosx_13_0_arm64') }}
+  BUILD_MANIFEST: ${{ (inputs.operating_system || 'linux') == 'linux' && 'BUILD-linux-amd64.json' || ((inputs.architecture || 'amd64') == 'amd64' && 'BUILD-darwin-amd64.json' || 'BUILD.json') }}
+  CHECKSUM_MANIFEST: ${{ (inputs.operating_system || 'linux') == 'linux' && 'SHA256SUMS-linux-amd64' || ((inputs.architecture || 'amd64') == 'amd64' && 'SHA256SUMS-darwin-amd64' || 'SHA256SUMS') }}
+  PUBLISH_COMMAND: ${{ (inputs.operating_system || 'linux') == 'linux' && 'append-intel' || ((inputs.architecture || 'amd64') == 'amd64' && 'append-intel' || 'publish') }}
 
 jobs:
   build:
-    runs-on: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'macos-15-intel' || 'macos-26' }}
+    runs-on: ${{ (inputs.operating_system || 'linux') == 'linux' && 'ubuntu-latest' || ((inputs.architecture || 'amd64') == 'amd64' && 'macos-15-intel' || 'macos-26') }}
+    container: ${{ (inputs.operating_system || 'linux') == 'linux' && 'quay.io/pypa/manylinux_2_28_x86_64@sha256:853663dc8253b62be437bb52a5caecffd020792af4442f55d927d22e0ea795ae' || '' }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 40
     outputs:
       tag: ${{ steps.params.outputs.tag }}
@@ -50,6 +61,10 @@ jobs:
         with:
           path: automation
           persist-credentials: false
+
+      - name: Use manylinux Python
+        if: env.RELEASE_OS == 'linux'
+        run: echo /opt/python/cp313-cp313/bin >> "$GITHUB_PATH"
 
       - name: Validate release target
         id: params
@@ -64,6 +79,12 @@ jobs:
           path: source
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Trust isolated container checkouts
+        if: env.RELEASE_OS == 'linux'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/source"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/automation"
 
       - name: Verify immutable source ancestry
         working-directory: source
@@ -87,10 +108,39 @@ jobs:
           cache-dependency-path: source/frontend/package-lock.json
 
       - uses: actions/setup-python@v7.1.0
+        if: env.RELEASE_OS == 'darwin'
         with:
           python-version: '3.13'
 
+      - name: Build native Linux x86_64 release binary
+        if: env.RELEASE_OS == 'linux'
+        working-directory: source
+        env:
+          RELEASE_TAG: ${{ steps.params.outputs.tag }}
+          SOURCE_SHA: ${{ steps.params.outputs.source }}
+          CGO_ENABLED: '1'
+          DO_NOT_TRACK: '1'
+        run: |
+          set -euo pipefail
+          test "$RELEASE_ARCH" = amd64
+          test "$(go env GOHOSTARCH)" = amd64
+          test "$(uname -m)" = x86_64
+          make release-linux-amd64 VERSION="$RELEASE_TAG" COMMIT="$SOURCE_SHA" \
+            POSTHOG_PROJECT_KEY= DISTRIBUTION=d3f0
+          mv dist/agentsview-linux-amd64 dist/agentsview
+          objdump -T dist/agentsview > dist/elf-symbols.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          versions = [tuple(map(int, version.split('.'))) for version in re.findall(r'\bGLIBC_(\d+(?:\.\d+)+)', Path('dist/elf-symbols.txt').read_text())]
+          assert versions and max(versions) <= (2, 28), versions
+          highest = '.'.join(map(str, max(versions)))
+          print('Highest required glibc: ' + highest)
+          Path('dist/glibc-max.txt').write_text(highest)
+          PY
+
       - name: Build native macOS release binary
+        if: env.RELEASE_OS == 'darwin'
         working-directory: source
         env:
           RELEASE_TAG: ${{ steps.params.outputs.tag }}
@@ -116,15 +166,22 @@ jobs:
           versions = re.findall(r"\bminos\s+(\d+(?:\.\d+)+)", Path("dist/macho-load-commands.txt").read_text())
           assert versions and all(tuple(map(int, version.split("."))) == (13, 0) for version in versions), versions
           PY
+
+      - name: Package native binary and wheel
+        working-directory: source
+        env:
+          PACKAGE_VERSION: ${{ steps.params.outputs.package }}
+        run: |
+          set -euo pipefail
           ./dist/agentsview --version
           mkdir artifacts
-          tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_darwin_${RELEASE_ARCH}.tar.gz" -C dist agentsview
+          tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_${RELEASE_OS}_${RELEASE_ARCH}.tar.gz" -C dist agentsview
           python3 - <<'PY'
           import os
           import runpy
           from pathlib import Path
           builder = runpy.run_path("scripts/build_wheels.py")
-          builder["PLATFORM_MAP"]["darwin_" + os.environ["RELEASE_ARCH"]]["wheel_tag"] = "macosx_13_0_" + os.environ["WHEEL_ARCH"]
+          builder["PLATFORM_MAP"][os.environ["RELEASE_OS"] + "_" + os.environ["RELEASE_ARCH"]]["wheel_tag"] = os.environ["WHEEL_TAG"]
           builder["build_all_wheels"](Path("artifacts"), Path("artifacts"), os.environ["PACKAGE_VERSION"], Path("README.md").read_text())
           PY
 
@@ -140,7 +197,7 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/bob-wheel-smoke"
           "$RUNNER_TEMP/bob-wheel-smoke/bin/pip" install --no-deps \
-            "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-macosx_13_0_${WHEEL_ARCH}.whl"
+            "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-${WHEEL_TAG}.whl"
           export BOB_BINARY="$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview"
           python3 - <<'PY'
           import json, os, subprocess, tempfile, time, urllib.request
@@ -170,24 +227,29 @@ jobs:
           finally:
               process.terminate()
               process.wait(timeout=30)
-          build = {"tag":os.environ["RELEASE_TAG"],"source_sha":os.environ["SOURCE_SHA"],"workflow_sha":os.environ["GITHUB_SHA"],"package_version":os.environ["PACKAGE_VERSION"],"api_version":15,"data_version":169,"minos":"13.0","architecture":os.environ["RELEASE_ARCH"],"wheel_runtime":version.strip()}
+          build = {"tag":os.environ["RELEASE_TAG"],"source_sha":os.environ["SOURCE_SHA"],"workflow_sha":os.environ["GITHUB_SHA"],"package_version":os.environ["PACKAGE_VERSION"],"api_version":15,"data_version":169,"architecture":os.environ["RELEASE_ARCH"],"wheel_runtime":version.strip()}
+          build.update({"glibc_max":Path("dist/glibc-max.txt").read_text().strip()} if os.environ["RELEASE_OS"] == "linux" else {"minos":"13.0"})
           Path("artifacts", os.environ["BUILD_MANIFEST"]).write_text(json.dumps(build,indent=2)+"\n")
           PY
           export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
           CGO_ENABLED=1 go test -tags fts5 ./internal/parser ./internal/config -run Bob -count=1
           CGO_ENABLED=1 go test -tags fts5 ./internal/sync -run 'TestBobRelease|TestBobVersionUpgrade' -count=1
           cd artifacts
-          shasum -a 256 *.tar.gz *.whl "$BUILD_MANIFEST" > "$CHECKSUM_MANIFEST"
+          if [ "$RELEASE_OS" = linux ]; then
+            sha256sum *.tar.gz *.whl "$BUILD_MANIFEST" > "$CHECKSUM_MANIFEST"
+          else
+            shasum -a 256 *.tar.gz *.whl "$BUILD_MANIFEST" > "$CHECKSUM_MANIFEST"
+          fi
 
       - name: Verify complete artifact gate
         env:
           RELEASE_TAG: ${{ steps.params.outputs.tag }}
           SOURCE_SHA: ${{ steps.params.outputs.source }}
-        run: python3 automation/scripts/bob_release.py verify --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --directory source/artifacts
+        run: python3 automation/scripts/bob_release.py verify --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --os "$RELEASE_OS" --directory source/artifacts
 
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: bob-macos-${{ env.RELEASE_ARCH }}-release
+          name: bob-${{ env.RELEASE_OS }}-${{ env.RELEASE_ARCH }}-release
           path: source/artifacts/*
           if-no-files-found: error
 
@@ -205,7 +267,7 @@ jobs:
 
       - uses: actions/download-artifact@v8.0.2
         with:
-          name: bob-macos-${{ env.RELEASE_ARCH }}-release
+          name: bob-${{ env.RELEASE_OS }}-${{ env.RELEASE_ARCH }}-release
           path: artifacts
 
       - name: Publish verified artifacts without overwriting existing assets
@@ -214,4 +276,4 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
           SOURCE_SHA: ${{ needs.build.outputs.source }}
-        run: python3 automation/scripts/bob_release.py "$PUBLISH_COMMAND" --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --directory artifacts
+        run: python3 automation/scripts/bob_release.py "$PUBLISH_COMMAND" --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --os "$RELEASE_OS" --directory artifacts

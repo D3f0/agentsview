@@ -20,16 +20,17 @@ def release_parameters(tag: str, source: str) -> dict[str, str]:
     return {"tag": tag, "source": source, "package": package}
 
 
-def verify_artifacts(directory: Path, tag: str, source: str, architecture: str = "arm64") -> dict[str, str]:
+def verify_artifacts(directory: Path, tag: str, source: str, architecture: str = "arm64", operating_system: str = "darwin") -> dict[str, str]:
     params = release_parameters(tag, source)
-    if architecture not in ("arm64", "amd64"):
-        raise ValueError("Unsupported release architecture")
+    if architecture not in ("arm64", "amd64") or operating_system not in ("darwin", "linux") or (operating_system == "linux" and architecture != "amd64"):
+        raise ValueError("Unsupported release platform")
     wheel_arch = "x86_64" if architecture == "amd64" else "arm64"
-    build_name = "BUILD-darwin-amd64.json" if architecture == "amd64" else "BUILD.json"
-    manifest = "SHA256SUMS-darwin-amd64" if architecture == "amd64" else "SHA256SUMS"
+    wheel_tag = "manylinux_2_28_x86_64" if operating_system == "linux" else f"macosx_13_0_{wheel_arch}"
+    build_name = f"BUILD-{operating_system}-amd64.json" if architecture == "amd64" else "BUILD.json"
+    manifest = f"SHA256SUMS-{operating_system}-amd64" if architecture == "amd64" else "SHA256SUMS"
     names = {
-        f"agentsview_{params['package']}_darwin_{architecture}.tar.gz",
-        f"agentsview-{params['package']}-py3-none-macosx_13_0_{wheel_arch}.whl",
+        f"agentsview_{params['package']}_{operating_system}_{architecture}.tar.gz",
+        f"agentsview-{params['package']}-py3-none-{wheel_tag}.whl",
         build_name,
     }
     if {p.name for p in directory.iterdir()} != names | {manifest}:
@@ -47,7 +48,13 @@ def verify_artifacts(directory: Path, tag: str, source: str, architecture: str =
         raise ValueError("Checksum manifest does not cover the artifact inventory")
     build = json.loads((directory / build_name).read_text())
     expected = {"tag": tag, "source_sha": source, "package_version": params["package"],
-                "api_version": 15, "data_version": 169, "minos": "13.0", "architecture": architecture}
+                "api_version": 15, "data_version": 169, "architecture": architecture}
+    if operating_system == "darwin":
+        expected["minos"] = "13.0"
+    else:
+        glibc = build.get("glibc_max", "")
+        if not re.fullmatch(r"\d+\.\d+", glibc) or not (2, 0) <= tuple(map(int, glibc.split("."))) <= (2, 28):
+            raise ValueError("Build glibc requirement exceeds the manylinux 2.28 wheel contract")
     if any(build.get(key) != value for key, value in expected.items()):
         raise ValueError("Build provenance does not match the requested source and contracts")
     hashes[manifest] = hashlib.sha256((directory / manifest).read_bytes()).hexdigest()
@@ -102,8 +109,8 @@ def publish(directory: Path, tag: str, source: str, repo: str) -> None:
                       "tag_sha": source, "build_sha": json.loads((directory / "BUILD.json").read_text())["workflow_sha"]}, indent=2))
 
 
-def append_intel(directory: Path, tag: str, source: str, repo: str) -> None:
-    hashes = verify_artifacts(directory, tag, source, "amd64")
+def append_intel(directory: Path, tag: str, source: str, repo: str, operating_system: str = "darwin") -> None:
+    hashes = verify_artifacts(directory, tag, source, "amd64", operating_system)
     params = release_parameters(tag, source)
     ref = gh("api", f"repos/{repo}/git/ref/tags/{tag}")
     if ref["object"]["type"] != "commit" or ref["object"]["sha"] != source:
@@ -123,12 +130,15 @@ def append_intel(directory: Path, tag: str, source: str, repo: str) -> None:
             or any((assets[name]["id"], assets[name].get("digest")) != value for name, value in original.items())
             or any(assets[name].get("digest") != "sha256:" + digest for name, digest in hashes.items())):
         raise ValueError("Intel upload failed checksum verification or changed existing assets")
-    wheel = f"agentsview-{params['package']}-py3-none-macosx_13_0_x86_64.whl"
+    wheel_tag = "manylinux_2_28_x86_64" if operating_system == "linux" else "macosx_13_0_x86_64"
+    wheel = f"agentsview-{params['package']}-py3-none-{wheel_tag}.whl"
     wheel_url = f"https://github.com/{repo}/releases/download/{tag}/{wheel.replace('+', '%2B')}"
-    body = ((uploaded.get("body") or "").rstrip() +
-            "\n\nIntel macOS (x86_64) is also available, built from the same source. "
-            "macOS 13+; ad-hoc signed, not Developer ID notarized. "
-            "Intel checksums: `SHA256SUMS-darwin-amd64`; provenance: `BUILD-darwin-amd64.json`.\n\n"
+    platform_notes = ("Linux x86_64 (Intel/AMD), glibc 2.28+, is also available, built from the same source."
+                      if operating_system == "linux" else
+                      "Intel macOS (x86_64) is also available, built from the same source. "
+                      "macOS 13+; ad-hoc signed, not Developer ID notarized.")
+    body = ((uploaded.get("body") or "").rstrip() + f"\n\n{platform_notes} "
+            f"Checksums: `SHA256SUMS-{operating_system}-amd64`; provenance: `BUILD-{operating_system}-amd64.json`.\n\n"
             f"```bash\nuvx --from '{wheel_url}' agentsview --version\n```\n")
     published = gh("api", f"repos/{repo}/releases/{release['id']}", "--method", "PATCH", payload={"body": body})
     if published["body"] != body or published["draft"] or not published["prerelease"]:
@@ -143,6 +153,7 @@ def main() -> None:
     parser.add_argument("--source", required=True)
     parser.add_argument("--directory", type=Path, default=Path("artifacts"))
     parser.add_argument("--architecture", choices=["arm64", "amd64"], default="arm64")
+    parser.add_argument("--os", choices=["darwin", "linux"], default="darwin")
     args = parser.parse_args()
     params = release_parameters(args.tag, args.source)
     if args.command == "prepare":
@@ -150,11 +161,11 @@ def main() -> None:
             for key, value in params.items():
                 output.write(f"{key}={value}\n")
     elif args.command == "verify":
-        print(json.dumps(verify_artifacts(args.directory, args.tag, args.source, args.architecture), indent=2))
+        print(json.dumps(verify_artifacts(args.directory, args.tag, args.source, args.architecture, args.os), indent=2))
     elif args.command == "append-intel":
-        append_intel(args.directory, args.tag, args.source, os.environ["GH_REPO"])
+        append_intel(args.directory, args.tag, args.source, os.environ["GH_REPO"], args.os)
     else:
-        if args.architecture != "arm64":
+        if args.architecture != "arm64" or args.os != "darwin":
             raise ValueError("Use append-intel to extend an existing prerelease")
         publish(args.directory, args.tag, args.source, os.environ["GH_REPO"])
 

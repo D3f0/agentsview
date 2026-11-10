@@ -9,6 +9,10 @@ The latest release is
 
 ## Unreleased
 
+- Publish Linux x86_64 binaries and manylinux wheels for the Bob compatibility
+  prerelease, requiring glibc 2.28 or newer. Linux artifacts use the same source
+  as macOS and have separate checksums and build provenance.
+
 - Publish Intel macOS binaries and wheels alongside the Bob compatibility
   prerelease. Both architectures require macOS 13 and use the same source;
   Intel has separate checksums and build provenance so existing ARM64 assets
