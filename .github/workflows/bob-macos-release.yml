@@ -9,13 +9,18 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: New immutable Bob prerelease tag
+        description: Bob prerelease tag identifying the exact source
         required: true
         default: v0.47.0-bob.2.2
       source_sha:
         description: Exact source commit the tag must identify
         required: true
         default: 8823ce27240abacf3ddac4214db70a266941f82e
+      architecture:
+        description: Intel appends to an existing prerelease; ARM64 publishes a new one
+        type: choice
+        options: [amd64, arm64]
+        default: amd64
 
 permissions:
   contents: read
@@ -26,10 +31,15 @@ concurrency:
 
 env:
   GOFLAGS: -trimpath
+  RELEASE_ARCH: ${{ inputs.architecture || 'amd64' }}
+  WHEEL_ARCH: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'x86_64' || 'arm64' }}
+  BUILD_MANIFEST: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'BUILD-darwin-amd64.json' || 'BUILD.json' }}
+  CHECKSUM_MANIFEST: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'SHA256SUMS-darwin-amd64' || 'SHA256SUMS' }}
+  PUBLISH_COMMAND: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'append-intel' || 'publish' }}
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'macos-15-intel' || 'macos-26' }}
     timeout-minutes: 40
     outputs:
       tag: ${{ steps.params.outputs.tag }}
@@ -80,7 +90,7 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Build native ARM64 release binary
+      - name: Build native macOS release binary
         working-directory: source
         env:
           RELEASE_TAG: ${{ steps.params.outputs.tag }}
@@ -91,14 +101,14 @@ jobs:
           DO_NOT_TRACK: '1'
         run: |
           set -euo pipefail
-          test "$(uname -m)" = arm64
-          test "$(go env GOHOSTARCH)" = arm64
-          make release-darwin-arm64 VERSION="$RELEASE_TAG" COMMIT="$SOURCE_SHA" \
+          test "$(go env GOHOSTARCH)" = "$RELEASE_ARCH"
+          test "$(uname -m)" = "$WHEEL_ARCH"
+          make "release-darwin-${RELEASE_ARCH}" VERSION="$RELEASE_TAG" COMMIT="$SOURCE_SHA" \
             POSTHOG_PROJECT_KEY= DISTRIBUTION=d3f0
-          mv dist/agentsview-darwin-arm64 dist/agentsview
+          mv "dist/agentsview-darwin-${RELEASE_ARCH}" dist/agentsview
           codesign --force --sign - dist/agentsview
           codesign --verify --strict dist/agentsview
-          test "$(lipo -archs dist/agentsview)" = arm64
+          test "$(lipo -archs dist/agentsview)" = "$WHEEL_ARCH"
           otool -l dist/agentsview > dist/macho-load-commands.txt
           python3 - <<'PY'
           import re
@@ -108,13 +118,13 @@ jobs:
           PY
           ./dist/agentsview --version
           mkdir artifacts
-          tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_darwin_arm64.tar.gz" -C dist agentsview
+          tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_darwin_${RELEASE_ARCH}.tar.gz" -C dist agentsview
           python3 - <<'PY'
           import os
           import runpy
           from pathlib import Path
           builder = runpy.run_path("scripts/build_wheels.py")
-          builder["PLATFORM_MAP"]["darwin_arm64"]["wheel_tag"] = "macosx_13_0_arm64"
+          builder["PLATFORM_MAP"]["darwin_" + os.environ["RELEASE_ARCH"]]["wheel_tag"] = "macosx_13_0_" + os.environ["WHEEL_ARCH"]
           builder["build_all_wheels"](Path("artifacts"), Path("artifacts"), os.environ["PACKAGE_VERSION"], Path("README.md").read_text())
           PY
 
@@ -130,7 +140,7 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/bob-wheel-smoke"
           "$RUNNER_TEMP/bob-wheel-smoke/bin/pip" install --no-deps \
-            "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-macosx_13_0_arm64.whl"
+            "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-macosx_13_0_${WHEEL_ARCH}.whl"
           export BOB_BINARY="$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview"
           python3 - <<'PY'
           import json, os, subprocess, tempfile, time, urllib.request
@@ -160,24 +170,24 @@ jobs:
           finally:
               process.terminate()
               process.wait(timeout=30)
-          build = {"tag":os.environ["RELEASE_TAG"],"source_sha":os.environ["SOURCE_SHA"],"workflow_sha":os.environ["GITHUB_SHA"],"package_version":os.environ["PACKAGE_VERSION"],"api_version":15,"data_version":169,"minos":"13.0","architecture":"arm64","wheel_runtime":version.strip()}
-          Path("artifacts/BUILD.json").write_text(json.dumps(build,indent=2)+"\n")
+          build = {"tag":os.environ["RELEASE_TAG"],"source_sha":os.environ["SOURCE_SHA"],"workflow_sha":os.environ["GITHUB_SHA"],"package_version":os.environ["PACKAGE_VERSION"],"api_version":15,"data_version":169,"minos":"13.0","architecture":os.environ["RELEASE_ARCH"],"wheel_runtime":version.strip()}
+          Path("artifacts", os.environ["BUILD_MANIFEST"]).write_text(json.dumps(build,indent=2)+"\n")
           PY
           export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
           CGO_ENABLED=1 go test -tags fts5 ./internal/parser ./internal/config -run Bob -count=1
           CGO_ENABLED=1 go test -tags fts5 ./internal/sync -run 'TestBobRelease|TestBobVersionUpgrade' -count=1
           cd artifacts
-          shasum -a 256 *.tar.gz *.whl BUILD.json > SHA256SUMS
+          shasum -a 256 *.tar.gz *.whl "$BUILD_MANIFEST" > "$CHECKSUM_MANIFEST"
 
       - name: Verify complete artifact gate
         env:
           RELEASE_TAG: ${{ steps.params.outputs.tag }}
           SOURCE_SHA: ${{ steps.params.outputs.source }}
-        run: python3 automation/scripts/bob_release.py verify --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --directory source/artifacts
+        run: python3 automation/scripts/bob_release.py verify --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --directory source/artifacts
 
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: bob-macos-arm64-release
+          name: bob-macos-${{ env.RELEASE_ARCH }}-release
           path: source/artifacts/*
           if-no-files-found: error
 
@@ -195,13 +205,13 @@ jobs:
 
       - uses: actions/download-artifact@v8.0.2
         with:
-          name: bob-macos-arm64-release
+          name: bob-macos-${{ env.RELEASE_ARCH }}-release
           path: artifacts
 
-      - name: Verify draft, upload, and publish new prerelease
+      - name: Publish verified artifacts without overwriting existing assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
           SOURCE_SHA: ${{ needs.build.outputs.source }}
-        run: python3 automation/scripts/bob_release.py publish --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --directory artifacts
+        run: python3 automation/scripts/bob_release.py "$PUBLISH_COMMAND" --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --directory artifacts

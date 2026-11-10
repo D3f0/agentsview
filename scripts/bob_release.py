@@ -20,17 +20,22 @@ def release_parameters(tag: str, source: str) -> dict[str, str]:
     return {"tag": tag, "source": source, "package": package}
 
 
-def verify_artifacts(directory: Path, tag: str, source: str) -> dict[str, str]:
+def verify_artifacts(directory: Path, tag: str, source: str, architecture: str = "arm64") -> dict[str, str]:
     params = release_parameters(tag, source)
+    if architecture not in ("arm64", "amd64"):
+        raise ValueError("Unsupported release architecture")
+    wheel_arch = "x86_64" if architecture == "amd64" else "arm64"
+    build_name = "BUILD-darwin-amd64.json" if architecture == "amd64" else "BUILD.json"
+    manifest = "SHA256SUMS-darwin-amd64" if architecture == "amd64" else "SHA256SUMS"
     names = {
-        f"agentsview_{params['package']}_darwin_arm64.tar.gz",
-        f"agentsview-{params['package']}-py3-none-macosx_13_0_arm64.whl",
-        "BUILD.json",
+        f"agentsview_{params['package']}_darwin_{architecture}.tar.gz",
+        f"agentsview-{params['package']}-py3-none-macosx_13_0_{wheel_arch}.whl",
+        build_name,
     }
-    if {p.name for p in directory.iterdir()} != names | {"SHA256SUMS"}:
+    if {p.name for p in directory.iterdir()} != names | {manifest}:
         raise ValueError("Artifact inventory is missing files or contains stale files")
     hashes: dict[str, str] = {}
-    for line in (directory / "SHA256SUMS").read_text().splitlines():
+    for line in (directory / manifest).read_text().splitlines():
         digest, name = line.split("  ", 1)
         if name not in names or name in hashes or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("Invalid or duplicate checksum entry")
@@ -40,12 +45,12 @@ def verify_artifacts(directory: Path, tag: str, source: str) -> dict[str, str]:
         hashes[name] = digest
     if set(hashes) != names:
         raise ValueError("Checksum manifest does not cover the artifact inventory")
-    build = json.loads((directory / "BUILD.json").read_text())
+    build = json.loads((directory / build_name).read_text())
     expected = {"tag": tag, "source_sha": source, "package_version": params["package"],
-                "api_version": 15, "data_version": 169, "minos": "13.0", "architecture": "arm64"}
+                "api_version": 15, "data_version": 169, "minos": "13.0", "architecture": architecture}
     if any(build.get(key) != value for key, value in expected.items()):
         raise ValueError("Build provenance does not match the requested source and contracts")
-    hashes["SHA256SUMS"] = hashlib.sha256((directory / "SHA256SUMS").read_bytes()).hexdigest()
+    hashes[manifest] = hashlib.sha256((directory / manifest).read_bytes()).hexdigest()
     return hashes
 
 
@@ -97,12 +102,47 @@ def publish(directory: Path, tag: str, source: str, repo: str) -> None:
                       "tag_sha": source, "build_sha": json.loads((directory / "BUILD.json").read_text())["workflow_sha"]}, indent=2))
 
 
+def append_intel(directory: Path, tag: str, source: str, repo: str) -> None:
+    hashes = verify_artifacts(directory, tag, source, "amd64")
+    params = release_parameters(tag, source)
+    ref = gh("api", f"repos/{repo}/git/ref/tags/{tag}")
+    if ref["object"]["type"] != "commit" or ref["object"]["sha"] != source:
+        raise ValueError("Release tag does not identify the verified source commit")
+    release = gh("api", f"repos/{repo}/releases/tags/{tag}")
+    if release["tag_name"] != tag or release["draft"] or not release["prerelease"]:
+        raise ValueError("Intel assets require an existing published prerelease")
+    original = {asset["name"]: (asset["id"], asset.get("digest")) for asset in release["assets"]}
+    if original.keys() & hashes.keys():
+        raise ValueError("Intel release assets already exist; refusing to overwrite")
+    subprocess.run(["gh", "release", "upload", tag, "--repo", repo,
+                    *[str(directory / name) for name in sorted(hashes)]], check=True)
+    uploaded = gh("api", f"repos/{repo}/releases/{release['id']}")
+    assets = {asset["name"]: asset for asset in uploaded["assets"]}
+    if (uploaded["tag_name"] != tag or uploaded["draft"] or not uploaded["prerelease"]
+            or set(assets) != original.keys() | hashes.keys()
+            or any((assets[name]["id"], assets[name].get("digest")) != value for name, value in original.items())
+            or any(assets[name].get("digest") != "sha256:" + digest for name, digest in hashes.items())):
+        raise ValueError("Intel upload failed checksum verification or changed existing assets")
+    wheel = f"agentsview-{params['package']}-py3-none-macosx_13_0_x86_64.whl"
+    wheel_url = f"https://github.com/{repo}/releases/download/{tag}/{wheel.replace('+', '%2B')}"
+    body = ((uploaded.get("body") or "").rstrip() +
+            "\n\nIntel macOS (x86_64) is also available, built from the same source. "
+            "macOS 13+; ad-hoc signed, not Developer ID notarized. "
+            "Intel checksums: `SHA256SUMS-darwin-amd64`; provenance: `BUILD-darwin-amd64.json`.\n\n"
+            f"```bash\nuvx --from '{wheel_url}' agentsview --version\n```\n")
+    published = gh("api", f"repos/{repo}/releases/{release['id']}", "--method", "PATCH", payload={"body": body})
+    if published["body"] != body or published["draft"] or not published["prerelease"]:
+        raise ValueError("Intel release notes were not published safely")
+    print(json.dumps({"release_url": published["html_url"], "wheel_url": wheel_url, "source_sha": source}, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["prepare", "verify", "publish"])
+    parser.add_argument("command", choices=["prepare", "verify", "publish", "append-intel"])
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--directory", type=Path, default=Path("artifacts"))
+    parser.add_argument("--architecture", choices=["arm64", "amd64"], default="arm64")
     args = parser.parse_args()
     params = release_parameters(args.tag, args.source)
     if args.command == "prepare":
@@ -110,8 +150,12 @@ def main() -> None:
             for key, value in params.items():
                 output.write(f"{key}={value}\n")
     elif args.command == "verify":
-        print(json.dumps(verify_artifacts(args.directory, args.tag, args.source), indent=2))
+        print(json.dumps(verify_artifacts(args.directory, args.tag, args.source, args.architecture), indent=2))
+    elif args.command == "append-intel":
+        append_intel(args.directory, args.tag, args.source, os.environ["GH_REPO"])
     else:
+        if args.architecture != "arm64":
+            raise ValueError("Use append-intel to extend an existing prerelease")
         publish(args.directory, args.tag, args.source, os.environ["GH_REPO"])
 
 

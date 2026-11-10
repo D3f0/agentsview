@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-11-09
+last_edited: 2026-11-10
 title: Changelog
 description: Release history for AgentsView
 ---
@@ -8,6 +8,11 @@ The latest release is
 [0.46.1](https://github.com/kenn-io/agentsview/releases/tag/v0.46.1).
 
 ## Unreleased
+
+- Publish Intel macOS binaries and wheels alongside the Bob compatibility
+  prerelease. Both architectures require macOS 13 and use the same source;
+  Intel has separate checksums and build provenance so existing ARM64 assets
+  remain unchanged.
 
 - Update the Bob branch to AgentsView 0.47.0 and Bob CLI 2.1.0. Browse project
   JSON chats and SQLite tasks, including separately persisted reasoning and
