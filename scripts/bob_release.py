@@ -54,7 +54,9 @@ def gh(*args: str, payload: dict | None = None) -> object:
     if payload is not None:
         command += ["--input", "-"]
     result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
-                            text=True, capture_output=True, check=True)
+                            text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(f"GitHub API request failed: {result.stderr.strip()} {result.stdout.strip()}")
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 
