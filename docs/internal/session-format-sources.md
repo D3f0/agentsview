@@ -5731,6 +5731,15 @@ schemas keep their existing ordering behavior.
 
 ## Bob (`bob`)
 
+- **Release evidence (2026-11-18):** The six-platform archive and wheel build
+  pins application source `8823ce27240abacf3ddac4214db70a266941f82e` at
+  `v0.47.0-bob.2.2`. Its Bob parser, configuration, and scoped archive-upgrade
+  regression tests were reverified on macOS ARM64. The published ARM64 wheel
+  and server report the same source, API version 15, and data version 169.
+  This is build evidence, not a new producer-format observation; the tagged
+  source also includes the legacy CLI and IDE handling described in that
+  revision's inventory.
+
 - **Format:** Bob uses two observed persistence families: project-hash JSON
   session files under `.bob/tmp/**/chats/` and shared SQLite `.bob/db/bob.db`.
   JSON artifacts were last verified 2026-09-22 against Bob 2.1.0. The SQLite

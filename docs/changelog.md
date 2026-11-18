@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-11-10
+last_edited: 2026-11-18
 title: Changelog
 description: Release history for AgentsView
 ---
@@ -8,6 +8,10 @@ The latest release is
 [0.46.1](https://github.com/kenn-io/agentsview/releases/tag/v0.46.1).
 
 ## Unreleased
+
+- Build Bob compatibility archives and Python wheels for Linux ARM64 and both
+  Windows architectures, completing the six-platform distribution. Publishing
+  preserves existing assets and verifies checksums before mirroring the release.
 
 - Publish Linux x86_64 binaries and manylinux wheels for the Bob compatibility
   prerelease, requiring glibc 2.28 or newer. Linux artifacts use the same source

@@ -70,3 +70,53 @@ ancestor permissions satisfy their checks.
   the lockfile URL.
 - To update kit-ui, change the commit hash in `frontend/package.json` and run
   `npm install`.
+
+## Bob release distribution
+
+The Bob prerelease `v0.47.0-bob.2.2` ships application source
+`8823ce27240abacf3ddac4214db70a266941f82e` as package version
+`0.47.0+bob.2.2`. Release automation is checked out separately from the exact
+tagged application source; changing automation must not change that source.
+
+`.github/workflows/bob-macos-release.yml` builds native binaries and wheels for
+Darwin, Linux, and Windows, each on AMD64 and ARM64. Maintainers select one OS
+and architecture per manual dispatch. Until the workflow is available on the
+default branch, its narrowly scoped push trigger builds only the missing Linux
+ARM64 and Windows AMD64/ARM64 distributions. A repeated push fails rather than
+replacing existing release assets.
+
+Linux uses pinned manylinux 2.28 containers on matching native runners and
+checks the binary's glibc requirements. macOS requires 13.0 and ad hoc signing.
+Windows uses MinGW GCC on AMD64 and checksum-pinned llvm-mingw on ARM64, with
+the SQLite header from the exact bundled amalgamation. Windows archives are
+ZIP files containing `agentsview.exe`; other archives are gzip-compressed tar
+files. Every platform installs its wheel and checks native execution, server
+API/data versions, replica CLI contracts, and Bob parser/config/sync tests.
+
+One publication job appends verified platform inventories sequentially. Runs
+for the same tag are serialized, and existing assets are never overwritten.
+Darwin ARM64 alone creates the initial prerelease; all other platforms use
+`bob_release.py append` against that existing release. Platform-specific build
+and checksum manifests preserve the initial `BUILD.json` and `SHA256SUMS`.
+Distribute archives and wheels through GitHub release assets only: no desktop
+installers and no PyPI publication.
+
+To mirror the complete release, first push its exact source tag to the target
+repository without moving a branch. Download all release assets into one clean
+directory, then run:
+
+```bash
+python scripts/bob_release.py mirror \
+  --tag v0.47.0-bob.2.2 \
+  --source 8823ce27240abacf3ddac4214db70a266941f82e \
+  --directory release-assets \
+  --source-repo D3f0/agentsview \
+  --target-repo HOST/OWNER/REPO
+```
+
+The mirror requires all six platforms and checks the public release against
+local checksums. It creates a target draft or resumes an identical draft,
+uploads only missing assets, verifies the uploaded bytes, and publishes a
+prerelease. An existing published target release is never replaced. Enterprise
+servers without asset digests are verified by downloading and hashing each
+asset before publication.

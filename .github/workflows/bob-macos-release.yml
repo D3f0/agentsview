@@ -19,10 +19,10 @@ on:
       operating_system:
         description: Release operating system
         type: choice
-        options: [linux, darwin]
+        options: [linux, darwin, windows]
         default: linux
       architecture:
-        description: Intel appends to an existing prerelease; ARM64 publishes a new one
+        description: Native release architecture
         type: choice
         options: [amd64, arm64]
         default: amd64
@@ -31,23 +31,24 @@ permissions:
   contents: read
 
 concurrency:
-  group: bob-macos-release-${{ inputs.release_tag || 'v0.47.0-bob.2.2' }}
+  group: bob-release-${{ inputs.release_tag || 'v0.47.0-bob.2.2' }}
   cancel-in-progress: false
 
 env:
   GOFLAGS: -trimpath
-  RELEASE_ARCH: ${{ inputs.architecture || 'amd64' }}
-  RELEASE_OS: ${{ inputs.operating_system || 'linux' }}
-  WHEEL_ARCH: ${{ (inputs.architecture || 'amd64') == 'amd64' && 'x86_64' || 'arm64' }}
-  WHEEL_TAG: ${{ (inputs.operating_system || 'linux') == 'linux' && 'manylinux_2_28_x86_64' || ((inputs.architecture || 'amd64') == 'amd64' && 'macosx_13_0_x86_64' || 'macosx_13_0_arm64') }}
-  BUILD_MANIFEST: ${{ (inputs.operating_system || 'linux') == 'linux' && 'BUILD-linux-amd64.json' || ((inputs.architecture || 'amd64') == 'amd64' && 'BUILD-darwin-amd64.json' || 'BUILD.json') }}
-  CHECKSUM_MANIFEST: ${{ (inputs.operating_system || 'linux') == 'linux' && 'SHA256SUMS-linux-amd64' || ((inputs.architecture || 'amd64') == 'amd64' && 'SHA256SUMS-darwin-amd64' || 'SHA256SUMS') }}
-  PUBLISH_COMMAND: ${{ (inputs.operating_system || 'linux') == 'linux' && 'append-intel' || ((inputs.architecture || 'amd64') == 'amd64' && 'append-intel' || 'publish') }}
 
 jobs:
   build:
-    runs-on: ${{ (inputs.operating_system || 'linux') == 'linux' && 'ubuntu-latest' || ((inputs.architecture || 'amd64') == 'amd64' && 'macos-15-intel' || 'macos-26') }}
-    container: ${{ (inputs.operating_system || 'linux') == 'linux' && 'quay.io/pypa/manylinux_2_28_x86_64@sha256:853663dc8253b62be437bb52a5caecffd020792af4442f55d927d22e0ea795ae' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'push' && '[{"os":"linux","arch":"arm64"},{"os":"windows","arch":"amd64"},{"os":"windows","arch":"arm64"}]' || format('[{{"os":"{0}","arch":"{1}"}}]', inputs.operating_system, inputs.architecture)) }}
+    env:
+      RELEASE_ARCH: ${{ matrix.arch }}
+      RELEASE_OS: ${{ matrix.os }}
+      WHEEL_ARCH: ${{ matrix.arch == 'amd64' && 'x86_64' || 'arm64' }}
+    runs-on: ${{ matrix.os == 'linux' && (matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest') || (matrix.os == 'windows' && (matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest') || (matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-26')) }}
+    container: ${{ matrix.os == 'linux' && (matrix.arch == 'arm64' && 'quay.io/pypa/manylinux_2_28_aarch64@sha256:ca1f9d96910e129d38f999644a1f211a6cdb4147da9f19157a49d72c5092453a' || 'quay.io/pypa/manylinux_2_28_x86_64@sha256:853663dc8253b62be437bb52a5caecffd020792af4442f55d927d22e0ea795ae') || '' }}
     defaults:
       run:
         shell: bash
@@ -66,12 +67,27 @@ jobs:
         if: env.RELEASE_OS == 'linux'
         run: echo /opt/python/cp313-cp313/bin >> "$GITHUB_PATH"
 
+      - uses: actions/setup-python@v7.1.0
+        if: env.RELEASE_OS != 'linux'
+        with:
+          python-version: '3.13'
+
+      - name: Select platform artifact names
+        run: |
+          python - <<'PY'
+          import os, runpy
+          platform = runpy.run_path('automation/scripts/bob_release.py')['platform_parameters'](os.environ['RELEASE_ARCH'], os.environ['RELEASE_OS'])
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              for key, value in [('WHEEL_TAG', platform['wheel_tag']), ('BUILD_MANIFEST', platform['build_name']), ('CHECKSUM_MANIFEST', platform['manifest']), ('ARCHIVE_SUFFIX', platform['archive_suffix'])]:
+                  print(f'{key}={value}', file=output)
+          PY
+
       - name: Validate release target
         id: params
         env:
           REQUESTED_TAG: ${{ inputs.release_tag || 'v0.47.0-bob.2.2' }}
           REQUESTED_SOURCE: ${{ inputs.source_sha || '8823ce27240abacf3ddac4214db70a266941f82e' }}
-        run: python3 automation/scripts/bob_release.py prepare --tag "$REQUESTED_TAG" --source "$REQUESTED_SOURCE"
+        run: python automation/scripts/bob_release.py prepare --tag "$REQUESTED_TAG" --source "$REQUESTED_SOURCE"
 
       - uses: actions/checkout@v7.0.1
         with:
@@ -107,12 +123,8 @@ jobs:
           cache: npm
           cache-dependency-path: source/frontend/package-lock.json
 
-      - uses: actions/setup-python@v7.1.0
-        if: env.RELEASE_OS == 'darwin'
-        with:
-          python-version: '3.13'
 
-      - name: Build native Linux x86_64 release binary
+      - name: Build native Linux release binary
         if: env.RELEASE_OS == 'linux'
         working-directory: source
         env:
@@ -122,14 +134,15 @@ jobs:
           DO_NOT_TRACK: '1'
         run: |
           set -euo pipefail
-          test "$RELEASE_ARCH" = amd64
-          test "$(go env GOHOSTARCH)" = amd64
-          test "$(uname -m)" = x86_64
-          make release-linux-amd64 VERSION="$RELEASE_TAG" COMMIT="$SOURCE_SHA" \
+          test "$(go env GOHOSTARCH)" = "$RELEASE_ARCH"
+          test "$(go env GOARCH)" = "$RELEASE_ARCH"
+          test "$(go env GOOS)" = linux
+          test "$(uname -m)" = "$([ "$RELEASE_ARCH" = arm64 ] && echo aarch64 || echo x86_64)"
+          make release VERSION="$RELEASE_TAG" COMMIT="$SOURCE_SHA" \
             POSTHOG_PROJECT_KEY= DISTRIBUTION=d3f0
-          mv dist/agentsview-linux-amd64 dist/agentsview
+          mv "dist/agentsview-linux-${RELEASE_ARCH}" dist/agentsview
           objdump -T dist/agentsview > dist/elf-symbols.txt
-          python3 - <<'PY'
+          python - <<'PY'
           import re
           from pathlib import Path
           versions = [tuple(map(int, version.split('.'))) for version in re.findall(r'\bGLIBC_(\d+(?:\.\d+)+)', Path('dist/elf-symbols.txt').read_text())]
@@ -160,12 +173,77 @@ jobs:
           codesign --verify --strict dist/agentsview
           test "$(lipo -archs dist/agentsview)" = "$WHEEL_ARCH"
           otool -l dist/agentsview > dist/macho-load-commands.txt
-          python3 - <<'PY'
+          python - <<'PY'
           import re
           from pathlib import Path
           versions = re.findall(r"\bminos\s+(\d+(?:\.\d+)+)", Path("dist/macho-load-commands.txt").read_text())
           assert versions and all(tuple(map(int, version.split("."))) == (13, 0) for version in versions), versions
           PY
+
+      - name: Setup MinGW for Windows AMD64
+        if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'amd64'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc make
+          path-type: inherit
+
+      - name: Select Windows AMD64 compiler
+        if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'amd64'
+        shell: pwsh
+        run: |
+          'C:\msys64\mingw64\bin' >> $env:GITHUB_PATH
+          'C:\msys64\usr\bin' >> $env:GITHUB_PATH
+          'CC=C:/msys64/mingw64/bin/gcc.exe' >> $env:GITHUB_ENV
+
+      - name: Install make for Windows ARM64
+        if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'arm64'
+        shell: pwsh
+        run: |
+          choco install make --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'make installation failed' }
+
+      - name: Setup pinned llvm-mingw for Windows ARM64
+        if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'arm64'
+        shell: pwsh
+        env:
+          LLVM_MINGW_VERSION: '20260602'
+          LLVM_MINGW_NAME: llvm-mingw-20260602-ucrt-aarch64
+          LLVM_MINGW_SHA256: cb5c20fbe1808e31ada5cbe4efd9daa2fee19c91dac6ec5ca1ac46a9c7247e37
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_VERSION/$env:LLVM_MINGW_NAME.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:LLVM_MINGW_SHA256) { throw 'llvm-mingw checksum mismatch' }
+          7z x $zip -o"$env:RUNNER_TEMP" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'llvm-mingw extraction failed' }
+          $bin = Join-Path $env:RUNNER_TEMP "$env:LLVM_MINGW_NAME\bin"
+          $cc = Join-Path $bin 'aarch64-w64-mingw32-clang.exe'
+          if (-not (Test-Path $cc)) { throw "Missing compiler: $cc" }
+          $bin >> $env:GITHUB_PATH
+          "CC=$($cc.Replace('\', '/'))" >> $env:GITHUB_ENV
+
+      - name: Build native Windows release binary
+        if: env.RELEASE_OS == 'windows'
+        working-directory: source
+        env:
+          RELEASE_TAG: ${{ steps.params.outputs.tag }}
+          SOURCE_SHA: ${{ steps.params.outputs.source }}
+          CGO_ENABLED: '1'
+          DO_NOT_TRACK: '1'
+        run: |
+          set -euo pipefail
+          test "$(go env GOHOSTARCH)" = "$RELEASE_ARCH"
+          test "$(go env GOARCH)" = "$RELEASE_ARCH"
+          test "$(go env GOOS)" = windows
+          command -v make
+          "$CC" --version
+          make sqlite-vec-header
+          export CGO_CFLAGS="-O2 -g -I$(pwd -W)/.sqlite-include"
+          make release VERSION="$RELEASE_TAG" COMMIT="$SOURCE_SHA" \
+            CGO_CFLAGS="$CGO_CFLAGS" POSTHOG_PROJECT_KEY= DISTRIBUTION=d3f0
+          mv "dist/agentsview-windows-${RELEASE_ARCH}" dist/agentsview.exe
 
       - name: Package native binary and wheel
         working-directory: source
@@ -173,13 +251,22 @@ jobs:
           PACKAGE_VERSION: ${{ steps.params.outputs.package }}
         run: |
           set -euo pipefail
-          ./dist/agentsview --version
+          if [ "$RELEASE_OS" = windows ]; then
+            ./dist/agentsview.exe --version
+          else
+            ./dist/agentsview --version
+          fi
           mkdir artifacts
-          tar -czf "artifacts/agentsview_${PACKAGE_VERSION}_${RELEASE_OS}_${RELEASE_ARCH}.tar.gz" -C dist agentsview
-          python3 - <<'PY'
-          import os
-          import runpy
+          python - <<'PY'
+          import os, runpy, tarfile, zipfile
           from pathlib import Path
+          archive = Path('artifacts') / f"agentsview_{os.environ['PACKAGE_VERSION']}_{os.environ['RELEASE_OS']}_{os.environ['RELEASE_ARCH']}.{os.environ['ARCHIVE_SUFFIX']}"
+          if os.environ['RELEASE_OS'] == 'windows':
+              with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as output:
+                  output.write('dist/agentsview.exe', 'agentsview.exe')
+          else:
+              with tarfile.open(archive, 'w:gz') as output:
+                  output.add('dist/agentsview', arcname='agentsview')
           builder = runpy.run_path("scripts/build_wheels.py")
           builder["PLATFORM_MAP"][os.environ["RELEASE_OS"] + "_" + os.environ["RELEASE_ARCH"]]["wheel_tag"] = os.environ["WHEEL_TAG"]
           builder["build_all_wheels"](Path("artifacts"), Path("artifacts"), os.environ["PACKAGE_VERSION"], Path("README.md").read_text())
@@ -195,14 +282,15 @@ jobs:
           AGENTSVIEW_NO_DAEMON: '1'
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/bob-wheel-smoke"
-          "$RUNNER_TEMP/bob-wheel-smoke/bin/pip" install --no-deps \
-            "artifacts/agentsview-${PACKAGE_VERSION}-py3-none-${WHEEL_TAG}.whl"
-          export BOB_BINARY="$RUNNER_TEMP/bob-wheel-smoke/bin/agentsview"
-          python3 - <<'PY'
-          import json, os, subprocess, tempfile, time, urllib.request
+          python - <<'PY'
+          import json, os, subprocess, tempfile, time, urllib.request, venv
           from pathlib import Path
-          binary = os.environ["BOB_BINARY"]
+          smoke = Path(os.environ['RUNNER_TEMP']) / 'bob-wheel-smoke'
+          venv.create(smoke, with_pip=True)
+          scripts = smoke / ('Scripts' if os.name == 'nt' else 'bin')
+          interpreter = scripts / ('python.exe' if os.name == 'nt' else 'python')
+          subprocess.run([str(interpreter), '-m', 'pip', 'install', '--no-deps', f"artifacts/agentsview-{os.environ['PACKAGE_VERSION']}-py3-none-{os.environ['WHEEL_TAG']}.whl"], check=True)
+          binary = str(scripts / ('agentsview.exe' if os.name == 'nt' else 'agentsview'))
           version = subprocess.check_output([binary, "--version"], text=True)
           print(version)
           assert os.environ["RELEASE_TAG"] in version and os.environ["SOURCE_SHA"] in version
@@ -210,7 +298,7 @@ jobs:
               assert marker in subprocess.check_output([binary,*args],text=True)
           home = Path(tempfile.mkdtemp())
           env = os.environ.copy()
-          env.update(HOME=str(home), AGENTSVIEW_DATA_DIR=str(home / "archive"))
+          env.update(HOME=str(home), USERPROFILE=str(home), AGENTSVIEW_DATA_DIR=str(home / "archive"))
           process = subprocess.Popen([binary,"serve","--host","127.0.0.1","--port","17439","--no-browser","--no-sync","--no-update-check"],env=env)
           try:
               for _ in range(60):
@@ -228,24 +316,33 @@ jobs:
               process.terminate()
               process.wait(timeout=30)
           build = {"tag":os.environ["RELEASE_TAG"],"source_sha":os.environ["SOURCE_SHA"],"workflow_sha":os.environ["GITHUB_SHA"],"package_version":os.environ["PACKAGE_VERSION"],"api_version":15,"data_version":169,"architecture":os.environ["RELEASE_ARCH"],"wheel_runtime":version.strip()}
-          build.update({"glibc_max":Path("dist/glibc-max.txt").read_text().strip()} if os.environ["RELEASE_OS"] == "linux" else {"minos":"13.0"})
+          if os.environ['RELEASE_OS'] == 'linux':
+              build['glibc_max'] = Path('dist/glibc-max.txt').read_text().strip()
+          elif os.environ['RELEASE_OS'] == 'darwin':
+              build['minos'] = '13.0'
           Path("artifacts", os.environ["BUILD_MANIFEST"]).write_text(json.dumps(build,indent=2)+"\n")
           PY
-          export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
+          make sqlite-vec-header
+          if [ "$RELEASE_OS" = windows ]; then
+            export CGO_CFLAGS="-O2 -g -I$(pwd -W)/.sqlite-include"
+          else
+            export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
+          fi
           CGO_ENABLED=1 go test -tags fts5 ./internal/parser ./internal/config -run Bob -count=1
           CGO_ENABLED=1 go test -tags fts5 ./internal/sync -run 'TestBobRelease|TestBobVersionUpgrade' -count=1
-          cd artifacts
-          if [ "$RELEASE_OS" = linux ]; then
-            sha256sum *.tar.gz *.whl "$BUILD_MANIFEST" > "$CHECKSUM_MANIFEST"
-          else
-            shasum -a 256 *.tar.gz *.whl "$BUILD_MANIFEST" > "$CHECKSUM_MANIFEST"
-          fi
+          python - <<'PY'
+          import hashlib, os
+          from pathlib import Path
+          directory = Path('artifacts')
+          files = sorted(path for path in directory.iterdir() if path.name != os.environ['CHECKSUM_MANIFEST'])
+          (directory / os.environ['CHECKSUM_MANIFEST']).write_text(''.join(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n' for path in files))
+          PY
 
       - name: Verify complete artifact gate
         env:
           RELEASE_TAG: ${{ steps.params.outputs.tag }}
           SOURCE_SHA: ${{ steps.params.outputs.source }}
-        run: python3 automation/scripts/bob_release.py verify --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --os "$RELEASE_OS" --directory source/artifacts
+        run: python automation/scripts/bob_release.py verify --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --os "$RELEASE_OS" --directory source/artifacts
 
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -267,8 +364,9 @@ jobs:
 
       - uses: actions/download-artifact@v8.0.2
         with:
-          name: bob-${{ env.RELEASE_OS }}-${{ env.RELEASE_ARCH }}-release
+          pattern: bob-*-release
           path: artifacts
+          merge-multiple: false
 
       - name: Publish verified artifacts without overwriting existing assets
         env:
@@ -276,4 +374,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
           SOURCE_SHA: ${{ needs.build.outputs.source }}
-        run: python3 automation/scripts/bob_release.py "$PUBLISH_COMMAND" --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --architecture "$RELEASE_ARCH" --os "$RELEASE_OS" --directory artifacts
+        run: |
+          set -euo pipefail
+          for directory in artifacts/bob-*-release; do
+            platform="${directory#artifacts/bob-}"
+            platform="${platform%-release}"
+            operating_system="${platform%-*}"
+            architecture="${platform##*-}"
+            command=append
+            if [ "$operating_system" = darwin ] && [ "$architecture" = arm64 ]; then
+              command=publish
+            fi
+            python automation/scripts/bob_release.py "$command" --tag "$RELEASE_TAG" --source "$SOURCE_SHA" \
+              --architecture "$architecture" --os "$operating_system" --directory "$directory"
+          done
