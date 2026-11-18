@@ -182,7 +182,7 @@ jobs:
 
       - name: Setup MinGW for Windows AMD64
         if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'amd64'
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        uses: msys2/setup-msys2@v2.33.0
         with:
           msystem: MINGW64
           update: false

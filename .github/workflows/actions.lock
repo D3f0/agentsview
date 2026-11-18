@@ -10,6 +10,7 @@ workflows:
         - 'actions/setup-node@v7.1.0'
         - 'actions/setup-python@v7.1.0'
         - 'actions/upload-artifact@v7.0.2'
+        - 'msys2/setup-msys2@v2.33.0'
     '.github/workflows/ci-macos-main.yml':
         - 'actions/cache@v6.1.0'
         - 'actions/checkout@v7.0.1'
