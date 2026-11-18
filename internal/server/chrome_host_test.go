@@ -20,8 +20,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/chromehost"
+	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/importer"
+	"go.kenn.io/kit/stacktest"
 )
 
 func testChromeConnection(t *testing.T, srv *Server) (string, net.Conn) {
@@ -51,6 +53,9 @@ func readChromeRequest(t *testing.T, conn net.Conn) (string, string) {
 	t.Helper()
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
 	body, err := chromehost.ReadFrame(conn)
+	if timeout, ok := errors.AsType[net.Error](err); ok && timeout.Timeout() {
+		stacktest.Dump(t)
+	}
 	require.NoError(t, err)
 	var request struct {
 		Version int    `json:"version"`
@@ -130,7 +135,18 @@ func TestChromeHostAbsent(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:1234"
 	srv.mux.ServeHTTP(response, req)
 	assert.Equal(t, http.StatusConflict, response.Code)
-	assert.JSONEq(t, `{"code":"claude_ai_chrome_host_required","error":"Run agentsview chrome setup, restart AgentsView, and keep Chrome open, then Sync again"}`, response.Body.String())
+	assert.JSONEq(t, `{"code":"claude_ai_chrome_host_required","error":"Run agentsview source chrome setup, restart AgentsView, and keep Chrome open, then Sync again"}`, response.Body.String())
+}
+
+func TestClaudeAISyncRefusesInvalidOrganizations(t *testing.T) {
+	srv := testServer(t, 5*time.Second)
+	srv.cfg.ClaudeAI = config.ClaudeAIConfig{Err: &config.ClaudeAIConfigError{Path: "config.toml", Key: "organizations", Reason: "expected an array of organization UUIDs"}}
+	response := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/import/claude-ai/sync?browser=chrome", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.mux.ServeHTTP(response, req)
+	assert.Equal(t, http.StatusConflict, response.Code)
+	assert.JSONEq(t, `{"code":"claude_ai_config_invalid","error":"config.toml has an invalid value for \"organizations\" under [agents.claude-ai]: expected an array of organization UUIDs. Claude.ai Sync stays off until this is fixed."}`, response.Body.String())
 }
 
 func TestClaudeAIChromeStatus(t *testing.T) {
@@ -188,14 +204,15 @@ func TestClaudeAIChromeStatusArchiveChecks(t *testing.T) {
 
 func TestChromeHostLocalOnly(t *testing.T) {
 	for _, tt := range []struct {
-		name, method, route, remote, forwarded string
-		requireAuth                            bool
+		name, method, route, remote, forwarded, body string
+		requireAuth                                  bool
+		status                                       int
 	}{
-		{"remote auth", http.MethodPost, "/api/v1/import/claude-ai/sync?browser=chrome", "192.0.2.10:1234", "", true},
-		{"bind all", http.MethodPost, "/api/v1/import/claude-ai/sync?browser=chrome", "192.0.2.10:1234", "", false},
-		{"forwarded", http.MethodPost, "/api/v1/import/claude-ai/sync?browser=chrome", "127.0.0.1:1234", "for=192.0.2.10", true},
-		{"repeated browser", http.MethodPost, "/api/v1/import/claude-ai/sync?browser&browser=chrome", "192.0.2.10:1234", "", true},
-		{"status", http.MethodGet, "/api/v1/import/claude-ai/chrome", "192.0.2.10:1234", "", true},
+		{"remote auth", http.MethodPost, "/api/v1/import/claude-ai/sync?browser=chrome", "192.0.2.10:1234", "", "Chrome Sync requires a local connection", true, http.StatusForbidden},
+		{"bind all", http.MethodPost, "/api/v1/import/claude-ai/sync?browser=chrome", "192.0.2.10:1234", "", "Chrome Sync requires a local connection", false, http.StatusForbidden},
+		{"forwarded", http.MethodPost, "/api/v1/import/claude-ai/sync?browser=chrome", "127.0.0.1:1234", "for=192.0.2.10", "Chrome Sync requires a local connection", true, http.StatusForbidden},
+		{"repeated browser", http.MethodPost, "/api/v1/import/claude-ai/sync?browser&browser=chrome", "192.0.2.10:1234", "", `expected value to be one of \"chrome\" (query.browser: true)`, true, http.StatusBadRequest},
+		{"status", http.MethodGet, "/api/v1/import/claude-ai/chrome", "192.0.2.10:1234", "", "Chrome Sync requires a local connection", true, http.StatusForbidden},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := testServer(t, 5*time.Second)
@@ -211,8 +228,8 @@ func TestChromeHostLocalOnly(t *testing.T) {
 			req.Header.Set("Forwarded", tt.forwarded)
 			response := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(response, req)
-			assert.Equal(t, http.StatusForbidden, response.Code)
-			assert.Contains(t, response.Body.String(), "Chrome Sync requires a local connection")
+			assert.Equal(t, tt.status, response.Code)
+			assert.Contains(t, response.Body.String(), tt.body)
 			assert.True(t, srv.chrome.Connected())
 			require.NoError(t, conn.SetReadDeadline(time.Now()))
 			_, err := chromehost.ReadFrame(conn)
@@ -259,7 +276,7 @@ func TestChromeHostIncompatibleReply(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				require.FailNow(t, "incompatible host did not stop Sync")
 			}
-			assert.Contains(t, response.Body.String(), "Restart AgentsView if you upgraded it, run agentsview chrome setup, reload the extension at chrome://extensions, then Sync again.")
+			assert.Contains(t, response.Body.String(), "Restart AgentsView if you upgraded it, run agentsview source chrome setup, reload the extension at chrome://extensions, then Sync again.")
 			assert.Contains(t, response.Body.String(), `"code":"claude_ai_chrome_host_update_required"`)
 			assert.NotContains(t, response.Body.String(), "event: done")
 			assert.NotContains(t, response.Body.String(), "private")

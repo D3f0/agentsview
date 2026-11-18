@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -54,8 +55,11 @@ var embeddingsDaemonHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 func newEmbeddingsCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "embeddings",
-		Short:        "Manage the semantic search embedding index",
+		Use:   "embeddings",
+		Short: "Manage the semantic search embedding index",
+		Long: "Build and manage the embedding generations used by semantic and hybrid search. " +
+			"Configure an embedding provider and the intended storage backend before building. " +
+			"Activation and retirement control which generation serves queries.",
 		GroupID:      groupData,
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
@@ -111,7 +115,7 @@ func newEmbeddingsBuildCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.RepairInvalid, "repair-invalid", false,
 		"Regenerate only documents with malformed, non-finite, or zero-norm stored vectors")
 	cmd.Flags().BoolVar(&opts.Yes, "yes", false,
-		"Skip the full-rebuild confirmation prompt")
+		"Skip the full-rebuild confirmation prompt; local downloads still ask")
 	cmd.Flags().StringVar(&opts.Using, "using", "",
 		"Named embeddings server from [vector.embeddings.servers] to run this "+
 			"build against (default: the config's default_server)")
@@ -324,6 +328,9 @@ func newVectorEncoder(
 	if err != nil {
 		return nil, err
 	}
+	if server.Endpoint == "" {
+		return lazyLocalEncoder(c, name, server, role, retryRateLimits), nil
+	}
 	transport, err := server.EmbedTransport()
 	if err != nil {
 		return nil, fmt.Errorf("[vector.embeddings.servers.%s] %w", name, err)
@@ -363,15 +370,20 @@ func newVectorDocumentEncoder(
 	return newVectorEncoder(c, serverName, embedconfig.RoleDocument, true)
 }
 
-// vectorDocumentEncoderSet builds one document encoder per configured
+// vectorDocumentEncoderSet builds one document encoder per available
 // embeddings server, so a Manager can run any build against the server the
 // request names without sharing the query recipe.
 func vectorDocumentEncoderSet(c config.VectorEmbeddingsConfig) (vector.EncoderSet, error) {
+	names := c.ServerNames()
 	set := vector.EncoderSet{
 		Default: c.ResolvedDefaultServer(),
-		ByName:  make(map[string]vector.ManagedEncoder, len(c.Servers)),
+		ByName:  make(map[string]vector.ManagedEncoder, len(names)),
 	}
-	for name, server := range c.Servers {
+	for _, name := range names {
+		_, server, err := c.Server(name)
+		if err != nil {
+			return vector.EncoderSet{}, err
+		}
 		enc, err := newVectorDocumentEncoder(c, name)
 		if err != nil {
 			return vector.EncoderSet{}, err
@@ -414,9 +426,10 @@ func runEmbeddingsBuild(
 	}
 	includeAutomated = spec.NormalizeIncludeAutomated(includeAutomated)
 
+	confirmation := bufio.NewScanner(in)
 	if opts.FullRebuild && !opts.Yes {
 		proceed, err := confirmFullRebuild(
-			ctx, in, out, cfg, includeAutomated, spec.Name,
+			ctx, confirmation, out, cfg, includeAutomated, spec.Name,
 		)
 		if err != nil {
 			return err
@@ -427,9 +440,7 @@ func runEmbeddingsBuild(
 		}
 	}
 
-	// Resolve --using against this config up front so a mistyped name fails
-	// with the full server list instead of a daemon-side error.
-	if _, _, err := cfg.Vector.Embeddings.Server(opts.Using); err != nil {
+	if err := prepareLocalEmbeddings(ctx, cfg.Vector.Embeddings, opts.Using, confirmation, out); err != nil {
 		return err
 	}
 
@@ -452,7 +463,7 @@ func runEmbeddingsBuild(
 // documents (user messages and assistant runs) in the archive under
 // includeAutomated's scope — the exact set a full rebuild re-embeds.
 func confirmFullRebuild(
-	ctx context.Context, in io.Reader, out io.Writer, cfg config.Config,
+	ctx context.Context, in *bufio.Scanner, out io.Writer, cfg config.Config,
 	includeAutomated bool, store string,
 ) (bool, error) {
 	n, err := countEmbeddingStoreUnits(ctx, cfg, includeAutomated, store)
@@ -460,7 +471,7 @@ func confirmFullRebuild(
 		return false, fmt.Errorf("counting documents: %w", err)
 	}
 	msg := fmt.Sprintf("This re-embeds all %d documents. Continue?", n)
-	return confirm(in, out, msg), nil
+	return confirmScanned(in, out, msg), nil
 }
 
 func countEmbeddingStoreUnits(

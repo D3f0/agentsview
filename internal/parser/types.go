@@ -22,6 +22,7 @@ const (
 	AgentCodex          AgentType = "codex"
 	AgentTraeX          AgentType = "traex"
 	AgentAugureCode     AgentType = "augure-code"
+	AgentInterpreter    AgentType = "open-interpreter"
 	AgentCopilot        AgentType = "copilot"
 	AgentGemini         AgentType = "gemini"
 	AgentGeminiApps     AgentType = "gemini-apps"
@@ -79,6 +80,7 @@ const (
 	AgentZed            AgentType = "zed"
 	AgentQwenPaw        AgentType = "qwenpaw"
 	AgentGptme          AgentType = "gptme"
+	AgentBob            AgentType = "bob"
 	AgentQoder          AgentType = "qoder"
 	AgentShelley        AgentType = "shelley"
 	AgentAider          AgentType = "aider"
@@ -259,6 +261,30 @@ var Registry = []AgentDef{
 		// No ShallowWatchRootsFunc: that hook exists for Codex's sibling
 		// session_index.jsonl, which Augure does not write (verified: none
 		// exists under ~/.augure).
+	},
+	{
+		// Open Interpreter's Rust rewrite is an open-source fork of codex-rs
+		// that keeps the Codex rollout recorder, so it reuses the Codex parser
+		// through a relabel hook like TraeX. INTERPRETER_HOME replaces
+		// ~/.openinterpreter the way CODEX_HOME replaces ~/.codex; the fork
+		// deliberately ignores CODEX_HOME. Distinct agent because resuming
+		// needs `interpreter resume` and the two products keep separate
+		// session archives.
+		Type:              AgentInterpreter,
+		DisplayName:       "Open Interpreter",
+		EnvVar:            "OPEN_INTERPRETER_SESSIONS_DIR",
+		DefaultRootEnvVar: "INTERPRETER_HOME",
+		ConfigKey:         "open_interpreter_sessions_dirs",
+		DefaultDirs: []string{
+			".openinterpreter/sessions",
+			".openinterpreter/archived_sessions",
+		},
+		IDPrefix:           "open-interpreter:",
+		FileBased:          true,
+		PostAnswerToolWork: true,
+		// No ShallowWatchRootsFunc: session titles from the fork's
+		// session_index.jsonl are read for Codex only, so watching the home
+		// directory would deliver nothing this agent consumes.
 	},
 	{
 		Type:         AgentCopilot,
@@ -1013,6 +1039,15 @@ var Registry = []AgentDef{
 		FileBased:   true,
 	},
 	{
+		Type:        AgentBob,
+		DisplayName: "Bob",
+		EnvVar:      "BOB_DIR",
+		ConfigKey:   "bob_dirs",
+		DefaultDirs: []string{".bob"},
+		IDPrefix:    "bob:",
+		FileBased:   true,
+	},
+	{
 		Type:        AgentQoder,
 		DisplayName: "Qoder",
 		EnvVar:      "QODER_PROJECTS_DIR",
@@ -1471,8 +1506,30 @@ type FileInfo struct {
 	ChangeTime int64
 }
 
+// CodexForkInfo records the replay evidence from one complete source parse.
+type CodexForkInfo struct {
+	ParentID    string
+	Resolved    bool
+	ParentTurns map[string]struct{}
+	// TurnContexts contains every source turn ID, including empty IDs and
+	// contexts suppressed as replay, in source order.
+	TurnContexts []string
+}
+
+// CodexMessageOrigin identifies a record within its source rollout.
+// Line counts valid JSON records, before replay filtering.
+type CodexMessageOrigin struct {
+	Line   int
+	TurnID string
+	InTurn bool
+	// TurnContext is the 1-based index in CodexForkInfo.TurnContexts.
+	// Zero identifies a record before the first turn context.
+	TurnContext int
+}
+
 // ParsedSession holds session metadata extracted from a JSONL file.
 type ParsedSession struct {
+	CodexFork  *CodexForkInfo `json:"-"`
 	ID         string
 	Project    string
 	Machine    string
@@ -1662,6 +1719,7 @@ type ParsedToolResultEvent struct {
 
 // ParsedMessage holds a single extracted message.
 type ParsedMessage struct {
+	CodexOrigin   CodexMessageOrigin `json:"-"`
 	Ordinal       int
 	Role          RoleType
 	Content       string
@@ -1677,8 +1735,8 @@ type ParsedMessage struct {
 
 	Model           string
 	ReasoningEffort string
-	// ProviderID identifies the billing provider for this response, such as
-	// Posit Assistant's "positai" managed service or BYO "anthropic".
+	// ProviderID carries the billing identity for this response, including Codex
+	// service tiers, Posit Assistant's "positai" service, or BYO "anthropic".
 	ProviderID       string
 	TokenUsage       jsontext.Value
 	ContextTokens    int

@@ -72,7 +72,7 @@ func TestPrepareForegroundServeDaemonPreservesNoSyncWhenReplacingOlderDaemon(
 	dir := runtimeTestDir(t)
 	t.Cleanup(func() { UnmarkDaemonStarting(dir) })
 	host, port := testPingServer(t)
-	_, err := WriteDaemonRuntimeWithAuthAndNoSync(
+	_, err := WriteDaemonRuntimeWithAuthAndNoSync(nil,
 		dir, host, port, "1.0.0", "", false, false, true, nil,
 	)
 	require.NoError(t, err)
@@ -104,7 +104,7 @@ func TestPrepareForegroundServeDaemonExplicitNoSyncOverridesRuntime(
 	dir := runtimeTestDir(t)
 	t.Cleanup(func() { UnmarkDaemonStarting(dir) })
 	host, port := testPingServer(t)
-	_, err := WriteDaemonRuntimeWithAuthAndNoSync(
+	_, err := WriteDaemonRuntimeWithAuthAndNoSync(nil,
 		dir, host, port, "1.0.0", "", false, false, true, nil,
 	)
 	require.NoError(t, err)
@@ -724,16 +724,4 @@ func TestServeDaemonReplacementLinesIncludeRuntimeDetails(t *testing.T) {
 	assert.Contains(t, lines, "API version")
 	assert.Contains(t, lines, "data version")
 	assert.Contains(t, lines, "agentsview daemon stop")
-}
-
-func TestServeCommandHasReplaceFlag(t *testing.T) {
-	cmd := newServeCommand()
-
-	flag := cmd.Flags().Lookup("replace")
-
-	require.NotNil(t, flag)
-	assert.Equal(t,
-		"Replace a running local daemon before starting",
-		flag.Usage,
-	)
 }

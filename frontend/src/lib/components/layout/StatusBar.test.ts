@@ -22,6 +22,7 @@ describe("StatusBar", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-08T05:00:00Z"));
     sync.archiveStale = false;
+    sync.syncPending = false;
     sync.syncing = false;
     sync.progress = null;
     sync.lastSync = "2026-04-08T05:00:00Z";
@@ -46,9 +47,40 @@ describe("StatusBar", () => {
     sync.progress = null;
     sync.syncing = false;
     sync.archiveStale = false;
+    sync.syncPending = false;
+    sync.lastSyncError = null;
   });
 
-  it("shows stale results guidance until the archive is current", async () => {
+  it("pauses Codex Cloud polling while hidden and resumes when visible", async () => {
+    const visibility = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    const component = mount(StatusBar, { target: document.body });
+    try {
+      await tick();
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(getCodexCloudStatus).not.toHaveBeenCalled();
+      visibility.mockReturnValue(false);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(getCodexCloudStatus).toHaveBeenCalledOnce();
+    } finally {
+      visibility.mockRestore();
+      await unmount(component);
+    }
+  });
+
+  it("shows catch-up guidance until the archive is current", async () => {
+    sync.syncPending = true;
+    const component = mount(StatusBar, { target: document.body });
+    await tick();
+    expect(document.body.textContent).toContain("Archive results may be stale.");
+    expect(document.body.textContent).not.toContain("Changes are paused");
+    expect(document.querySelector(".archive-rebuild")).toBeNull();
+    sync.syncPending = false;
+    await tick();
+    expect(document.body.textContent).not.toContain("Archive results may be stale.");
+    await unmount(component);
+  });
+
+  it("shows rebuild guidance until the archive is current", async () => {
     sync.archiveStale = true;
     const component = mount(StatusBar, { target: document.body });
     await tick();
@@ -76,6 +108,56 @@ describe("StatusBar", () => {
     sync.archiveStale = false;
     await tick();
     expect(document.body.textContent).not.toContain("Archive results may be stale.");
+    await unmount(component);
+  });
+
+  it("offers to rebuild a stale archive from the status bar", async () => {
+    sync.archiveStale = true;
+    const triggerSync = vi.spyOn(sync, "triggerSync").mockImplementation(() => {});
+    const component = mount(StatusBar, { target: document.body });
+    await tick();
+    const button = Array.from(document.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Click to rebuild."),
+    );
+    expect(button).toBeDefined();
+    button!.click();
+    expect(triggerSync).toHaveBeenCalledTimes(1);
+    triggerSync.mockRestore();
+    await unmount(component);
+  });
+
+  it("does not offer a rebuild on a read-only backend", async () => {
+    sync.archiveStale = true;
+    sync.serverVersion = {
+      version: "dev",
+      commit: "unknown",
+      build_date: "",
+      api_version: 10,
+      data_version: 1,
+      insight_generation_available: false,
+      friction_available: false,
+      friction_build_allowed: false,
+      session_stats_available: false,
+      kata_available: false,
+      read_only: true,
+    };
+    const component = mount(StatusBar, { target: document.body });
+    await tick();
+    expect(document.body.textContent).toContain("Archive results may be stale.");
+    expect(document.body.textContent).not.toContain("Click to rebuild.");
+    await unmount(component);
+  });
+
+  it("shows the last sync failure until the next sync starts", async () => {
+    sync.lastSyncError = "the required archive rebuild did not complete";
+    const component = mount(StatusBar, { target: document.body });
+    await tick();
+    const failure = document.querySelector('[role="alert"]');
+    expect(failure?.textContent?.trim()).toBe("Sync failed");
+    expect(failure?.getAttribute("title")).toBe(sync.lastSyncError);
+    sync.syncing = true;
+    await tick();
+    expect(document.body.textContent).not.toContain("Sync failed");
     await unmount(component);
   });
 

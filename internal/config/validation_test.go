@@ -17,7 +17,9 @@ func TestScopedLoadersValidateUsedSections(t *testing.T) {
 		data, want string
 		scope      ValidationScope
 	}{
-		{"[vector]\nenabled=true", "model is required", ScopeVector},
+		{"sync_idle_after = '-1m'", "sync_idle_after", ScopeServer},
+		{"[integrations.docbank]\nurl='https://example.com'", "[integrations.docbank]", ScopeDocbank},
+		{"[vector]\nenabled=true\n[vector.embeddings.servers]\n", "model is required", ScopeVector},
 		{"[recall.extract]\nenabled=true\nmodel='local'", "recall.extract", ScopeRecall},
 		{"[insights]\nendpoint='http://models.example/v1'\nmodel='remote'", "plaintext", ScopeInsights},
 	} {
@@ -141,6 +143,10 @@ func TestInvalidDeploymentModeAppliesNoDeploymentSettings(t *testing.T) {
 			return cfg.AuthToken != "", err
 		}},
 		{name: "embeddings", env: "AGENTSVIEW_EMBEDDINGS_ENDPOINT", value: "http://127.0.0.1:30000/v1", apply: func(cfg *Config) (bool, error) {
+			err := cfg.ApplyDeploymentEmbeddings()
+			return cfg.DeploymentEmbeddings != nil, err
+		}},
+		{name: "embeddings inline key", env: "AGENTSVIEW_EMBEDDINGS_API_KEY", value: "key-secret", apply: func(cfg *Config) (bool, error) {
 			err := cfg.ApplyDeploymentEmbeddings()
 			return cfg.DeploymentEmbeddings != nil, err
 		}},

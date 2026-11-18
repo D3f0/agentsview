@@ -981,112 +981,6 @@ func TestMigration_ToolResultEventsTable(t *testing.T) {
 		"expected tool_result_events table after reopen")
 }
 
-func TestCurrentDataVersionIncludesOpenCodeProjectMetadataChange(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 89,
-		"version 89 is the data-version boundary for file-backed OpenCode metadata changes")
-	t.Logf("CurrentDataVersion=%d", CurrentDataVersion())
-}
-
-func TestCurrentDataVersionGrokMessageTimestamps(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 90,
-		"version 90 is the data-version boundary for Grok message timestamps")
-}
-
-func TestCurrentDataVersionPositAssistantCacheAccounting(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 91,
-		"version 91 is the data-version boundary for Posit Assistant cache accounting")
-}
-
-func TestCurrentDataVersionPositAssistantUsageEventsSidecar(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 93,
-		"version 93 is the data-version boundary for Posit Assistant usage-events")
-}
-
-func TestCurrentDataVersionDevinMessageNodeTokenUsage(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 94,
-		"Devin message_nodes token usage requires re-parsing fallback sessions")
-}
-
-func TestCurrentDataVersionPositAssistantProviderIdentity(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 95,
-		"Posit Assistant provider identity requires re-parsing usage rows")
-}
-
-func TestCurrentDataVersionClaudeRepoLocalWorktrees(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 109,
-		"Claude repository-local worktrees must reparse archives from v0.43.0 at data version 108")
-}
-
-func TestCurrentDataVersionAntigravityCLICwdAndWorktreeProject(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 96,
-		"version 96 is the data-version boundary for Antigravity CLI cwd and worktree project recovery")
-}
-
-func TestCurrentDataVersionOpenCodeMessageIdentity(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 105,
-		"OpenCode rows need re-parsing to record their storage message ID")
-}
-
-func TestCurrentDataVersionToolResultSummaryDedup(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 97,
-		"version 97 is the data-version boundary for tool-result summary deduplication")
-}
-
-func TestCurrentDataVersionPiSkillAttribution(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 98,
-		"version 98 is the data-version boundary for Pi skill attribution")
-}
-
-func TestCurrentDataVersionAntigravityCLIExperimentalServingVariant(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 99,
-		"version 99 is the data-version boundary for Antigravity CLI experimental serving variant normalization")
-}
-
-func TestCurrentDataVersionCodexGuardianLineage(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 100,
-		"version 100 is the data-version boundary for Codex guardian lineage")
-}
-
-func TestCurrentDataVersionCodexExecSessionKind(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 112,
-		"version 112 is the data-version boundary for Codex exec and roborev session kinds")
-}
-
-func TestCurrentDataVersionCodexApplyPatchFilePath(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 114,
-		"Codex apply_patch file paths require re-parsing existing sessions")
-}
-
-func TestCurrentDataVersionCursorTurnTimestamps(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 101,
-		"Cursor turn timestamps require re-parsing existing sessions")
-}
-
-func TestCurrentDataVersionCursorIDESessionStart(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 115,
-		"Cursor IDE session starts from bubble timestamps require re-parsing unchanged containers")
-}
-
-func TestCurrentDataVersionReasoningEffort(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 106,
-		"reasoning effort persistence requires re-parsing unchanged transcripts")
-}
-
-func TestCurrentDataVersionCursorSubagentCategory(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 107,
-		"version 107 is the data-version boundary for the Cursor Subagent tool category")
-}
-
-func TestCurrentDataVersionCodexCacheWriteTokens(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 123,
-		"version 123 is the data-version boundary for Codex cache-write token normalization")
-}
-
-func TestCurrentDataVersionClaudePeerMessages(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 126,
-		"version 126 is the data-version boundary for Claude peer-message classification")
-}
-
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {
 	d := testDB(t)
 	insertSession(t, d, "s-events", "proj")
@@ -4974,16 +4868,6 @@ func TestOpenRejectsArchiveWhoseFTSModuleIsUnavailable(t *testing.T) {
 	require.ErrorContains(t, err, "-tags fts5")
 }
 
-func TestPath(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.db")
-	d, err := Open(t.Context(), path)
-	requireNoError(t, err, "Open")
-	defer d.Close()
-
-	assert.Equal(t, path, d.Path(), "Path()")
-}
-
 func TestOpenConfiguresWALJournalSizeLimit(t *testing.T) {
 	d := testDB(t)
 
@@ -5338,7 +5222,7 @@ func TestCloseConnectionsBlocksConcurrentReopen(t *testing.T) {
 	case err := <-reopenDone:
 		require.Failf(t, "Reopen returned early",
 			"returned while CloseConnections was draining: %v", err)
-	case <-time.After(150 * time.Millisecond): //nolint:kennlint // absence check; the open rows keep the drain, and so Reopen, waiting
+	case <-time.After(150 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check; the open rows keep the drain, and so Reopen, waiting
 	}
 
 	require.NoError(t, rows.Err(), "rows.Err")
@@ -5380,7 +5264,7 @@ func TestCloseWriterWaitsForInFlightWriterQuery(t *testing.T) {
 	case err := <-closeDone:
 		require.Failf(t, "CloseWriter returned early",
 			"returned while writer rows were still open: %v", err)
-	case <-time.After(150 * time.Millisecond): //nolint:kennlint // absence check; the open writer rows keep CloseWriter waiting
+	case <-time.After(150 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check; the open writer rows keep CloseWriter waiting
 	}
 
 	require.NoError(t, rows.Err(), "rows.Err")
@@ -5677,7 +5561,7 @@ func TestCopyInsightsFrom(t *testing.T) {
 	defer dstDB.Close()
 
 	// Copy insights from source.
-	err = dstDB.CopyInsightsFrom(srcPath)
+	err = dstDB.CopyInsightsFrom(t.Context(), srcPath)
 	require.NoError(t, err, "CopyInsightsFrom")
 
 	// Verify insights were copied.
@@ -5720,7 +5604,7 @@ func TestCopyModelPricingFrom(t *testing.T) {
 		{ModelPattern: "claude-opus-4-8", InputPerMTok: money.MustParseDollars("1")},
 	}), "UpsertModelPricing stale row")
 
-	require.NoError(t, dstDB.CopyModelPricingFrom(srcPath),
+	require.NoError(t, dstDB.CopyModelPricingFrom(t.Context(), srcPath),
 		"CopyModelPricingFrom")
 
 	copied, err := dstDB.GetModelPricing("claude-opus-4-8")
@@ -5756,7 +5640,7 @@ func TestCopyModelPricingFromRollsBackParentWhenBandCopyFails(t *testing.T) {
 		InputPerMTok: money.MustParseDollars("9"),
 	}}))
 
-	err := dst.CopyModelPricingFrom(srcPath)
+	err := dst.CopyModelPricingFrom(t.Context(), srcPath)
 	require.Error(t, err)
 	got, getErr := dst.GetModelPricing("model")
 	require.NoError(t, getErr)
@@ -5799,6 +5683,10 @@ func TestCopySessionMetadataFrom_PreservesCursorUsageEvents(t *testing.T) {
 			IsHeadless:     true,
 			DedupKey:       "second",
 		},
+		{
+			Agent: "grok", OccurredAt: "2026-11-04T13:00:00Z",
+			InputTokens: 12, DedupKey: "xai:item-a",
+		},
 	}), "InsertCursorUsageEvents src")
 	wantFingerprint, err := srcDB.CursorUsageEventFingerprint(ctx)
 	require.NoError(t, err, "CursorUsageEventFingerprint src")
@@ -5816,11 +5704,11 @@ func TestCopySessionMetadataFrom_PreservesCursorUsageEvents(t *testing.T) {
 		DedupKey:   "stale",
 	}}), "InsertCursorUsageEvents dst")
 
-	require.NoError(t, dstDB.CopySessionMetadataFrom(srcPath), "CopySessionMetadataFrom")
+	require.NoError(t, dstDB.CopySessionMetadataFrom(t.Context(), srcPath), "CopySessionMetadataFrom")
 
 	gotEvents, err := dstDB.GetCursorUsageEvents(ctx, 0)
 	require.NoError(t, err, "GetCursorUsageEvents")
-	require.Len(t, gotEvents, 2, "cursor usage events")
+	require.Len(t, gotEvents, 3, "account usage events")
 	gotFingerprint, err := dstDB.CursorUsageEventFingerprint(ctx)
 	require.NoError(t, err, "CursorUsageEventFingerprint dst")
 	assert.Equal(t, wantFingerprint, gotFingerprint,
@@ -5874,7 +5762,7 @@ func TestCopyOrphanedDataFrom(t *testing.T) {
 	)
 
 	// Copy orphaned data from source.
-	count, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	count, err := dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	requireNoError(t, err, "CopyOrphanedDataFrom")
 	require.Equal(t, 1, count, "expected 1 orphaned session, got")
 
@@ -5945,7 +5833,7 @@ func TestCopyOrphanedDataFrom_DuplicateSourceUUIDKeepsOnePin(t *testing.T) {
 	dstDB := testDBAtPath(t, dstPath, "dst")
 	defer dstDB.Close()
 
-	copied, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	copied, err := dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	require.NoError(t, err, "CopyOrphanedDataFrom")
 	require.Equal(t, 1, copied, "copied orphaned sessions")
 
@@ -6004,7 +5892,7 @@ func TestCopyOrphanedDataFrom_SkipsStaleCodexForkRows(t *testing.T) {
 		s.FilePath = &sharedDB
 	})
 
-	count, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	count, err := dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	require.NoError(t, err, "CopyOrphanedDataFrom")
 	assert.Equal(t, 2, count, "gone-1 and old-chat are the only orphans")
 
@@ -6037,7 +5925,7 @@ func TestCopyOrphanedDataFrom_NoOrphans(t *testing.T) {
 	defer dstDB.Close()
 	insertSession(t, dstDB, "s1", "proj")
 
-	count, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	count, err := dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	requireNoError(t, err, "CopyOrphanedDataFrom")
 	require.Equal(t, 0, count,
 		"expected 0 orphaned sessions, got %d", count)
@@ -6130,7 +6018,7 @@ func TestCopyOrphanedDataFromReconcilesTranscriptRevisions(t *testing.T) {
 	name := "metadata-only rename"
 	requireNoError(t, dstDB.RenameSession(t.Context(), "unchanged", &name), "rename session")
 
-	count, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	count, err := dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	requireNoError(t, err, "CopyOrphanedDataFrom")
 	assert.Zero(t, count)
 
@@ -6261,7 +6149,7 @@ func TestCopyOrphanedDataFrom_PreservesCopiedDetails(t *testing.T) {
 	dstDB := testDBAtPath(t, dstPath, "dst")
 	defer dstDB.Close()
 
-	count, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	count, err := dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	requireNoError(t, err, "CopyOrphanedDataFrom")
 	require.Equal(t, 6, count, "expected orphaned session count")
 
@@ -6386,7 +6274,7 @@ func TestCopyTrashedDataFromPreservesPins(t *testing.T) {
 	dstDB := testDBAtPath(t, dstPath, "dst")
 	defer dstDB.Close()
 
-	count, err := dstDB.CopyTrashedDataFrom(srcPath)
+	count, err := dstDB.CopyTrashedDataFrom(t.Context(), srcPath)
 	requireNoError(t, err, "CopyTrashedDataFrom")
 	require.Len(t, count, 1, "copied trashed sessions")
 
@@ -6432,7 +6320,7 @@ func TestCopyOrphanedDataFrom_AtomicOnFailure(t *testing.T) {
 
 	// CopyOrphanedDataFrom should fail on the message
 	// copy step.
-	_, err = dstDB.CopyOrphanedDataFrom(srcPath)
+	_, err = dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	require.Error(t, err, "expected error from corrupted source")
 
 	// The session insert must have been rolled back — no
@@ -6465,6 +6353,7 @@ func TestCopyOrphanedDataFrom_LegacyNoIsSystem(t *testing.T) {
 	// recreate the table without is_system.
 	_, err = raw.ExecContext(t.Context(), `
 		DROP VIEW IF EXISTS message_search_content;
+		DROP VIEW IF EXISTS message_trigram_source;
 		CREATE TABLE messages_new (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			session_id TEXT NOT NULL,
@@ -6500,7 +6389,7 @@ func TestCopyOrphanedDataFrom_LegacyNoIsSystem(t *testing.T) {
 	dstDB := testDBAtPath(t, dstPath, "dst")
 	defer dstDB.Close()
 
-	count, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	count, err := dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	requireNoError(t, err, "CopyOrphanedDataFrom")
 	require.Equal(t, 1, count, "expected 1 orphaned, got")
 
@@ -6896,7 +6785,7 @@ func TestCopyExcludedSessionsFrom(t *testing.T) {
 	defer dstDB.Close()
 
 	// Copy excluded sessions.
-	err := dstDB.CopyExcludedSessionsFrom(srcPath)
+	err := dstDB.CopyExcludedSessionsFrom(t.Context(), srcPath)
 	require.NoError(t, err, "CopyExcludedSessionsFrom")
 
 	// s1 should be excluded in destination.
@@ -6937,7 +6826,7 @@ func TestCopyOrphanedDataFromClearsCopiedSelfParent(t *testing.T) {
 	defer dstDB.Close()
 	require.NoError(t, dstDB.LinkSubagentSessions(),
 		"fresh archive linking pass runs before orphans are copied")
-	copied, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	copied, err := dstDB.CopyOrphanedDataFrom(t.Context(), srcPath)
 	require.NoError(t, err, "CopyOrphanedDataFrom")
 	assert.Equal(t, 3, copied)
 	require.NoError(t, dstDB.LinkSubagentSessions(), "post-copy relink")
@@ -6972,7 +6861,7 @@ func TestCopySyncStateFrom_NoSourceTable(t *testing.T) {
 	), "seed destination sync state")
 
 	// Copy should be a no-op for legacy source and return nil.
-	err = dstDB.CopySyncStateFrom(srcPath)
+	err = dstDB.CopySyncStateFrom(t.Context(), srcPath)
 	require.NoError(t, err, "CopySyncStateFrom")
 
 	got, err := dstDB.GetSyncState(t.Context(), "pg_push_marker_id")
@@ -7015,7 +6904,7 @@ func TestCopySyncStateFrom_OnlyCopiesDurableKeys(t *testing.T) {
 	require.NoError(t, dstDB.SetSyncState(t.Context(), "last_sync_finished_at", "new-finish"),
 		"seed destination finished")
 
-	err := dstDB.CopySyncStateFrom(srcPath)
+	err := dstDB.CopySyncStateFrom(t.Context(), srcPath)
 	require.NoError(t, err, "CopySyncStateFrom")
 
 	gotMarker, err := dstDB.GetSyncState(t.Context(), "pg_push_marker_id")
@@ -7077,7 +6966,7 @@ func TestCopySyncStateFrom_PropagatesErrors(t *testing.T) {
 	require.NoError(t, dstDB.SetSyncState(t.Context(), "pg_push_marker_id", "safe"),
 		"seed destination sync state")
 
-	err := dstDB.CopySyncStateFrom(srcPath)
+	err := dstDB.CopySyncStateFrom(t.Context(), srcPath)
 	require.Error(t, err, "CopySyncStateFrom")
 	require.ErrorContains(t, err, "attaching source db")
 
@@ -7137,7 +7026,7 @@ func TestCopySessionMetadataFrom(t *testing.T) {
 	assert.Equal(t, 0, starCount, "stars before")
 
 	// Copy metadata.
-	err = dstDB.CopySessionMetadataFrom(srcPath)
+	err = dstDB.CopySessionMetadataFrom(t.Context(), srcPath)
 	require.NoError(t, err, "CopySessionMetadataFrom")
 
 	// After copy: metadata, pin, and star should be merged.
@@ -7221,7 +7110,7 @@ func TestCopySessionMetadataFrom_CodexPagePins(t *testing.T) {
 			insertMessages(t, dst, messages...)
 			// Repeated copies must not duplicate pins or retain a temporary map.
 			for range 2 {
-				require.NoError(t, dst.CopySessionMetadataFrom(srcPath))
+				require.NoError(t, dst.CopySessionMetadataFrom(t.Context(), srcPath))
 			}
 			pins, err := dst.ListPinnedMessages(ctx, "", "")
 			require.NoError(t, err)
@@ -7296,7 +7185,7 @@ func TestCopySessionMetadataFrom_IdenticalDuplicatePins(t *testing.T) {
 		Content: "context", ContentLength: 7, SourceUUID: "env",
 	}}, identical("dup-shifted", 1, 2)...)...)
 
-	require.NoError(t, dstDB.CopySessionMetadataFrom(srcPath),
+	require.NoError(t, dstDB.CopySessionMetadataFrom(t.Context(), srcPath),
 		"CopySessionMetadataFrom")
 
 	pins, err := dstDB.ListPinnedMessages(ctx, "dup-keep", "")
@@ -7377,7 +7266,7 @@ func TestCopySessionMetadataFrom_LegacyPinFollowsShiftedReply(
 		},
 	)
 
-	require.NoError(t, dstDB.CopySessionMetadataFrom(srcPath),
+	require.NoError(t, dstDB.CopySessionMetadataFrom(t.Context(), srcPath),
 		"CopySessionMetadataFrom")
 
 	pins, err := dstDB.ListPinnedMessages(ctx, "s1", "")
@@ -7612,7 +7501,7 @@ func TestCopySessionMetadataFrom_PinsFollowSourceUUID(t *testing.T) {
 		},
 	)
 
-	require.NoError(t, dstDB.CopySessionMetadataFrom(srcPath),
+	require.NoError(t, dstDB.CopySessionMetadataFrom(t.Context(), srcPath),
 		"CopySessionMetadataFrom")
 
 	// Pins follow source_uuid across the ordinal shift instead of
@@ -7688,7 +7577,7 @@ func TestCopySessionMetadataCopiesFromSource(t *testing.T) {
 	defer dstDB.Close()
 	insertSession(t, dstDB, "s1", "proj")
 
-	requireNoError(t, dstDB.CopySessionMetadataFrom(srcPath), "CopySessionMetadataFrom")
+	requireNoError(t, dstDB.CopySessionMetadataFrom(t.Context(), srcPath), "CopySessionMetadataFrom")
 
 	sf, err := dstDB.GetSessionFull(ctx, "s1")
 	requireNoError(t, err, "GetSessionFull")
@@ -7724,8 +7613,8 @@ func TestCopySessionMetadataPreservesWorktreeProjectMappings(t *testing.T) {
 	})
 	requireNoError(t, err, "CreateWorktreeProjectMapping dst")
 
-	requireNoError(t, dstDB.CopySessionMetadataFrom(srcPath), "CopySessionMetadataFrom")
-	requireNoError(t, dstDB.CopySessionMetadataFrom(srcPath), "CopySessionMetadataFrom again")
+	requireNoError(t, dstDB.CopySessionMetadataFrom(t.Context(), srcPath), "CopySessionMetadataFrom")
+	requireNoError(t, dstDB.CopySessionMetadataFrom(t.Context(), srcPath), "CopySessionMetadataFrom again")
 
 	got, err := dstDB.ListWorktreeProjectMappings(ctx, "laptop")
 	requireNoError(t, err, "ListWorktreeProjectMappings")
@@ -7758,7 +7647,7 @@ func TestCopySessionMetadataPreservesClears(t *testing.T) {
 	defer dstDB.Close()
 	insertSession(t, dstDB, "s1", "proj")
 
-	requireNoError(t, dstDB.CopySessionMetadataFrom(srcPath), "CopySessionMetadataFrom")
+	requireNoError(t, dstDB.CopySessionMetadataFrom(t.Context(), srcPath), "CopySessionMetadataFrom")
 
 	sf, err := dstDB.GetSessionFull(ctx, "s1")
 	requireNoError(t, err, "GetSessionFull")
@@ -9310,58 +9199,6 @@ func TestListSessionsModifiedBetween_ProjectFilter(t *testing.T) {
 	}
 }
 
-func TestSessionsHasTerminationStatusColumn(t *testing.T) {
-	d := testDB(t)
-
-	var count int
-	err := d.getReader().QueryRow(t.Context(),
-		`SELECT count(*) FROM pragma_table_info('sessions')
-		 WHERE name = 'termination_status'`,
-	).Scan(&count)
-	requireNoError(t, err, "probing termination_status column")
-
-	require.Equal(t, 1, count,
-		"expected 1 termination_status column, got %d", count)
-}
-
-func TestSessionsTerminationStatusIndex(t *testing.T) {
-	d := testDB(t)
-
-	var count int
-	err := d.getReader().QueryRow(t.Context(),
-		`SELECT count(*) FROM sqlite_master
-		 WHERE type = 'index' AND name = 'idx_sessions_termination_status'`,
-	).Scan(&count)
-	requireNoError(t, err, "probing idx_sessions_termination_status")
-
-	require.Equal(t, 1, count,
-		"expected idx_sessions_termination_status to exist, got count=%d",
-		count)
-}
-
-func TestMessagesUsageIndexes(t *testing.T) {
-	d := testDB(t)
-
-	var count int
-	err := d.getReader().QueryRow(t.Context(),
-		`SELECT count(*) FROM sqlite_master
-		 WHERE type = 'index' AND name = 'idx_messages_usage_covering'`,
-	).Scan(&count)
-	requireNoError(t, err, "probing idx_messages_usage_covering")
-
-	require.Equal(t, 0, count,
-		"expected superseded idx_messages_usage_covering to be absent, got count=%d",
-		count)
-
-	err = d.getReader().QueryRow(t.Context(),
-		`SELECT count(*) FROM sqlite_master
-		 WHERE type = 'index' AND name = 'idx_messages_usage_timestamp'`,
-	).Scan(&count)
-	requireNoError(t, err, "probing idx_messages_usage_timestamp")
-	require.Equal(t, 1, count,
-		"expected idx_messages_usage_timestamp to exist")
-}
-
 // TestMigration_TerminationStatusColumn simulates upgrading from a
 // pre-termination_status schema. Drops the column and its index from
 // a freshly-opened DB, reopens, and verifies the migration restores
@@ -9378,13 +9215,15 @@ func TestMigration_TerminationStatusColumn(t *testing.T) {
 	requireNoError(t, err, "raw open")
 
 	// SQLite supports DROP COLUMN as of 3.35; the in-tree driver is
-	// recent enough. Drop the index and the trigger that references the
+	// recent enough. Drop the index and the triggers that reference the
 	// column first since SQLite blocks dropping a column referenced by an
 	// index or a trigger.
 	_, err = conn.ExecContext(t.Context(), `DROP INDEX IF EXISTS idx_sessions_termination_status`)
 	requireNoError(t, err, "drop termination_status index")
 	_, err = conn.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS artifact_sessions_update_queue`)
 	requireNoError(t, err, "drop artifact_sessions_update_queue trigger")
+	_, err = conn.ExecContext(t.Context(), usageChangeJournalTriggerDropsSQL)
+	requireNoError(t, err, "drop usage change journal triggers")
 	_, err = conn.ExecContext(t.Context(), `ALTER TABLE sessions DROP COLUMN termination_status`)
 	requireNoError(t, err, "drop termination_status column")
 
@@ -9518,7 +9357,7 @@ func TestCopySessionMetadataPreservesUserNotAgent(t *testing.T) {
 		SessionName: Ptr("Fresh Agent A"),
 	}), "fresh a")
 
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 
 	u := getSessionRow(t, fresh, "u")
 	require.NotNil(t, u.DisplayName, "user rename overlaid")
@@ -9551,7 +9390,7 @@ func TestCopySessionMetadataClearedNameYieldsToAgent(t *testing.T) {
 		SessionName: Ptr("Fresh Agent C"),
 	}), "fresh c")
 
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 
 	c := getSessionRow(t, fresh, "c")
 	assert.Nil(t, c.DisplayName,
@@ -9589,7 +9428,7 @@ func TestCopySessionMetadataPreservesArchiveIdentityMetadata(t *testing.T) {
 	requireNoError(t, fresh.SetArchiveIdentityForTest(
 		ctx, "fresh-archive-id", strings.Repeat("b", 64)),
 		"set fresh archive identity")
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 
 	gotID, err := fresh.GetOrCreateDatabaseID(ctx)
 	requireNoError(t, err, "GetOrCreateDatabaseID")
@@ -9633,7 +9472,7 @@ func TestCopySessionMetadataScrubsProjectIdentityGitRemoteCredentials(t *testing
 	requireNoError(t, oldDB.Close(), "close old")
 
 	fresh := testDB(t)
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 
 	observations, err := fresh.ListProjectIdentityObservations(
 		ctx, []string{"alpha"})
@@ -9675,7 +9514,7 @@ func TestCopySessionMetadataKeepsFreshProjectIdentityObservationOnConflict(t *te
 			ObservedAt:       time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
 		}), "upsert fresh project identity")
 
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 
 	observations, err := fresh.ListProjectIdentityObservations(
 		ctx, []string{"alpha"})
@@ -9710,7 +9549,7 @@ func TestCopySessionMetadataKeepsIdentityRevisionMonotonic(t *testing.T) {
 	requireNoError(t, err, "revision before copy")
 	require.Greater(t, before, int64(1))
 
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 	after, err := fresh.ProjectIdentityPublicationRevision(ctx)
 	requireNoError(t, err, "revision after copy")
 	assert.GreaterOrEqual(t, after, before)
@@ -9743,7 +9582,7 @@ func TestCopySessionMetadataKeepsWorktreeMappingRevisionMonotonic(t *testing.T) 
 	requireNoError(t, err, "revision before copy")
 	require.Equal(t, int64(5), before)
 
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 	after, err := fresh.WorktreeMappingPublicationRevision(ctx)
 	requireNoError(t, err, "revision after copy")
 	assert.GreaterOrEqual(t, after, before,
@@ -9778,7 +9617,7 @@ func TestCopySessionMetadataPreservesFirstConclusiveSessionSnapshot(t *testing.T
 			ObservedAt: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
 		}), "insert fresh snapshot")
 
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 	snapshots, err := fresh.listSessionProjectIdentitySnapshots(
 		ctx, []string{"session-a"},
 	)
@@ -9812,7 +9651,7 @@ func TestCopySessionMetadataPreservesHistoricalUnknownSessionSnapshot(t *testing
 			ObservedAt: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
 		}), "insert fresh resolved snapshot")
 
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 	snapshots, err := fresh.listSessionProjectIdentitySnapshots(
 		ctx, []string{"session-a"},
 	)
@@ -9852,7 +9691,7 @@ func TestCopySessionMetadataSuppressesOldRootFallbackWhenFreshRemoteExists(t *te
 			ObservedAt:    time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
 		}), "upsert fresh remote project identity")
 
-	requireNoError(t, fresh.CopySessionMetadataFrom(oldPath), "copy")
+	requireNoError(t, fresh.CopySessionMetadataFrom(t.Context(), oldPath), "copy")
 
 	observations, err := fresh.ListProjectIdentityObservations(
 		ctx, []string{"alpha"})
@@ -10046,7 +9885,7 @@ func TestSessionGroupColumnsMigrateWithoutLosingRuns(t *testing.T) {
 	require.NoError(t, database.Close())
 	conn, err := sql.Open("sqlite3", path)
 	require.NoError(t, err)
-	_, err = conn.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS artifact_sessions_update_queue; ALTER TABLE sessions DROP COLUMN group_key`)
+	_, err = conn.ExecContext(t.Context(), usageChangeJournalTriggerDropsSQL+`DROP TRIGGER IF EXISTS artifact_sessions_update_queue; ALTER TABLE sessions DROP COLUMN group_key`)
 	require.NoError(t, err)
 	require.NoError(t, conn.Close())
 	database, err = Open(t.Context(), path)

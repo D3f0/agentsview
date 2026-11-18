@@ -531,6 +531,37 @@ func TestSearchContentTermsRequiresOneExchange(t *testing.T) {
 		"terms in different exchanges of one session must not match")
 }
 
+func TestSearchContentTermsKeepsWholeExchangeAroundOneHit(t *testing.T) {
+	d := testDB(t)
+	insertSession(t, d, "terms-one-hit", "proj", func(s *Session) {
+		s.UserMessageCount = 2
+	})
+	require.NoError(t, d.ReplaceSessionMessages(t.Context(), "terms-one-hit", []Message{
+		{SessionID: "terms-one-hit", Ordinal: 0, Role: "user", Content: "unrelated opener"},
+		{SessionID: "terms-one-hit", Ordinal: 1, Role: "assistant", Content: "unrelated reply"},
+		{SessionID: "terms-one-hit", Ordinal: 2, Role: "user", Content: "first question"},
+		{SessionID: "terms-one-hit", Ordinal: 3, Role: "assistant", Content: "the deploy step"},
+		{SessionID: "terms-one-hit", Ordinal: 4, Role: "assistant", Content: "closing remark"},
+	}))
+
+	got, err := d.SearchContent(t.Context(), ContentSearchFilter{
+		Pattern: "deploy", Mode: "terms", Limit: 50, IncludeOneShot: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Matches, 1)
+	assert.Equal(t, 2, got.Matches[0].Ordinal)
+	assert.Equal(t, [2]int{2, 4}, got.Matches[0].OrdinalRange,
+		"the match covers every message of its exchange, not only the hit")
+
+	split, err := d.SearchContent(t.Context(), ContentSearchFilter{
+		Pattern: "question remark", Mode: "terms", Limit: 50, IncludeOneShot: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, split.Matches, 1,
+		"terms in different messages of one exchange still match")
+	assert.Equal(t, [2]int{2, 4}, split.Matches[0].OrdinalRange)
+}
+
 func TestSearchContentTermsIgnoresAssistantPrelude(t *testing.T) {
 	d := testDB(t)
 	insertSession(t, d, "terms-prelude", "proj", func(s *Session) {
@@ -720,6 +751,49 @@ func TestSearchContentFTSPhraseSnippetFallsBackToFirstToken(t *testing.T) {
 	require.NoError(t, err, "SearchContent fts phrase")
 	require.Len(t, got.Matches, 1, "fts phrase match")
 	assert.Contains(t, got.Matches[0].Snippet, "foo-bar")
+}
+
+// TestSearchContentFTSBooleanSnippetCentersOnMatchedOperand places each
+// matching operand past the opening snippet window, after text that holds a
+// non-matching operand, a negated operand, or an operator word.
+func TestSearchContentFTSBooleanSnippetCentersOnMatchedOperand(t *testing.T) {
+	d := testDB(t)
+	if !d.HasFTS(t.Context()) {
+		t.Skip("fts5 not available")
+	}
+	filler := strings.Repeat("filler ", 40)
+	for _, tc := range []struct {
+		name, query, body, want string
+	}{
+		{"later OR operand", `"alpha" OR "beta"`, "Order notes " + filler + "beta closes", "beta closes"},
+		{"OR phrase", `"absent" OR "fix bug"`, filler + "fix bug closes", "fix bug closes"},
+		{"negated operand", `"alpha" NOT "beta" OR "gamma"`, "beta opens " + filler + "gamma closes", "gamma closes"},
+		{"unsatisfied AND", `"alpha" AND "beta" OR "gamma"`, "alpha opens " + filler + "gamma closes", "gamma closes"},
+		// SQLite matches tokens, not substrings: the phrase matches across
+		// punctuation and a stemmed word matches its inflections.
+		{"negated phrase across punctuation", `"alpha" NOT "foo bar" OR "gamma"`, "alpha opens foo-bar " + filler + "gamma closes", "gamma closes"},
+		{"negated stem", `"alpha" NOT "runs" OR "gamma"`, "alpha opens running " + filler + "gamma closes", "gamma closes"},
+		{"OR phrase across punctuation", `"absent" OR "foo bar"`, filler + "foo-bar closes", "foo-bar closes"},
+		// A star inside quotes is punctuation, not a prefix marker.
+		{"negated quoted star", `"alpha" NOT "beta*"`, "betamax opens " + filler + "alpha closes", "alpha closes"},
+		{"quoted star OR", `"beta*" OR "gamma"`, "betamax opens " + filler + "gamma beta closes", "gamma beta closes"},
+		{"quoted star alone", `"beta*" OR "absent"`, "betamax opens " + filler + "beta closes", "beta closes"},
+		// Phrase joins and column filters fall back to substring centering.
+		{"phrase join", `"foo" + "bar" OR "baz"`, filler + "foo bar closes", "foo bar closes"},
+		{"column filter", `"needle" AND content:needle OR "absent"`, filler + "needle closes", "needle closes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := strings.ReplaceAll(tc.name, " ", "-")
+			seedSearchSession(t, d, id, "proj", [][2]string{{"user", tc.body}})
+			got, err := d.SearchContent(t.Context(), ContentSearchFilter{
+				Pattern: tc.query, Mode: "fts", SessionID: id,
+				Sources: []string{"messages"}, Limit: 50,
+			})
+			require.NoError(t, err)
+			require.Len(t, got.Matches, 1)
+			assert.Contains(t, got.Matches[0].Snippet, tc.want)
+		})
+	}
 }
 
 func TestSearchContentFTSInvalidQuery(t *testing.T) {
@@ -1262,7 +1336,9 @@ func TestSearchContentToolResultEventsDerived(t *testing.T) {
 		(session_id, tool_call_message_ordinal, tool_use_id, source, status,
 		 content, content_length, timestamp, event_index)
 		VALUES ('evorph', 7, 'tux', 'stdout', 'success',
-		 'ORPHHIT event content', 21, '2026-05-20T12:00:00Z', 0)`)
+		 'ORPHHIT event content', 21, '2026-05-20T12:00:00Z', 0),
+		 ('boss', 7, 'top-orphan', 'stdout', 'success',
+		 'TOPORPH', 7, '2026-05-20T12:00:00Z', 0)`)
 	require.NoError(t, err, "insert orphan event")
 
 	seedUnitSession(t, d, "evrun", nil, []Message{
@@ -1294,6 +1370,21 @@ func TestSearchContentToolResultEventsDerived(t *testing.T) {
 	assert.True(t, m.Subordinate, "session lineage still applies")
 	assert.Equal(t, "subagent", m.Relationship, "Relationship from sessions join")
 	assert.Equal(t, "boss", m.ParentSessionID, "ParentSessionID from sessions join")
+
+	for _, mode := range []string{"substring", "regex"} {
+		page, err := d.SearchContent(t.Context(), ContentSearchFilter{
+			Pattern: "ORPHHIT", Mode: mode, Scope: "subordinate", Sources: []string{"tool_result"}, Limit: 1,
+		})
+		require.NoError(t, err)
+		require.Len(t, page.Matches, 1)
+		assert.Equal(t, "evorph", page.Matches[0].SessionID)
+		page, err = d.SearchContent(t.Context(), ContentSearchFilter{
+			Pattern: "TOPORPH", Mode: mode, Scope: "top", Sources: []string{"tool_result"}, Limit: 1,
+		})
+		require.NoError(t, err)
+		require.Len(t, page.Matches, 1)
+		assert.Equal(t, "boss", page.Matches[0].SessionID)
+	}
 
 	ev, err := d.SearchContent(t.Context(), ContentSearchFilter{
 		Pattern: "EVHIT", Mode: "substring",

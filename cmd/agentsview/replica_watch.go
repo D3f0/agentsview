@@ -285,6 +285,7 @@ const (
 // catch-up push, then pushes triggered by file changes (debounced)
 // and a periodic floor tick, until interrupted.
 func runReplicaPushWatch(
+	ctx context.Context,
 	backend storage.Replica,
 	cfg ReplicaPushConfig,
 	targetName string,
@@ -299,50 +300,54 @@ func runReplicaPushWatch(
 	}
 	setupLogFileNamed(appCfg.DataDir, name+"-watch.log")
 
-	target, projects, exclude, err := resolveWatchTarget(
-		backend, appCfg, cfg, targetName,
-	)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	run, cleanup, err := prepareReplicaPushWatch(ctx, backend, appCfg, cfg, targetName, false)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
+	return run()
+}
 
-	debounce := cfg.Debounce
-	if debounce <= 0 {
-		debounce = defaultWatchDebounce
+// prepareReplicaPushWatch acquires ownership without starting ingestion. The
+// caller must join run before cleanup closes the archive and releases ownership.
+func prepareReplicaPushWatch(
+	ctx context.Context, backend storage.Replica, appCfg config.Config,
+	cfg ReplicaPushConfig, targetName string, requireLocal bool,
+) (run func() error, cleanup func(), err error) {
+	name := backend.Name()
+	target, projects, exclude, err := resolveWatchTarget(backend, appCfg, cfg, targetName)
+	if err != nil {
+		return nil, nil, err
 	}
-	interval := cfg.Interval
-	if interval <= 0 {
-		interval = defaultWatchInterval
-	}
+	debounce, interval := watchTimings(cfg.Debounce, cfg.Interval)
 
 	// Single-instance guard: only one watcher per data dir.
 	lockPath := filepath.Join(appCfg.DataDir, name+"-watch.lock")
 	lock := flock.New(lockPath)
 	locked, err := lock.TryLock()
 	if err != nil {
-		return fmt.Errorf("locking %s: %w", lockPath, err)
+		return nil, nil, fmt.Errorf("locking %s: %w", lockPath, err)
 	}
 	if !locked {
-		return fmt.Errorf("already locked (%s)", lockPath)
+		return nil, nil, fmt.Errorf("already locked (%s)", lockPath)
 	}
-	defer func() {
+	unlock := func() {
 		if rerr := lock.Unlock(); rerr != nil {
 			log.Printf("%s watch: releasing lock: %v", name, rerr)
 		}
-	}()
-
-	ctx, stop := signal.NotifyContext(
-		context.Background(), os.Interrupt, syscall.SIGTERM,
-	)
-	defer stop()
+	}
 	wake, stopLifecycle, err := installReplicaWatchLifecycle(
 		appCfg.DataDir, name, target.Name,
 	)
 	if err != nil {
-		return fmt.Errorf("starting lifecycle notifications: %w", err)
+		unlock()
+		return nil, nil, fmt.Errorf("starting lifecycle notifications: %w", err)
 	}
-	defer stopLifecycle()
+
 	cfg.LifecycleWake = wake
+	cfg.Health = newReplicaWatchHealth(appCfg.DataDir, name, target, interval, time.Now)
 
 	log.Printf(
 		"%s watch: starting (machine=%q debounce=%s interval=%s)",
@@ -351,17 +356,32 @@ func runReplicaPushWatch(
 
 	// --embed builds in this process, so it never auto-starts a daemon; a
 	// live daemon still wins the writer and rejects the request.
-	appCfg.NoDaemonAutostart = cfg.Embed
+	appCfg.NoDaemonAutostart = cfg.Embed || requireLocal
 	appCfg.RequireDaemon = cfg.NoStartDaemon
-	writer, cleanup, err := resolveArchiveWriteBackend(ctx, appCfg, transportIntentLongLived)
+	// A watcher that exits with an error records it as a failed push, so a
+	// service manager restarting it builds a failure streak instead of
+	// refreshing the watcher's start time on every attempt.
+	writer, closeWriter, err := resolveArchiveWriteBackend(ctx, appCfg, transportIntentLongLived)
 	if err != nil {
-		return fmt.Errorf("opening writer: %w", err)
+		err = fmt.Errorf("opening writer: %w", err)
+		cfg.Health.finish(err)
+		stopLifecycle()
+		unlock()
+		return nil, nil, err
 	}
-	defer cleanup()
-	if err := writer.ReplicaPushWatch(
-		ctx, backend, target, cfg, projects, exclude, debounce, interval,
-	); err != nil {
+	if _, local := writer.(*localArchiveWriteBackend); requireLocal && !local {
+		err := errors.New("push-watch requires the local archive writer")
+		cfg.Health.finish(err)
+		closeWriter()
+		stopLifecycle()
+		unlock()
+		return nil, nil, err
+	}
+	return func() error {
+		err := writer.ReplicaPushWatch(ctx, backend, target, cfg, projects, exclude, debounce, interval)
+		if err != nil && ctx.Err() == nil {
+			cfg.Health.finish(err)
+		}
 		return err
-	}
-	return nil
+	}, func() { closeWriter(); stopLifecycle(); unlock() }, nil
 }

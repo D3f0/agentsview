@@ -17,8 +17,12 @@ import (
 
 func newDBCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "db",
-		Short:   "Maintain the local archive",
+		Use:   "db",
+		Short: "Maintain the local archive",
+		Long: "Maintain the persistent local SQLite archive. " +
+			"Keep the original archive when preparing a new image.",
+		Example: "  agentsview db compact --help\n" +
+			"  agentsview db migrate --help",
 		GroupID: groupData,
 		Args:    cobra.NoArgs,
 	}
@@ -26,6 +30,7 @@ func newDBCommand() *cobra.Command {
 	cmd.AddCommand(newDBStripCommand())
 	cmd.AddCommand(newDBMigrateCommand())
 	cmd.AddCommand(newDBAdoptMachineCommand())
+	cmd.AddCommand(newDBRepairProjectsCommand())
 	return cmd
 }
 

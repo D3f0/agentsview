@@ -470,13 +470,34 @@ func TestCopyFrictionStateFrom(t *testing.T) {
 	src := testDBAtPath(t, srcPath, "src")
 	require.NoError(t, src.SaveFrictionDigest(t.Context(), testDigest("2026-09-15", 1),
 		[]FrictionDigestSubject{{SubjectID: "s1", Date: "2026-09-15", SubjectKind: friction.SubjectSession}},
-		[]FrictionPatternUpdate{{Fingerprint: "fl1:a", Kind: "error", Title: "t", Date: "2026-09-15", SubjectID: "s1", Occurrences: 3}}))
+		[]FrictionPatternUpdate{
+			{Fingerprint: "fl1:a", Kind: "error", Title: "t", Date: "2026-09-15", SubjectID: "s1", Occurrences: 3},
+			{Fingerprint: "fl1:b", Kind: "error", Title: "u", Date: "2026-09-15", SubjectID: "s1", Occurrences: 1},
+		}))
+	link := FrictionIssueLink{
+		Fingerprint: "fl1:a", KataInstanceUID: "i", KataProjectUID: "p", IssueUID: "u",
+		QualifiedID: "agentsview#f001", Source: FrictionIssueSourceManual,
+		LinkedAt: time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC),
+	}
+	require.NoError(t, src.SaveFrictionIssueLink(t.Context(), link))
+	paused := FrictionFilingState{
+		Fingerprint: "fl1:b", State: FrictionFilingPaused, UpdatedAt: time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC),
+	}
+	require.NoError(t, src.SaveFrictionFilingState(t.Context(), paused))
 	src.Close()
 
 	dst := testDBAtPath(t, filepath.Join(dir, "dst.db"), "dst")
 	defer dst.Close()
-	require.NoError(t, dst.CopyFrictionStateFrom(srcPath))
-	require.NoError(t, dst.CopyFrictionStateFrom(srcPath), "copy is idempotent")
+	require.NoError(t, dst.CopyFrictionStateFrom(t.Context(), srcPath))
+	require.NoError(t, dst.CopyFrictionStateFrom(t.Context(), srcPath), "copy is idempotent")
+	rows, _, err := dst.ListFrictionPatterns(t.Context(), FrictionPatternFilter{Fingerprints: []string{"fl1:a"}})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, &link, rows[0].Issue, "a full resync keeps the Kata issue link")
+	rows, _, err = dst.ListFrictionPatterns(t.Context(), FrictionPatternFilter{Fingerprints: []string{"fl1:b"}})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, &paused, rows[0].Filing, "a full resync keeps a paused pattern paused")
 
 	got, err := dst.GetFrictionDigest(t.Context(), "2026-09-15")
 	require.NoError(t, err)
@@ -498,7 +519,7 @@ func TestCopyFrictionStateFromOldArchive(t *testing.T) {
 	src.Close()
 	dst := testDBAtPath(t, filepath.Join(dir, "dst.db"), "dst")
 	defer dst.Close()
-	require.NoError(t, dst.CopyFrictionStateFrom(srcPath))
+	require.NoError(t, dst.CopyFrictionStateFrom(t.Context(), srcPath))
 	assert.Equal(t, 0, countRows(t, dst, "friction_digests"))
 }
 
@@ -512,7 +533,7 @@ func TestCopyFrictionStateFromRejectsUsageOnly(t *testing.T) {
 	dst := testDBAtPath(t, filepath.Join(dir, "dst.db"), "dst")
 	t.Cleanup(func() { require.NoError(t, dst.Close()) })
 	dst.SetArchiveContent(config.ArchiveContentUsage)
-	require.ErrorIs(t, dst.CopyFrictionStateFrom(srcPath), ErrArchiveContentExcluded)
+	require.ErrorIs(t, dst.CopyFrictionStateFrom(t.Context(), srcPath), ErrArchiveContentExcluded)
 	assert.Equal(t, 0, countRows(t, dst, "friction_digests"))
 }
 

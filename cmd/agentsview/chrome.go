@@ -29,6 +29,8 @@ const chromeNativeHost = chromehost.NativeHost
 
 func newChromeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "chrome", Short: "Set up Claude.ai Sync in Chrome", GroupID: groupData}
+	cmd.Long = "Set up the Chrome native-host integration used by Claude.ai synchronization. " +
+		"Import conversations through the import command with the Claude.ai sync option."
 	cmd.AddCommand(&cobra.Command{Use: "setup", Short: "Install the Chrome native host", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		cfg, err := config.LoadMinimalFor(config.ScopeLocal)
 		if err != nil {
@@ -262,6 +264,6 @@ func warnStaleChromeLauncher(dataDir, socket string) {
 		return
 	}
 	if !chromehost.LauncherTargets(string(launcher), socket, runtime.GOOS) {
-		log.Printf("Chrome sync will not connect: %s points to a different socket than %s. Run `agentsview chrome setup`, then reload the extension at chrome://extensions", path, socket)
+		log.Printf("Chrome sync will not connect: %s points to a different socket than %s. Run `agentsview source chrome setup`, then reload the extension at chrome://extensions", path, socket)
 	}
 }
