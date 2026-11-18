@@ -80,10 +80,9 @@ tagged application source; changing automation must not change that source.
 
 `.github/workflows/bob-macos-release.yml` builds native binaries and wheels for
 Darwin, Linux, and Windows, each on AMD64 and ARM64. Maintainers select one OS
-and architecture per manual dispatch. Until the workflow is available on the
-default branch, its narrowly scoped push trigger builds only the missing Linux
-ARM64 and Windows AMD64/ARM64 distributions. A repeated push fails rather than
-replacing existing release assets.
+and architecture per manual dispatch and specify the existing Bob branch with
+`--ref upstream-v0.46.1-bob`. Pushes do not publish artifacts. Dispatch only
+missing platforms; a repeated platform fails rather than replacing assets.
 
 Linux uses pinned manylinux 2.28 containers on matching native runners and
 checks the binary's glibc requirements. macOS requires 13.0 and ad hoc signing.

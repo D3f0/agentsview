@@ -1,11 +1,6 @@
 name: Bob release artifacts
 
 on:
-  push:
-    branches: [upstream-v0.46.1-bob]
-    paths:
-      - '.github/workflows/bob-macos-release.yml'
-      - 'scripts/bob_release.py'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -36,13 +31,14 @@ concurrency:
 
 env:
   GOFLAGS: -trimpath
+  GOPROXY: 'https://proxy.golang.org|direct'
 
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'push' && '[{"os":"linux","arch":"arm64"},{"os":"windows","arch":"amd64"},{"os":"windows","arch":"arm64"}]' || format('[{{"os":"{0}","arch":"{1}"}}]', inputs.operating_system, inputs.architecture)) }}
+        include: ${{ fromJSON(format('[{{"os":"{0}","arch":"{1}"}}]', inputs.operating_system, inputs.architecture)) }}
     env:
       RELEASE_ARCH: ${{ matrix.arch }}
       RELEASE_OS: ${{ matrix.os }}
@@ -182,6 +178,7 @@ jobs:
 
       - name: Setup MinGW for Windows AMD64
         if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'amd64'
+        id: msys2
         uses: msys2/setup-msys2@v2.33.0
         with:
           msystem: MINGW64
@@ -192,10 +189,15 @@ jobs:
       - name: Select Windows AMD64 compiler
         if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'amd64'
         shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
-          'C:\msys64\mingw64\bin' >> $env:GITHUB_PATH
-          'C:\msys64\usr\bin' >> $env:GITHUB_PATH
-          'CC=C:/msys64/mingw64/bin/gcc.exe' >> $env:GITHUB_ENV
+          $bin = Join-Path $env:MSYS2_LOCATION 'mingw64\bin'
+          $cc = Join-Path $bin 'gcc.exe'
+          if (-not (Test-Path $cc)) { throw "Missing compiler: $cc" }
+          $bin >> $env:GITHUB_PATH
+          (Join-Path $env:MSYS2_LOCATION 'usr\bin') >> $env:GITHUB_PATH
+          "CC=$($cc.Replace('\', '/'))" >> $env:GITHUB_ENV
 
       - name: Install make for Windows ARM64
         if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'arm64'
