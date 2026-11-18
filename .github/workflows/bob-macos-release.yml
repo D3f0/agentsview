@@ -176,27 +176,26 @@ jobs:
           assert versions and all(tuple(map(int, version.split("."))) == (13, 0) for version in versions), versions
           PY
 
-      - name: Setup MinGW for Windows AMD64
-        if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'amd64'
-        id: msys2
-        uses: msys2/setup-msys2@v2.33.0
-        with:
-          msystem: UCRT64
-          update: false
-          install: mingw-w64-ucrt-x86_64-gcc make
-          path-type: inherit
-
-      - name: Select Windows AMD64 compiler
+      - name: Setup pinned UCRT GCC 15 for Windows AMD64
         if: env.RELEASE_OS == 'windows' && env.RELEASE_ARCH == 'amd64'
         shell: pwsh
         env:
-          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+          MINGW_VERSION: 15.2.0-rt_v13-rev0
+          MINGW_ARCHIVE: x86_64-15.2.0-release-posix-seh-ucrt-rt_v13-rev0.7z
+          MINGW_SHA256: 05b3361a3a3e20a5789db37fc2bb6a70d0b02e4667b5a31d9a6672ea40d22c69
         run: |
-          $bin = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin'
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'mingw-gcc15.7z'
+          Invoke-WebRequest -Uri "https://github.com/niXman/mingw-builds-binaries/releases/download/$env:MINGW_VERSION/$env:MINGW_ARCHIVE" -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:MINGW_SHA256) { throw 'GCC toolchain checksum mismatch' }
+          $destination = Join-Path $env:RUNNER_TEMP 'bob-gcc15'
+          7z x $archive "-o$destination" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'GCC toolchain extraction failed' }
+          $bin = Join-Path $destination 'mingw64\bin'
           $cc = Join-Path $bin 'gcc.exe'
           if (-not (Test-Path $cc)) { throw "Missing compiler: $cc" }
+          Copy-Item (Join-Path $bin 'mingw32-make.exe') (Join-Path $bin 'make.exe')
           $bin >> $env:GITHUB_PATH
-          (Join-Path $env:MSYS2_LOCATION 'usr\bin') >> $env:GITHUB_PATH
           "CC=$($cc.Replace('\', '/'))" >> $env:GITHUB_ENV
 
       - name: Install make for Windows ARM64

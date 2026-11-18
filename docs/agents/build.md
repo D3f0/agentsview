@@ -86,10 +86,11 @@ missing platforms; a repeated platform fails rather than replacing assets.
 
 Linux uses pinned manylinux 2.28 containers on matching native runners and
 checks the binary's glibc requirements. macOS requires 13.0 and ad hoc signing.
-Windows uses UCRT MinGW GCC on AMD64 to match DuckDB's prebuilt libraries and
-checksum-pinned llvm-mingw on ARM64. Both use the SQLite header from the exact
-bundled amalgamation. Windows archives are
-ZIP files containing `agentsview.exe`; other archives are gzip-compressed tar
+Windows AMD64 uses checksum-pinned GCC 15.2 with UCRT to match DuckDB's
+prebuilt libraries. GCC 16 removes the emulated TLS symbols those libraries
+require. Windows ARM64 uses checksum-pinned llvm-mingw. Both use the SQLite
+header from the exact bundled amalgamation. Windows archives are ZIP files
+containing `agentsview.exe`; other archives are gzip-compressed tar
 files. Every platform installs its wheel and checks native execution, server
 API/data versions, replica CLI contracts, and Bob parser/config/sync tests.
 
