@@ -169,4 +169,14 @@ def remote_build_wheel(
     ctx.run(f"ssh {shlex.quote(host)} rm -f {shlex.quote(remote_archive)}")
     _run_build_wheels(ctx, version, artifact_dir, output_dir, readme, False)
 
+@task()
+def run_upstream(ctx: Context, port: int = 8081, revision: str = "latest") -> None:
+    """Run upstream AgentsView with a separate data directory."""
+    command = ["uvx", f"agentsview@{revision}", "serve", "--port", str(port)]
+    ctx.run(
+        " ".join(shlex.quote(part) for part in command),
+        env={"AGENTSVIEW_DATA_DIR": str(Path("/tmp") / f"agentsview@{revision}")},
+    )
+
+
 script()

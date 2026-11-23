@@ -46,3 +46,27 @@ when the runner configuration changes.
   the lockfile URL.
 - To update kit-ui, change the commit hash in `frontend/package.json` and run
   `npm install`.
+
+## Building on another host
+
+Keep the checkout and linked worktrees in the same home-relative layout when
+mirroring them to a build host. Repair relocated Git worktree pointers with
+`git worktree repair --relative-paths`. Do not copy dependency caches or macOS
+virtual environments to Linux; install dependencies on the target host.
+
+Use a configured SSH alias and complete any required certificate login before
+connecting. The build host needs Go, Node.js, a C compiler, uv, and GitHub CLI
+access to the repositories used by the build. Follow the toolchain versions
+in `go.mod` and the frontend configuration. Run `make build-release`, check
+`./agentsview --version`, and smoke-test the intended session importer against
+isolated data before deployment.
+
+Keep release archives in `dist/` and Python wheels in `wheels/`. List the release
+helpers with `uv run --python 3.11 tasks.py --list`; they include `build-wheels`,
+`download-release-archives`, `smoke-wheel`, and `publish-wheels`. Use explicit
+repository and tag arguments. Do not publish or replace assets merely to verify
+access. Retain remote-only files and back up files before overwriting them.
+
+For a separate upstream instance, run
+`uv run --python 3.11 tasks.py run-upstream --port 8081 --revision latest`.
+It uses a separate temporary data directory instead of the normal archive.
