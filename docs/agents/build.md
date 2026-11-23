@@ -191,9 +191,9 @@ ClickHouse replica CLI commands; this does not replace backend database
 integration tests. Bob parser/config/sync regressions and the parsed-output
 data-version gate run before artifacts are uploaded.
 
-Windows smoke cleanup terminates the complete launcher process tree before
-removing its scratch archive. The wheel command starts a native child process;
-stopping only its Python launcher leaves that child holding the archive lock.
+The wheel launcher is checked with `--version`. Server smoke checks execute
+the installed wheel's native binary directly, so the harness waits for the
+process holding the scratch archive lock before removing that archive.
 
 macOS binaries must target 13.0, match the native CPU and pass ad-hoc signing
 verification; wheels use `macosx_13_0`. Linux uses digest-pinned manylinux 2.28
