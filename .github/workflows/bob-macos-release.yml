@@ -33,7 +33,7 @@ jobs:
       RELEASE_ARCH: ${{ matrix.arch }}
       RELEASE_OS: ${{ matrix.os }}
       WHEEL_ARCH: ${{ matrix.arch == 'amd64' && 'x86_64' || 'arm64' }}
-    runs-on: ${{ matrix.os == 'linux' && (matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest') || (matrix.os == 'windows' && (matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest') || (matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-26')) }}
+    runs-on: ${{ matrix.os == 'linux' && (matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest') || (matrix.os == 'windows' && (matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest') || (matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-15')) }}
     container: ${{ matrix.os == 'linux' && (matrix.arch == 'arm64' && 'quay.io/pypa/manylinux_2_28_aarch64@sha256:ca1f9d96910e129d38f999644a1f211a6cdb4147da9f19157a49d72c5092453a' || 'quay.io/pypa/manylinux_2_28_x86_64@sha256:853663dc8253b62be437bb52a5caecffd020792af4442f55d927d22e0ea795ae') || '' }}
     defaults:
       run:
@@ -276,6 +276,8 @@ jobs:
           python - <<'PY'
           import hashlib, importlib.metadata, json, os, subprocess, tarfile, tempfile, time, urllib.request, venv, zipfile
           from pathlib import Path
+          import runpy
+          stop_runtime_process = runpy.run_path('../automation/scripts/bob_release.py')['stop_runtime_process']
           smoke = Path(os.environ['RUNNER_TEMP']) / 'bob-wheel-smoke'
           venv.create(smoke, with_pip=True)
           scripts = smoke / ('Scripts' if os.name == 'nt' else 'bin')
@@ -324,8 +326,7 @@ jobs:
                       print(json.dumps(info))
                       return expected
                   finally:
-                      process.terminate()
-                      process.wait(timeout=30)
+                      stop_runtime_process(process)
 
           archive_runtime = runtime(str(native_binary))
           wheel_runtime = runtime(str(scripts / binary_name))

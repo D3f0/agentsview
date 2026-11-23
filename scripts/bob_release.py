@@ -31,6 +31,15 @@ def release_parameters(tag: str, source: str) -> dict[str, str]:
     return {"tag": tag, "source": source, "package": package}
 
 
+def stop_runtime_process(process: subprocess.Popen) -> None:
+    """Stop the smoke launcher and its native child before removing the archive."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=True)
+    else:
+        process.terminate()
+    process.wait(timeout=30)
+
+
 def platform_parameters(architecture: str, operating_system: str) -> dict[str, str]:
     if architecture not in ("arm64", "amd64") or operating_system not in ("darwin", "linux", "windows"):
         raise ValueError("Unsupported release platform")

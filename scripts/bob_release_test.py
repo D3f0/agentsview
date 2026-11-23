@@ -12,6 +12,36 @@ TAG = "v0.47.0-bob.2.2"
 SOURCE = "8823ce27240abacf3ddac4214db70a266941f82e"
 
 
+
+def test_windows_smoke_cleanup_stops_native_child_before_waiting(monkeypatch):
+    events = []
+
+    class Launcher:
+        pid = 123
+
+        def wait(self, timeout):
+            events.append(("wait", timeout))
+
+    monkeypatch.setattr(module.os, "name", "nt")
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **options: events.append((command, options)))
+    module.stop_runtime_process(Launcher())
+    assert events == [(["taskkill", "/PID", "123", "/T", "/F"], {"check": True}), ("wait", 30)]
+
+
+def test_posix_smoke_cleanup_terminates_and_waits(monkeypatch):
+    events = []
+
+    class Process:
+        def terminate(self):
+            events.append("terminate")
+
+        def wait(self, timeout):
+            events.append(("wait", timeout))
+
+    monkeypatch.setattr(module.os, "name", "posix")
+    module.stop_runtime_process(Process())
+    assert events == ["terminate", ("wait", 30)]
+
 def artifacts(path):
     package = "0.47.0+bob.2.2"
     data = {
