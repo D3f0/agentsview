@@ -49,7 +49,7 @@ func newBobIDESourceSet(roots []string) singleFileSourceSet {
 		}),
 		WithFileChangedPathClassifier(bobIDEClassifyPath),
 		WithFileLookup(func(_ context.Context, root, id string) (singleFileMatch, bool) {
-			return bobIDEClassifyPath(root, filepath.Join(root, "tasks", id, bobIDEHistory), false)
+			return bobIDEClassifyPath(root, filepath.Join(root, "tasks", strings.TrimPrefix(id, "ide:"), bobIDEHistory), false)
 		}),
 		WithFileFingerprint(bobIDEFingerprint),
 		WithFileParse(bobIDEParseFile),
@@ -237,7 +237,7 @@ func bobIDEParseFile(ctx context.Context, src singleFileSource, req ParseRequest
 		}
 	}
 	id := filepath.Base(filepath.Dir(src.Path))
-	events, peak, output, err := bobIDEUsage(ctx, uiPath, "bob:"+id)
+	events, peak, output, err := bobIDEUsage(ctx, uiPath, "bob:ide:"+id)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -245,7 +245,7 @@ func bobIDEParseFile(ctx context.Context, src singleFileSource, req ParseRequest
 		return nil, nil, nil
 	}
 	sort.SliceStable(messages, func(i, j int) bool { return messages[i].Timestamp.Before(messages[j].Timestamp) })
-	session := ParsedSession{ID: "bob:" + id, SourceSessionID: id, Agent: AgentBob, Machine: req.Machine, Project: req.Source.ProjectHint, SourceVersion: "bob-ide-task-v1", File: FileInfo{Path: src.Path, Hash: req.Fingerprint.Hash, Size: req.Fingerprint.Size, Mtime: req.Fingerprint.MTimeNS}}
+	session := ParsedSession{ID: "bob:ide:" + id, SourceSessionID: id, Agent: AgentBob, Machine: req.Machine, Project: req.Source.ProjectHint, SourceVersion: "bob-ide-task-v1", File: FileInfo{Path: src.Path, Hash: req.Fingerprint.Hash, Size: req.Fingerprint.Size, Mtime: req.Fingerprint.MTimeNS}}
 	if session.Project == "" {
 		session.Project = "bob"
 	}

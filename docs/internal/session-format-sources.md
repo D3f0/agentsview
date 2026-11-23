@@ -45,8 +45,9 @@ called out when it is not the product's own producer source.
   `tokensOut`, `cacheReads`, `cacheWrites`, `cost`, and `apiProtocol`. Each
   request becomes one usage event; its cache-inclusive input measures context,
   while output counts accumulate. Explicit zero costs are authoritative.
-- **IDE identity:** one source per task, keyed by the API history path. UI
-  changes resolve to that same source. UI events precede the finalized API
+- **IDE identity:** one source per task, keyed by the API history path, retaining
+  the existing `bob:ide:<task-id>` archive ID. UI changes resolve to that same
+  source. UI events precede the finalized API
   response timestamps in observed records, so their tool metadata enriches the
   next assistant response; API text is never replaced by a shorter UI rendering.
   API `[tool ...] Result:` carriers are tool/system messages, not human prompts;

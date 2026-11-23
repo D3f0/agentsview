@@ -38,7 +38,7 @@ func TestBobIDETranscriptAndCompanionIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, changed, 1)
 	assert.Equal(t, sources[0].Key, changed[0].Key)
-	found, ok, err := provider.FindSource(t.Context(), FindSourceRequest{FullSessionID: "bob:ide-task"})
+	found, ok, err := provider.FindSource(t.Context(), FindSourceRequest{FullSessionID: "bob:ide:ide-task"})
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, sources[0].Key, found.Key)
@@ -48,7 +48,7 @@ func TestBobIDETranscriptAndCompanionIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out.Results, 1)
 	r := out.Results[0].Result
-	assert.Equal(t, "bob:ide-task", r.Session.ID)
+	assert.Equal(t, "bob:ide:ide-task", r.Session.ID)
 	assert.Equal(t, "ide-task", r.Session.SourceSessionID)
 	assert.Equal(t, "Inspect the code", r.Session.FirstMessage)
 	assert.Equal(t, time.UnixMilli(1000).UTC(), r.Session.StartedAt)

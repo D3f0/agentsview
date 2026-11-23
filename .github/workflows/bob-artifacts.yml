@@ -41,7 +41,7 @@ jobs:
             wheel_tag: manylinux_2_28_aarch64
           - goos: darwin
             goarch: arm64
-            runner: macos-26
+            runner: macos-15
             wheel_tag: macosx_11_0_arm64
     defaults:
       run:
