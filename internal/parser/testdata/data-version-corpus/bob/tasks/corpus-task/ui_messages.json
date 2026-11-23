@@ -1,0 +1,26 @@
+[
+  {
+    "type": "say",
+    "say": "text",
+    "ts": 1767225601000,
+    "text": "Inspect fixture"
+  },
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": 1767225601500,
+    "text": "{\"tokensIn\": 100, \"tokensOut\": 20, \"cacheReads\": 30, \"cacheWrites\": 10, \"cost\": 0.01}"
+  },
+  {
+    "type": "ask",
+    "ask": "command",
+    "ts": 1767225601800,
+    "text": "cat fixture.txt"
+  },
+  {
+    "type": "say",
+    "say": "completion_result",
+    "ts": 1767225604000,
+    "text": "Finished."
+  }
+]

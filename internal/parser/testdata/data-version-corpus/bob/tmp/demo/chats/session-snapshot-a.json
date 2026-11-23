@@ -1,0 +1,65 @@
+{
+  "sessionId": "corpus-task",
+  "projectHash": "demo",
+  "startTime": "2026-01-01T00:00:00Z",
+  "lastUpdated": "2026-01-01T00:00:04Z",
+  "messages": [
+    {
+      "id": "cli-user",
+      "type": "user",
+      "content": "Inspect fixture.txt",
+      "timestamp": "2026-01-01T00:00:01Z"
+    },
+    {
+      "id": "cli-answer",
+      "type": "bob-shell",
+      "content": "**Inspect fixture**\nRead the source.</thinking>",
+      "timestamp": "2026-01-01T00:00:04Z",
+      "model": "premium",
+      "thoughts": [
+        {
+          "subject": "",
+          "description": "The file is ready."
+        },
+        {
+          "subject": "Inspect fixture",
+          "description": "Read"
+        },
+        {
+          "subject": "Inspect fixture",
+          "description": "Read the source."
+        }
+      ],
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "cached": 30,
+        "thoughts": 5,
+        "tool": 2,
+        "total": 157
+      },
+      "toolCalls": [
+        {
+          "id": "cli-read",
+          "name": "read_file",
+          "args": {
+            "file_path": "fixture.txt"
+          },
+          "status": "success",
+          "timestamp": "2026-01-01T00:00:03Z",
+          "result": [
+            {
+              "functionResponse": {
+                "id": "cli-read",
+                "name": "read_file",
+                "response": {
+                  "output": "fixture contents"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

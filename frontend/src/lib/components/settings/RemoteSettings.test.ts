@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { tick } from "svelte";
 
 import { initI18n } from "../../i18n/index.js";
+import { getAuthToken, setAuthToken } from "../../api/runtime.js";
 import { settings } from "../../stores/settings.svelte.js";
 import RemoteSettings from "./RemoteSettings.svelte";
 
@@ -27,6 +28,28 @@ afterEach(() => {
 });
 
 describe("RemoteSettings", () => {
+  it("does not send the local server token when testing another server", async () => {
+    setAuthToken("local-api-token");
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ version: "remote", api_version: 29 }), {
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const { getByLabelText, getByRole } = render(RemoteSettings);
+    const tokenInput = getByLabelText("Auth token") as HTMLInputElement;
+    expect(tokenInput.value).toBe("");
+    await fireEvent.input(getByLabelText("Server URL"), {
+      target: { value: "http://127.0.0.1:17438" },
+    });
+    await fireEvent.click(getByRole("button", { name: "Test connection" }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+    const [url, options] = fetchSpy.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:17438/api/v1/version");
+    expect(new Headers(options.headers).has("Authorization")).toBe(false);
+    expect(getAuthToken()).toBe("local-api-token");
+  });
+
   it.each([
     { apiVersion: 27, warningExpected: true },
     { apiVersion: 28, warningExpected: null },

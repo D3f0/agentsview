@@ -698,7 +698,11 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (183: prefer structured Antigravity user prompts over skill expansions.)
 // (184: prevent older binaries from overwriting prompt-derived PR links.)
 // (185: prevent older binaries from clearing Cursor account usage stamps on reparse.)
-const dataVersion = 185
+// (186: restore Bob 1.x CLI/IDE and Bob 2.x SQLite history in place. Reparse
+// Antigravity, Antigravity CLI and DeepSeek Harness too: older Bob forks reused
+// upstream versions 168/169, so those rows may have missed upstream repairs.
+// Source and persisted session identities are unchanged.)
+const dataVersion = 186
 
 const archiveOnlyVersionBase = 1 << 20
 

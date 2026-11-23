@@ -215,10 +215,15 @@ describe("skipToolGrouping preserves thinking in tool-only messages", () => {
     return (type: string) => visible.has(type);
   }
 
-  it("thinking+tool message is grouped as tool-group by default", () => {
-    const items = buildDisplayItems([thinkingToolMsg(0)]);
-    expect(items).toHaveLength(1);
-    expect(items[0]!.kind).toBe("tool-group");
+  it("keeps thinking and its tool controls in an individual assistant card", () => {
+    const items = buildDisplayItems([thinkingToolMsg(0), toolMsg(1)]);
+    expect(items.map((item) => [item.kind, item.ordinals])).toEqual([
+      ["message", [0]],
+      ["tool-group", [1]],
+    ]);
+    if (items[0]!.kind === "message") {
+      expect(hasVisibleSegments(items[0]!.message, (type) => type !== "tool")).toBe(true);
+    }
   });
 
   it("individual thinking+tool message stays visible when tool hidden but thinking visible", () => {

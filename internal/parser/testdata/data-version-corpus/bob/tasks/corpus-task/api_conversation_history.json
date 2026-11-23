@@ -1,0 +1,56 @@
+[
+  {
+    "role": "system",
+    "ts": 1767225600000,
+    "content": [
+      {
+        "type": "text",
+        "text": "Fixture instructions"
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "ts": 1767225601000,
+    "content": [
+      {
+        "type": "text",
+        "text": "<task>Inspect fixture</task>"
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "ts": 1767225602000,
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "Inspect the command."
+      },
+      {
+        "type": "text",
+        "text": "Checking.\n<execute_command><command>cat fixture.txt</command></execute_command>"
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "ts": 1767225603000,
+    "content": [
+      {
+        "type": "text",
+        "text": "[execute_command] Result:\nfixture contents"
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "ts": 1767225604000,
+    "content": [
+      {
+        "type": "text",
+        "text": "<attempt_completion><result>Finished.</result></attempt_completion>"
+      }
+    ]
+  }
+]

@@ -83,6 +83,7 @@ const (
 	AgentZed            AgentType = "zed"
 	AgentQwenPaw        AgentType = "qwenpaw"
 	AgentGptme          AgentType = "gptme"
+	AgentBob            AgentType = "bob"
 	AgentQoder          AgentType = "qoder"
 	AgentShelley        AgentType = "shelley"
 	AgentAider          AgentType = "aider"
@@ -1069,6 +1070,15 @@ var Registry = []AgentDef{
 		ConfigKey:   "gptme_dirs",
 		DefaultDirs: []string{".local/share/gptme/logs"},
 		IDPrefix:    "gptme:",
+		FileBased:   true,
+	},
+	{
+		Type:        AgentBob,
+		DisplayName: "Bob",
+		EnvVar:      "BOB_DIR",
+		ConfigKey:   "bob_dirs",
+		DefaultDirs: []string{".bob"},
+		IDPrefix:    "bob:",
 		FileBased:   true,
 	},
 	{

@@ -6605,6 +6605,38 @@ schemas keep their existing ordering behavior.
   complete discovery or replacement. An unfinished header also defers parsing
   and makes discovery nonauthoritative until the rewrite completes.
 
+## Bob (`bob`)
+
+- **Compatibility source:** Ported from the immutable
+  [v0.47.0-bob.2.2 source](https://github.com/D3f0/agentsview/tree/8823ce27240abacf3ddac4214db70a266941f82e)
+  onto official v0.48.0. This is parser compatibility evidence, not a new
+  observation of a Bob producer release.
+- **Format:** Bob 1.x CLI uses project-hash JSON chats under
+  `.bob/tmp/**/chats/`; legacy IDE history uses API/UI task companions under the
+  extension-storage `tasks/<task-id>/` tree. Bob 2.x uses shared SQLite
+  `.bob/db/bob.db`. The donor records native legacy evidence checked 2026-11-10
+  and Bob CLI 2.1.0 SQLite evidence checked 2026-11-09: schema version 18, task
+  `directory` and `env`, and a separate message `reasoning` field.
+- **Evidence:** `no-public-source`. No authoritative public producer schema was
+  identified in the donor inventory. Synthetic fixtures and regressions describe
+  the observed shapes; they are not producer artifacts.
+- **Usage and cost:** CLI messages retain input, output, cached, and reasoning
+  token categories. IDE API rows own message roles and text; UI companions
+  supplement ordered tools, results, diagnostics, and request usage. SQLite task
+  cost events own billing when present, avoiding double-counted model-priced
+  message costs. Context-only spend is not inferred token usage.
+- **AgentsView:** `internal/parser/bob.go`, `bob_legacy.go`, and `bob_ide.go`,
+  with colocated parser/config/sync regressions. Discovery defaults to `.bob`;
+  `BOB_DIR` or `[agents.bob] dirs` selects other roots. Legacy filename-derived
+  snapshot IDs stay separate from source task IDs, retaining disjoint resumed
+  segments. Structured streamed thoughts retain named reasoning and answer text;
+  raw function responses supply results when display text is absent.
+- **Archive contract:** API 29, data version 186. Existing upstream scopes 168
+  and 169 remain unchanged. Scope 186 reparses Bob, Antigravity, Antigravity
+  CLI, and DeepSeek Harness: older Bob forks reused 168/169 and could have
+  skipped those upstream provider corrections. Source-less history remains
+  archived. Older binaries cannot reopen an upgraded archive.
+
 [evener-source-1]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/transcript/transcript.go
 [evener-source-2]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/turn.go
 [evener-source-3]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/llm/types.go

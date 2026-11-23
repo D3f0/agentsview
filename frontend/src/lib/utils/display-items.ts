@@ -65,7 +65,7 @@ export function buildDisplayItems(
   for (const msg of messages) {
     const kind = isEmptyMessage(msg)
       ? "empty-group"
-      : groupTools && isToolOnly(msg)
+      : groupTools && !msg.has_thinking && isToolOnly(msg)
         ? "tool-group"
         : null;
     if (kind === null) {

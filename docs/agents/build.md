@@ -121,3 +121,106 @@ version in `tools/go.mod`. That config must match the kit golangci plugin in
   the lockfile URL.
 - To update kit-ui, change the commit hash in `frontend/package.json` and run
   `npm install`.
+
+## Bob fork prerelease artifacts
+
+The fork's `bob-macos-release.yml` workflow builds all six native platforms in
+one dispatch: macOS, Linux and Windows on ARM64 and AMD64. Its single publish
+job waits for every build, verifies all 24 files, uploads to a new draft and
+checks remote hashes before publishing a prerelease. It never replaces a tag or
+asset. Do not use upstream's release workflow, publish to PyPI, or ship desktop
+installers for this fork release.
+
+The supported new contract is `v0.48.0-bob.2.1`, package `0.48.0+bob.2.1`, API
+29 and data version 186. Source ancestry must include upstream v0.48.0 commit
+`14ab8dd347ec341f15ba0cf8ae519ee198d61557`. The exact source SHA is required at
+dispatch; there is no default commit. Automation can run from the release branch
+while the source checkout stays on the immutable tag. Both checkouts disable
+persisted credentials.
+
+1. Finish source review and verification in an isolated checkout. Prepare
+   pricing and embedded assets, then run the relevant contract checks:
+
+   ```bash
+   npm ci --prefix frontend
+   make pricing-snapshot ensure-embed-dir
+   CGO_ENABLED=1 go test -tags fts5 ./internal/parser ./internal/config ./internal/sync -run Bob -count=1
+   CGO_ENABLED=1 go test -tags fts5 ./internal/parser -run TestParsedOutputMatchesDataVersion -count=1
+   python -m pytest scripts/bob_release_test.py
+   ```
+
+1. Record the final source commit as `SOURCE_SHA`. Publish only the new release
+   branch and a new lightweight tag identifying that exact commit. Never move an
+   existing tag, force-push, change upstream `main`, or select artifacts from
+   another source. The workflow must already be visible on the fork's default
+   branch for GitHub to accept a dispatch.
+
+1. Dispatch from the release branch, not from a stale automation revision:
+
+   ```bash
+   gh workflow run bob-macos-release.yml --repo D3f0/agentsview \
+     --ref release/v0.48.0-bob.2.1 \
+     -f release_tag=v0.48.0-bob.2.1 -f source_sha="$SOURCE_SHA"
+   ```
+
+   Observe the resulting run with
+   `gh run watch "$RUN_ID" --exit-status --repo D3f0/agentsview`. Only the
+   successful six-platform run can publish. A failed upload leaves an
+   unpublished draft; do not overwrite its assets or retry publication without
+   investigating it. A new dispatch refuses an existing release, including a
+   draft.
+
+1. Download the published assets to a new scratch directory and independently
+   verify the complete inventory:
+
+   ```bash
+   mkdir artifacts
+   gh release download v0.48.0-bob.2.1 --repo D3f0/agentsview --dir artifacts
+   python scripts/bob_release.py verify-all --tag v0.48.0-bob.2.1 \
+     --source "$SOURCE_SHA" --directory artifacts
+   ```
+
+Each platform has a native archive, wheel, `BUILD` JSON and `SHA256SUMS`. Darwin
+ARM64 retains `BUILD.json` and `SHA256SUMS`; the other platforms use
+`BUILD-OS-ARCH.json` and `SHA256SUMS-OS-ARCH`. Native build jobs install the
+wheel, execute both packaged binaries with scratch archives on loopback, and
+check the full runtime version/source/API/data contract. The artifact gate
+checks wheel version and platform metadata, binary equality with the native
+archive and its recorded digest. Both binaries smoke-check PostgreSQL and
+ClickHouse replica CLI commands; this does not replace backend database
+integration tests. Bob parser/config/sync regressions and the parsed-output
+data-version gate run before artifacts are uploaded.
+
+macOS binaries must target 13.0, match the native CPU and pass ad-hoc signing
+verification; wheels use `macosx_13_0`. Linux uses digest-pinned manylinux 2.28
+containers and verifies the highest required GLIBC symbol is at most 2.28.
+Windows AMD64 uses checksummed UCRT GCC 15; ARM64 uses checksummed native
+llvm-mingw. Do not silently substitute compilers or newer platform baselines. Go
+follows the source `go.mod`; Node is pinned by the workflow. Builds omit the
+telemetry ingest key and use `DISTRIBUTION=d3f0`.
+
+Release notes include the exact source, all six `uvx --from` wheel URLs, Bob 1.x
+CLI/IDE and Bob 2.x SQLite compatibility, and the archive-copy upgrade limit.
+Keep the original archive backup untouched. Scope 186 reparses Bob, Antigravity,
+Antigravity CLI and DeepSeek Harness after the unchanged upstream 168/169
+scopes; older binaries cannot open an upgraded archive. PostgreSQL and
+ClickHouse remain supported; DuckDB was removed upstream.
+
+The same script can verify or mirror the legacy `v0.47.0-bob.2.2` release with
+its original source `8823ce27240abacf3ddac4214db70a266941f82e`, API 15 and data
+version 169. This is an explicit historical contract, not a metadata downgrade.
+Mirroring requires all six verified platforms and an already existing
+exact-source tag at the destination:
+
+```bash
+python scripts/bob_release.py mirror --tag "$TAG" --source "$SOURCE_SHA" \
+  --directory artifacts --source-repo D3f0/agentsview \
+  --target-repo "$TARGET_REPO"
+```
+
+Mirroring supports a separate GitHub or Enterprise repository, rewrites only
+release-download URLs and resumes only an identical unpublished draft. It
+verifies remote digests, downloading bytes when digests are unavailable, and
+refuses mismatched metadata, extra assets or overwrites. It never pushes
+branches or creates tags. New release publication always requires all six
+platforms; `append` is reserved for the historical release contract.

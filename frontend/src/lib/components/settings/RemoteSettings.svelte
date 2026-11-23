@@ -8,7 +8,6 @@
     ApiError,
     getServerUrl,
     setServerUrl,
-    getAuthToken,
     setAuthToken,
     isRemoteConnection,
   } from "../../api/runtime.js";
@@ -18,7 +17,8 @@
   import RestartAction from "./RestartAction.svelte";
 
   let serverUrl: string = $state(getServerUrl());
-  let tokenInput: string = $state(getAuthToken());
+  // Another server needs its own credential, never this server's local token.
+  let tokenInput: string = $state("");
   let testing: boolean = $state(false);
   let saving: boolean = $state(false);
   let testResults: { tone: "success" | "warning" | "error"; message: string }[] = $state([]);

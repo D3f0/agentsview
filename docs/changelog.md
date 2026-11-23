@@ -7,6 +7,28 @@ description: Release history for AgentsView
 The latest release is
 [0.47.0](https://github.com/kenn-io/agentsview/releases/tag/v0.47.0).
 
+## 0.48.0-bob.2.1
+
+This D3f0 prerelease combines official AgentsView 0.48.0 with Bob 1.x CLI and
+IDE history and Bob 2.x SQLite sessions. It is separate from the official
+AgentsView release.
+
+- Browse legacy Bob prompts, answers, expandable reasoning, tool calls, and
+  results alongside SQLite-backed Bob sessions. Persisted snapshots keep their
+  own identities even when they share a source task ID.
+- Upgrade existing archives without deleting source-less sessions, pins, labels,
+  or stars. The build uses API 29 and archive data version 186; older Bob builds
+  cannot reopen an upgraded archive. Keep an untouched backup before upgrading.
+  Readable Bob sources are reparsed in place.
+- Keep the local server's auth token out of the remote connection form.
+- Use the upstream 0.48.0 search, MCP, live-update, and performance
+  improvements. DuckDB replicas are no longer supported; use PostgreSQL or
+  ClickHouse.
+
+Native archives, Python wheels, checksum manifests, and build provenance are
+published through the
+[D3f0 release](https://github.com/D3f0/agentsview/releases/tag/v0.48.0-bob.2.1).
+
 ## Unreleased
 
 **New features**

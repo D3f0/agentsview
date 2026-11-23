@@ -695,6 +695,7 @@ keeps the default directories.
 | Antigravity CLI       | `~/.gemini/antigravity-cli/`                                                                                                                                     | SQLite `conversations/<uuid>.db`, `<uuid>.trajectory.json` sidecars, or encrypted `.pb` files plus `brain/` and `history.jsonl`                               |
 | Augure Code           | `~/.augure/sessions/`                                                                                                                                            | Codex-format JSONL per session                                                                                                                                |
 | Augure Desktop 3 beta | (platform-specific, see below)                                                                                                                                   | Hermes-format `state.db` and `sessions/` transcripts                                                                                                          |
+| Bob                   | `~/.bob/`; configure legacy IDE extension storage separately                                                                                                     | Bob 1.x CLI JSON and IDE task companions; Bob 2.x SQLite tasks in `db/bob.db`                                                                                 |
 | Claude Code           | `~/.claude/projects/`                                                                                                                                            | JSONL per session                                                                                                                                             |
 | OpenClaude            | `~/.openclaude/projects/`                                                                                                                                        | JSONL per session                                                                                                                                             |
 | Claude Cowork         | (platform-specific, see below)                                                                                                                                   | Claude Desktop cowork sessions                                                                                                                                |
@@ -1741,6 +1742,20 @@ reports the conflict and leaves the file untouched. Remove one of the entries.
 intact, though it rewrites TOML formatting and comments.
 
 AgentsView discovers, watches, and syncs each listed directory independently.
+
+Bob roots can combine CLI JSON history, legacy IDE tasks, and SQLite sessions:
+
+```toml
+[agents.bob]
+dirs = ["~/.bob", "~/bob-ide-storage"]
+```
+
+CLI chats live below `tmp/**/chats/`; SQLite tasks below `db/bob.db`. For legacy
+IDE history, point the second directory at the editor's Bob extension storage
+root, which contains `tasks/`, or directly at `tasks/`. API/UI transcript
+companions are required; optional `task_metadata.json` does not replace
+transcript or workspace evidence. `BOB_DIR` overrides the configured roots.
+Archive upgrades preserve persisted snapshot identities and source-less history.
 
 Pi also honors its native `PI_CODING_AGENT_DIR` and
 `PI_CODING_AGENT_SESSION_DIR` variables during local discovery: the agent home
