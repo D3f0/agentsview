@@ -12,6 +12,11 @@ export const KNOWN_AGENTS: readonly AgentMeta[] = [
   { name: "traex", color: "var(--accent-coral)", label: "TraeX" },
   { name: "augure-code", color: "var(--accent-lime)", label: "Augure Code" },
   {
+    name: "open-interpreter",
+    color: "var(--accent-pink)",
+    label: "Open Interpreter",
+  },
+  {
     name: "augure-desktop",
     color: "var(--accent-violet)",
     label: "Augure Desktop",
@@ -48,6 +53,7 @@ export const KNOWN_AGENTS: readonly AgentMeta[] = [
   },
   { name: "pi", color: "var(--accent-indigo)", label: "Pi" },
   { name: "stepcode", color: "var(--accent-indigo)", label: "StepCode" },
+  { name: "direct-api", color: "var(--accent-indigo)", label: "Direct API" },
   { name: "fx", color: "var(--accent-sky)", label: "fx" },
   { name: "tau", color: "var(--accent-amber)", label: "Tau" },
   {
@@ -79,6 +85,7 @@ export const KNOWN_AGENTS: readonly AgentMeta[] = [
   },
   { name: "iflow", color: "var(--accent-sky)", label: "iFlow" },
   { name: "junie", color: "var(--accent-lime)", label: "Junie" },
+  { name: "factory", color: "var(--accent-orange)", label: "Factory Droid" },
   { name: "kimi", color: "var(--accent-pink)", label: "Kimi" },
   {
     name: "kimi-work",
@@ -87,6 +94,7 @@ export const KNOWN_AGENTS: readonly AgentMeta[] = [
   },
   { name: "claude-ai", color: "var(--accent-violet)", label: "Claude.ai" },
   { name: "chatgpt", color: "var(--accent-lime)", label: "ChatGPT" },
+  { name: "grok-web", color: "var(--accent-black)", label: "Grok Web" },
   { name: "kiro", color: "var(--accent-lime)", label: "Kiro" },
   { name: "kiro-ide", color: "var(--accent-lime)", label: "Kiro IDE" },
   { name: "cortex", color: "var(--accent-cyan)", label: "Cortex Code" },
@@ -121,6 +129,7 @@ export const KNOWN_AGENTS: readonly AgentMeta[] = [
     label: "Charm Crush",
   },
   { name: "muse", color: "var(--accent-sky)", label: "Muse Code" },
+  { name: "muse-personal", color: "var(--accent-teal)", label: "Muse Personal" },
 ];
 
 const agentColorMap = new Map(KNOWN_AGENTS.map((a) => [a.name, a.color]));
@@ -151,6 +160,17 @@ export function agentColor(agent: string): string {
 
 function accentForeground(color: string): string {
   return accentForegroundMap.get(color) ?? "var(--accent-blue-foreground)";
+}
+
+/**
+ * The color an agent's name is written in: its accent's ink token
+ * (--accent-*-ink in app.css), which darkens light-theme accents too faint
+ * for text. Falls back to the accent itself if an accent has no ink yet.
+ */
+export function agentInk(agent: string): string {
+  const color = agentColor(agent);
+  const accent = /^var\((--accent-[a-z]+)\)$/.exec(color)?.[1];
+  return accent ? `var(${accent}-ink, ${color})` : color;
 }
 
 export function agentForeground(agent: string): string {

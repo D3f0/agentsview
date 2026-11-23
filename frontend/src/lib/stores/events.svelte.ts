@@ -1,4 +1,4 @@
-import type { EventSource } from "eventsource";
+import type { LiveSource } from "../api/client.js";
 import { watchEvents, type DataChangedEvent } from "../api/client.js";
 
 type Listener = (e: DataChangedEvent) => void;
@@ -10,7 +10,7 @@ type Listener = (e: DataChangedEvent) => void;
 export const EVENTS_STORE_HEAL_INTERVAL_MS = 60_000;
 
 class EventsStore {
-  private es: EventSource | null = null;
+  private es: LiveSource | null = null;
   // Use a Map keyed by a unique per-call token so two subscribes
   // of the same function reference are tracked independently and
   // each unsubscribe only removes its own entry.
@@ -21,24 +21,36 @@ class EventsStore {
   // OPEN — typical of PG serve mode's 503 but also possible for
   // false positives: slow startup, tunnel handshake, transient
   // network issue at mount time), stop rebuilding the connection.
-  // The flag clears when the subscriber set empties OR when the
-  // tab becomes visible again (giving a user-initiated retry
-  // window so false positives recover without a page reload).
+  // Clear the flag when the stream recovers, the subscriber set
+  // empties, or the tab becomes visible again.
   private permanentlyFailed = false;
   private available = false;
   private visibilityHandlerInstalled = false;
+  private resolveStartup!: () => void;
+  private startup = new Promise<void>((resolve) => {
+    this.resolveStartup = resolve;
+  });
+  private startupTimer: ReturnType<typeof setTimeout> | undefined;
+
+  whenReady(timeoutMs: number): Promise<void> {
+    this.startupTimer ??= setTimeout(() => this.settleStartup(), timeoutMs);
+    return this.startup;
+  }
+
+  settleStartup() {
+    this.resolveStartup();
+  }
 
   /** Enable or disable the live event stream for the current backend mode. */
   setAvailable(available: boolean) {
     this.available = available;
     if (!available) {
       this.close();
-      return;
-    }
-    if (this.listeners.size > 0) {
+    } else if (this.listeners.size > 0) {
       this.ensureOpen();
       this.ensureHealTimer();
     }
+    if (this.es === null) this.settleStartup();
   }
 
   /** Subscribe to every event. Returns unsubscribe. */
@@ -107,6 +119,7 @@ class EventsStore {
     if (this.es !== null && this.es.readyState !== CLOSED) {
       return;
     }
+    this.es?.close();
     this.es = watchEvents(
       (e) => {
         for (const fn of this.listeners.values()) fn(e);
@@ -124,8 +137,12 @@ class EventsStore {
     const es = this.es;
     es.addEventListener("events_ready", () => {
       if (this.es !== es) return;
+      this.permanentlyFailed = false;
+      this.ensureHealTimer();
       for (const fn of this.listeners.values()) fn({ scope: "sync" });
+      this.settleStartup();
     });
+    es.addEventListener("error", () => this.settleStartup());
   }
 
   private close() {
@@ -164,6 +181,7 @@ class EventsStore {
       }
       const CLOSED = 2;
       if (this.es !== null && this.es.readyState === CLOSED) {
+        this.es.close();
         this.es = null;
         this.ensureOpen();
       }

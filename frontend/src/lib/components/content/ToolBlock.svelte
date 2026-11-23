@@ -3,9 +3,11 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import type { DbToolCall as ToolCall } from "../../api/generated/index.js";
+  import DocbankMatches from "./DocbankMatches.svelte";
   import SubagentInline from "./SubagentInline.svelte";
-  import { extractToolParamMeta, type MetaTag } from "../../utils/tool-params.js";
-  import { parseToolInput, resolveToolInput } from "../../search/tool-input.js";
+  import ToolResultImages from "./ToolResultImages.svelte";
+  import { bashCommandText, toolCopyText } from "../../utils/tool-params.js";
+  import { parseToolInput, resolveToolInput, toolMetaTags } from "../../search/tool-input.js";
   import { searchBlock } from "../../search/session-block.svelte.js";
   import { searchCollapsed, toolSearchKey, type ToolSearchScope } from "../../search/component-state.js";
   import { inSessionSearch } from "../../stores/inSessionSearch.svelte.js";
@@ -13,6 +15,7 @@
   import { m } from "../../i18n/index.js";
   import { copyToClipboard } from "../../utils/clipboard.js";
   import { highlightCodeFences } from "../../utils/highlight-fences.js";
+  import { highlightToHtml } from "../../utils/syntax-highlight.js";
   import { ChevronRightIcon } from "../../icons.js";
   import { summarizeToolCall, summarizeToolCallPath } from "../../utils/tool-summary.js";
   import { CopyButton, SegmentedControl, type SegmentedControlOption } from "@kenn-io/kit-ui";
@@ -20,10 +23,14 @@
   import {
     displayFormattedToolResult,
     displayToolResult,
+    displayToolResultPreview,
+    toolResultImageSources,
   } from "../../utils/toolDisplay.js";
   import { ui } from "../../stores/ui.svelte.js";
 
   interface Props {
+    sessionId?: string;
+    ordinal?: number;
     content: string;
     label?: string;
     toolCall?: ToolCall;
@@ -36,66 +43,9 @@
     inGroup?: boolean;
   }
 
-  type Params = Record<string, unknown>;
-  const INTERNAL_COPY_PARAMS = new Set(["agent__intent", "_i"]);
-
-  function stringifyCopyValue(value: unknown): string {
-    return typeof value === "string" ? value : JSON.stringify(value);
-  }
-
-  function copyParamLines(params: Params, excluded = new Set<string>()): string[] {
-    const lines: string[] = [];
-    for (const [key, value] of Object.entries(params)) {
-      if (INTERNAL_COPY_PARAMS.has(key) || excluded.has(key)) continue;
-      if (value == null || value === "") continue;
-      lines.push(`${key}: ${stringifyCopyValue(value)}`);
-    }
-    return lines;
-  }
-
-  function generateInputCopyContent(toolName: string, params: Params): string | null {
-    if (toolName === "Task" || toolName === "Agent") return null;
-    if (toolName === "Bash" || toolName === "run_command") {
-      const cmd = params.command ?? params.cmd;
-      if (cmd != null) {
-        const lines: string[] = [];
-        if (params.description) lines.push(`description: ${String(params.description)}`);
-        lines.push(`command: ${String(cmd)}`);
-        lines.push(...copyParamLines(params, new Set(["description", "command", "cmd"])));
-        return lines.join("\n");
-      }
-    }
-    const isEdit = toolName === "Edit" || params.command === "strReplace";
-    if (isEdit) {
-      const oldStr = params.old_string ?? params.old_str ?? params.oldString ?? params.oldStr;
-      const newStr = params.new_string ?? params.new_str ?? params.newString ?? params.newStr;
-      const diffText = params.diff;
-      if (typeof diffText === "string" && diffText) return diffText;
-      const patchText = params.patch ?? params.patch_text ?? params.patchText;
-      if (typeof patchText === "string" && patchText) return patchText;
-      if (oldStr != null || newStr != null) {
-        const oldLines = String(oldStr ?? "").split("\n");
-        const newLines = String(newStr ?? "").split("\n");
-        const lines = [`@@ -1,${oldLines.length} +1,${newLines.length} @@`];
-        for (const line of oldLines) lines.push(`-${line}`);
-        for (const line of newLines) lines.push(`+${line}`);
-        return lines.join("\n");
-      }
-    }
-    if (toolName === "Write" || (toolName === "write" && params.command === "create")) {
-      if (params.content != null) {
-        const text = String(params.content);
-        if (!text) return "(empty file)";
-        const lines = text.split("\n");
-        return `@@ -0,0 +1,${lines.length} @@\n${lines.map(line => `+${line}`).join("\n")}`;
-      }
-    }
-    const lines = copyParamLines(params);
-    return lines.length ? lines.join("\n") : null;
-  }
-
-  let { content, label, toolCall, searchScope, durationLabel,
-    isSlow = false, isRunning = false, inGroup = false }: Props = $props();
+  let { sessionId = "", ordinal = 0, content, label, toolCall, searchScope, durationLabel,
+    isSlow = false, isRunning = false,
+    inGroup = false }: Props = $props();
   let userCollapsed = $state(true);
   let userOutputCollapsed = $state(true);
   let userHistoryCollapsed = $state(true);
@@ -108,13 +58,16 @@
   let outputCopied = $state(false);
   let outputMode: "raw" | "formatted" = $state("raw");
   // The index uses source text. Temporarily expose that same representation
-  // during find without overwriting the user's formatted-output preference.
-  let rawOutputForSearch = $derived(searchScope !== undefined && inSessionSearch.isActive);
+  // during find without overwriting the user's formatted-output preference,
+  // and show shortened field values in full.
+  let sourceTextForSearch = $derived(searchScope !== undefined && inSessionSearch.isActive);
   let inputCopyTimer: ReturnType<typeof setTimeout> | undefined;
   let outputCopyTimer: ReturnType<typeof setTimeout> | undefined;
 
   let inputKey = $derived(toolSearchKey(searchScope, "tool-input"));
   let outputKey = $derived(toolSearchKey(searchScope, "tool-output"));
+  let metaTags = $derived(toolMetaTags(toolCall));
+  let metaKeys = $derived((metaTags ?? []).map((_, index) => toolSearchKey(searchScope, "tool-meta", index)));
   // Empty timing marks only carry timestamps; keep each event's raw index so search keys still match.
   let resultEvents = $derived((toolCall?.result_events ?? [])
     .map((event, rawIndex) => ({ ...event, content: displayToolResult(event.content), rawIndex }))
@@ -124,9 +77,12 @@
   let currentOutput = $derived(inSessionSearch.isCurrentBlock(outputKey));
   let currentHistory = $derived(historyKeys.some((key) => inSessionSearch.isCurrentBlock(key)));
   let historyCount = $derived(historyKeys.reduce((count, key) => count + inSessionSearch.countForBlock(key), 0));
-  let matchCount = $derived(inSessionSearch.countForBlock(inputKey) + inSessionSearch.countForBlock(outputKey) + historyCount);
+  let currentMeta = $derived(metaKeys.some((key) => inSessionSearch.isCurrentBlock(key)));
+  let metaCount = $derived(metaKeys.reduce((count, key) => count + inSessionSearch.countForBlock(key), 0));
+  let matchCount = $derived(inSessionSearch.countForBlock(inputKey) + inSessionSearch.countForBlock(outputKey)
+    + historyCount + metaCount);
   let collapsed = $derived(searchCollapsed(userCollapsed,
-    currentInput || currentOutput || currentHistory, inSessionSearch.navigationRevision, overrideSeq));
+    currentMeta || currentInput || currentOutput || currentHistory, inSessionSearch.navigationRevision, overrideSeq));
   let outputCollapsed = $derived(searchCollapsed(userOutputCollapsed,
     currentOutput, inSessionSearch.navigationRevision, outputOverrideSeq));
   let historyCollapsed = $derived(searchCollapsed(userHistoryCollapsed,
@@ -141,18 +97,35 @@
     displayFormattedToolResult(toolCall?.result_content ?? ""),
   );
 
+  let imageSources = $derived(toolResultImageSources(toolCall?.result_content ?? ""));
+  // A generated image is the call's whole point, so it stays in view while
+  // the block is collapsed; other tools show their images when expanded.
+  let showImages = $derived(imageSources.length > 0
+    && (!collapsed || toolCall?.tool_name === "image_generation"));
   let outputPreviewLine = $derived.by(() => {
-    const rc = outputContent;
+    const rc = displayToolResultPreview(toolCall?.result_content ?? "");
     if (!rc) return "";
     const nl = rc.indexOf("\n");
     return (nl === -1 ? rc : rc.slice(0, nl)).slice(0, 100);
   });
   let historyPreviewLine = $derived.by(() => {
     const last = resultEvents[resultEvents.length - 1];
-    return last ? `${last.status}: ${last.content.split("\n")[0]}`.slice(0, 100) : "";
+    if (!last) return "";
+    const stored = toolCall?.result_events?.[last.rawIndex]?.content ?? "";
+    return `${last.status}: ${displayToolResultPreview(stored).split("\n")[0]}`.slice(0, 100);
   });
   let inputParams = $derived(parseToolInput(toolCall?.input_json).params);
+  let imageAlt = $derived.by(() => {
+    const prompt = inputParams?.revisedPrompt ?? inputParams?.revised_prompt;
+    return typeof prompt === "string" && prompt.trim() ? prompt : m.tool_block_image_alt();
+  });
   let structuredSummary = $derived(toolCall ? summarizeToolCall(toolCall) : null);
+  // Split a "path (+N -M)" edit summary so the counts can take diff colors;
+  // the rendered text stays identical.
+  let summaryDiffStat = $derived.by(() => {
+    const match = structuredSummary?.match(/^(.*) \((\+\d+)(?: (-\d+))?\)$/);
+    return match ? { path: match[1], add: match[2], del: match[3] ?? null } : null;
+  });
   let structuredSummaryTitle = $derived(toolCall ? summarizeToolCallPath(toolCall) : null);
   const outputModeOptions = $derived<SegmentedControlOption[]>([
     { value: "raw", label: m.tool_block_raw() },
@@ -160,46 +133,19 @@
   ]);
   let legacyPreview = $derived(content.split("\n")[0]?.slice(0, 100) ?? "");
 
-  let taskMeta = $derived.by(() => {
-    if (!isTask || !inputParams) return null;
-    const meta: { label: string; value: string }[] = [];
-    if (inputParams.subagent_type) meta.push({ label: "type", value: String(inputParams.subagent_type) });
-    if (inputParams.description) meta.push({ label: "description", value: String(inputParams.description) });
-    return meta.length ? meta : null;
-  });
-  let taskCreateMeta = $derived.by(() => {
-    if (toolCall?.tool_name !== "TaskCreate" || !inputParams) return null;
-    const meta: { label: string; value: string }[] = [];
-    if (inputParams.subject) meta.push({ label: "subject", value: String(inputParams.subject) });
-    if (inputParams.description) meta.push({ label: "description", value: String(inputParams.description) });
-    return meta.length ? meta : null;
-  });
-  let taskUpdateMeta = $derived.by(() => {
-    if (toolCall?.tool_name !== "TaskUpdate" || !inputParams) return null;
-    const meta: { label: string; value: string }[] = [];
-    if (inputParams.taskId) meta.push({ label: "task", value: `#${inputParams.taskId}` });
-    if (inputParams.status) meta.push({ label: "status", value: String(inputParams.status) });
-    if (inputParams.subject) meta.push({ label: "subject", value: String(inputParams.subject) });
-    return meta.length ? meta : null;
-  });
-  let toolParamMeta = $derived.by(() => {
-    if (!inputParams || !toolCall) return null;
-    return extractToolParamMeta(toolCall.tool_name, inputParams, toolCall.category);
-  });
-  let metaTags = $derived<MetaTag[] | null>(taskMeta ?? taskCreateMeta ?? taskUpdateMeta ?? toolParamMeta ?? null);
-
   // Display and search share this source; copy retains the complete payload.
   let resolvedInput = $derived(resolveToolInput(toolCall, content));
   let fallbackContent = $derived(resolvedInput.fallbackContent);
   let isTask = $derived(resolvedInput.isTask);
   let taskPrompt = $derived(resolvedInput.taskPrompt);
-  let inputCopyFallback = $derived.by(() => {
-    if (content || !inputParams || !toolCall) return null;
-    const cat = toolCall.category || null;
-    const result = cat ? generateInputCopyContent(cat, inputParams) : null;
-    return result ?? generateInputCopyContent(toolCall.tool_name, inputParams);
-  });
-  let inputCopySource = $derived(taskPrompt ?? inputCopyFallback ?? resolvedInput.text);
+  let inputCopyPayload = $derived(inputParams && toolCall
+    ? toolCopyText(toolCall.tool_name, toolCall.category, inputParams) : null);
+  let inputCopySource = $derived(taskPrompt ?? inputCopyPayload ?? resolvedInput.text);
+  // A Bash body built from input_json is the command alone; show it as code.
+  let isCommand = $derived(fallbackContent !== null && inputParams !== null && !!toolCall
+    && ["Bash", "run_command"].includes(toolCall.category || toolCall.tool_name)
+    && bashCommandText(inputParams) !== null);
+  let commandHtml = $state<string | null>(null);
   let subagentSessionId = $derived(isTask ? toolCall?.subagent_session_id ?? null : null);
   const CONTENT_PREVIEW_LINES = 20;
   let displayContent = $derived.by(() => {
@@ -214,6 +160,28 @@
     ? m.tool_block_show_all_lines({ count: displayContent.totalLines ?? 0 }) : "");
   let isDiff = $derived(resolvedInput.text.startsWith("--- a/") || resolvedInput.text.startsWith("@@"));
   let diffLines = $derived(isDiff ? resolvedInput.text.split("\n") : []);
+  // The file fields and a leading @@ hunk header share one muted strip.
+  // While in-session search runs, the diff keeps its exact source lines so
+  // match offsets stay true, as meta display values do.
+  let mergeHunk = $derived(
+    !!metaTags && !taskPrompt && !!fallbackContent && !sourceTextForSearch
+      && (diffLines[0]?.startsWith("@@") ?? false),
+  );
+  let bodyDiffLines = $derived(mergeHunk ? diffLines.slice(1) : diffLines);
+
+  $effect(() => {
+    const source = displayContent.text;
+    const highlight = isCommand && !collapsed;
+    commandHtml = null;
+    if (!highlight) return;
+    let cancelled = false;
+    void highlightToHtml(source, "bash", { lightTheme: true }).then((html) => {
+      if (!cancelled) commandHtml = html;
+    }).catch(() => {
+      // Keep the plain command if the optional syntax highlighter fails.
+    });
+    return () => { cancelled = true; };
+  });
 
   async function handleInputCopy(event: MouseEvent) {
     event.stopPropagation();
@@ -249,12 +217,12 @@
         contentOverrideSeq = inSessionSearch.navigationRevision;
       }
     }}>
-      <span class="tool-chevron" class:open={!collapsed}><ChevronRightIcon size="10" strokeWidth="2.4" aria-hidden="true" /></span>
+      <span class="tool-chevron" class:open={!collapsed}><ChevronRightIcon size="12" strokeWidth="2.2" aria-hidden="true" /></span>
       {#if label}<span class="tool-label">{label}</span>{/if}
       <SearchMatchCount count={matchCount} />
       {#if structuredSummary}
         <span class="tool-preview" title={structuredSummaryTitle ?? undefined}>
-          {structuredSummary}{#if structuredSummaryTitle}<span class="kit-sr-only">{structuredSummaryTitle}</span>{/if}
+          {#if summaryDiffStat}<span class="summary-path">{summaryDiffStat.path}</span> (<span class="stat-add">{summaryDiffStat.add}</span>{#if summaryDiffStat.del}{" "}<span class="stat-del">{summaryDiffStat.del}</span>{/if}){:else}{structuredSummary}{/if}{#if structuredSummaryTitle}<span class="kit-sr-only">{structuredSummaryTitle}</span>{/if}
         </span>
       {:else if collapsed && legacyPreview}<span class="tool-preview">{legacyPreview}</span>{/if}
       {#if durationLabel}<span class="tool-duration" class:slow={isSlow} class:running={isRunning}>{durationLabel}</span>{/if}
@@ -265,23 +233,28 @@
         title={m.tool_block_copy_input()} copiedTitle={m.tool_block_copied_input()} onclick={handleInputCopy} />
     {/if}
   </div>
+  {#if showImages}<ToolResultImages sources={imageSources} alt={imageAlt} />{/if}
   {#if !collapsed}
     {#if metaTags}
-      <div class="tool-meta">
-        {#each metaTags as { label: metaLabel, value, displayValue }}
+      <div class="tool-meta" class:diff-strip={isDiff && !!fallbackContent && !taskPrompt}>
+        {#each metaTags as { label: metaLabel, value, displayValue }, tagIndex}
           <span class="meta-tag"><span class="meta-label">{metaLabel}:</span>
-            {#if displayValue}<span class="meta-value" title={value}>{displayValue}<span class="kit-sr-only">{value}</span></span>
-            {:else}<span>{value}</span>{/if}
+            {#if displayValue && !sourceTextForSearch}<span class="meta-value" title={value}>{displayValue}<span class="kit-sr-only">{value}</span></span>
+            {:else}<span {@attach searchBlock(metaKeys[tagIndex])}>{value}</span>{/if}
           </span>
-        {/each}
+        {/each}{#if mergeHunk}<span class="diff-strip-hunk">{diffLines[0]}</span>{/if}
       </div>
     {/if}
     {#if taskPrompt}
       <pre class="tool-content" {@attach searchBlock(inputKey)}>{taskPrompt}</pre>
     {:else if fallbackContent && isDiff}
-      <pre class="diff-view" {@attach searchBlock(inputKey)}>{#each diffLines as line, index}<span class="diff-line {line.startsWith('@@') ? 'diff-hunk' : line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-del' : 'diff-ctx'}">{line}</span>{index < diffLines.length - 1 ? "\n" : ""}{/each}</pre>
+      <pre class="diff-view" class:after-strip={!!metaTags} {@attach searchBlock(inputKey)}>{#each bodyDiffLines as line, index}<span class="diff-line {line.startsWith('@@') ? 'diff-hunk' : line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-del' : 'diff-ctx'}">{line}</span>{index < bodyDiffLines.length - 1 ? "\n" : ""}{/each}</pre>
     {:else if displayContent.text}
-      <pre class="tool-content" {@attach searchBlock(inputKey)}>{displayContent.text}</pre>
+      {#if isCommand}
+        <pre class="tool-content tool-command" {@attach searchBlock(inputKey)}><code>{#if commandHtml !== null}{@html commandHtml}{:else}{displayContent.text}{/if}</code></pre>
+      {:else}
+        <pre class="tool-content" {@attach searchBlock(inputKey)}>{displayContent.text}</pre>
+      {/if}
       {#if displayContent.isLong}
         <button class="show-more-btn" onclick={(e) => {
           e.stopPropagation();
@@ -291,7 +264,7 @@
       {/if}
     {/if}
     {#if toolCall?.result_content}
-      <div class="output-header-row">
+      <div class="output-header-row" class:with-hint={!outputCollapsed && !!sourceTextForSearch}>
         <button class="output-header" aria-expanded={!outputCollapsed} onclick={(e) => {
           e.stopPropagation();
           const sel = window.getSelection();
@@ -299,13 +272,13 @@
           userOutputCollapsed = !outputCollapsed;
           outputOverrideSeq = inSessionSearch.navigationRevision;
         }}>
-          <span class="tool-chevron" class:open={!outputCollapsed}><ChevronRightIcon size="10" strokeWidth="2.4" aria-hidden="true" /></span>
+          <span class="tool-chevron" class:open={!outputCollapsed}><ChevronRightIcon size="12" strokeWidth="2.2" aria-hidden="true" /></span>
           <span class="output-label">{m.tool_block_output()}</span>
           <SearchMatchCount searchKey={outputKey} />
           {#if outputCollapsed && outputPreviewLine}<span class="tool-preview">{outputPreviewLine}</span>{/if}
         </button>
-        {#if !outputCollapsed && rawOutputForSearch}
-          <span class="search-output-hint">{m.session_find_raw_output()}</span>
+        {#if !outputCollapsed && sourceTextForSearch}
+          <span class="search-output-hint" title={m.session_find_raw_output()}>{m.session_find_raw_output()}</span>
         {:else if !outputCollapsed}
           <SegmentedControl class="output-mode" options={outputModeOptions} value={outputMode}
             ariaLabel={m.tool_block_output_mode()} onchange={(next) => (outputMode = next as "raw" | "formatted")} />
@@ -315,7 +288,7 @@
           title={m.tool_block_copy_output()} copiedTitle={m.tool_block_copied_output()} onclick={handleOutputCopy} />
       </div>
       {#if !outputCollapsed}
-        {#if outputMode === "formatted" && !rawOutputForSearch}
+        {#if outputMode === "formatted" && !sourceTextForSearch}
           <div class="tool-content output-content formatted-output"
             {@attach searchBlock(outputKey)} use:highlightCodeFences={{ content: formattedOutputContent }}
             use:loadAssetImages={formattedOutputContent}>
@@ -326,6 +299,7 @@
         {/if}
       {/if}
     {/if}
+    {#if toolCall}<DocbankMatches {sessionId} {ordinal} toolUseId={toolCall.tool_use_id ?? ""} callIndex={toolCall.call_index ?? 0} />{/if}
     {#if resultEvents.length > 0}
       <button class="history-header" aria-expanded={!historyCollapsed} onclick={(e) => {
         e.stopPropagation();
@@ -334,7 +308,7 @@
         userHistoryCollapsed = !historyCollapsed;
         historyOverrideSeq = inSessionSearch.navigationRevision;
       }}>
-        <span class="tool-chevron" class:open={!historyCollapsed}><ChevronRightIcon size="10" strokeWidth="2.4" aria-hidden="true" /></span>
+        <span class="tool-chevron" class:open={!historyCollapsed}><ChevronRightIcon size="12" strokeWidth="2.2" aria-hidden="true" /></span>
         <span class="output-label">{m.tool_block_history()}</span>
         <SearchMatchCount count={historyCount} />
         {#if historyCollapsed && historyPreviewLine}<span class="tool-preview">{historyPreviewLine}</span>{/if}
@@ -349,6 +323,7 @@
                 {#if event.agent_id}<span class="meta-tag"><span class="meta-label">{m.tool_block_agent_label()}</span>{event.agent_id}</span>{/if}
               </div>
               <pre class="tool-content output-content history-content" {@attach searchBlock(historyKeys[eventIndex])}>{event.content}</pre>
+              {#if toolCall}<DocbankMatches {sessionId} {ordinal} toolUseId={toolCall.tool_use_id ?? ""} callIndex={toolCall.call_index ?? 0} eventIndex={event.event_index} />{/if}
             </div>
           {/each}
         </div>
@@ -359,9 +334,15 @@
 </div>
 
 <style>
-  .search-output-hint { color: var(--text-muted); font-size: 10px; margin-inline-start: auto; }
+  /* The hint gives way first in a narrow pane, so the output label,
+     match count, and copy button keep their room; its title keeps the
+     full text. */
+  .search-output-hint {
+    color: var(--text-muted); font-size: 11px; white-space: nowrap; flex: 0 100 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; margin-inline: auto 8px;
+  }
   .tool-block {
-    border-left: 2px solid var(--accent-amber);
+    border-left: var(--role-tool-bar-width) var(--role-tool-bar-style) var(--role-tool-accent);
     background: var(--tool-bg);
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
     margin: 0;
@@ -369,8 +350,12 @@
   .tool-block.in-group { margin: 0; border-left: none; border-radius: 0; }
   .tool-header-row, .output-header-row { display: flex; align-items: center; min-width: 0; }
   .output-header-row { border-top: 1px solid var(--border-muted); }
+  /* Tool and parallel groups set --tool-row-pad-block and
+     --tool-row-copy-trim so a run of calls packs into 24px rows: the
+     hover-only copy button is 26px tall, so the trim keeps it from
+     setting the row height. */
   .tool-header {
-    display: flex; align-items: center; gap: 6px; padding: 6px 10px; width: 100%;
+    display: flex; align-items: center; gap: 8px; padding: var(--tool-row-pad-block, 4px) 10px; width: 100%;
     text-align: left; font-size: 12px; color: var(--text-secondary); min-width: 0;
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0; transition: background 0.1s;
     user-select: text; flex: 1 1 auto;
@@ -378,18 +363,28 @@
   .tool-header:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
   .tool-chevron { display: inline-flex; align-items: center; transition: transform 0.15s; flex-shrink: 0; color: var(--text-muted); }
   .tool-chevron.open { transform: rotate(90deg); }
-  .tool-label { font-family: var(--font-mono); font-weight: 500; font-size: 11px; color: var(--accent-amber); white-space: nowrap; flex-shrink: 0; }
-  .tool-preview { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .tool-label { font-family: var(--font-mono); font-weight: 500; font-size: 11px; color: var(--role-tool-ink); white-space: nowrap; flex-shrink: 0; }
+  /* Light theme: the shared tool ink is an olive near 4.2:1 on the tool
+     wash; a deeper amber keeps the name warm and above 4.5:1. */
+  :global(:root:not(.dark)) .tool-label { color: color-mix(in srgb, var(--role-tool-accent) 65%, var(--text-primary)); }
+  /* Dark: at medium weight the shared ink reads as beige, so names take a
+     larger share of the tool amber, still below the full accent. */
+  :global(:root.dark) .tool-label { color: color-mix(in srgb, var(--role-tool-accent) 60%, var(--text-secondary)); }
+  .summary-path { color: var(--text-primary); }
+  .stat-add { color: color-mix(in srgb, var(--accent-green) 75%, var(--text-primary)); }
+  .stat-del { color: color-mix(in srgb, var(--accent-red) 75%, var(--text-primary)); }
+  .tool-preview { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .tool-duration {
-    font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); padding: 2px 7px;
-    background: color-mix(in srgb, var(--text-primary) 4%, transparent);
-    border: 1px solid color-mix(in srgb, var(--text-primary) 4%, transparent);
-    border-radius: var(--radius-sm); flex-shrink: 0; margin-left: auto;
+    /* Plain text by default; only slow and running durations get a fill. */
+    font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); padding: 0 6px;
+    font-variant-numeric: tabular-nums; border: 1px solid transparent;
+    background: transparent;
+    border-radius: var(--radius-sm); flex-shrink: 0; margin-left: auto; margin-right: 6px; min-width: 56px; text-align: right;
   }
   .tool-duration.slow { color: var(--slow-fg); background: var(--slow-bg); border-color: var(--slow-ring); }
   .tool-duration.running { color: var(--running-fg); background: var(--running-bg); border-color: var(--running-ring); animation: duration-pulse 1.6s ease-in-out infinite; }
-  .tool-meta { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px; border-top: 1px solid var(--border-muted); }
-  .meta-tag { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); background: var(--bg-inset); padding: 2px 6px; border-radius: var(--radius-sm); }
+  .tool-meta { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); padding: 2px 14px; border-top: 1px solid color-mix(in srgb, var(--border-muted) 55%, transparent); }
+  .meta-tag { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); padding: 1px 0; }
   .meta-label { color: var(--text-secondary); font-weight: 500; }
   .show-more-btn {
     display: block; width: 100%; padding: 4px 14px; font-family: var(--font-mono); font-size: 11px;
@@ -397,11 +392,26 @@
   }
   .show-more-btn:hover { background: var(--bg-surface-hover); }
   .tool-content { padding: 8px 14px 10px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); line-height: 1.5; overflow-x: auto; border-top: 1px solid var(--border-muted); }
+  .tool-command { background: var(--code-bg); color: var(--code-text); }
+  /* Dark keeps the dark code band with catppuccin token colors. Light uses
+     a light surface with github-light token colors, which hold 4.5:1 on
+     white, instead of a near-black band inside a pale tool row. */
+  .tool-command code { font-family: inherit; }
+  .tool-command code :global(span) { font-style: var(--shiki-dark-font-style, inherit); }
+  :global(:root:not(.dark)) .tool-command { background: var(--bg-surface); color: var(--text-primary); }
+  :global(:root:not(.dark)) .tool-command code :global(span) {
+    color: var(--shiki-light, inherit) !important;
+    font-style: var(--shiki-light-font-style, inherit);
+  }
   .output-header {
     display: flex; align-items: center; gap: 6px; padding: 5px 10px; width: 100%; text-align: left;
     font-size: 12px; color: var(--text-secondary); min-width: 0; transition: background 0.1s; user-select: text; flex: 1 1 auto;
   }
   :global(.tool-block .output-mode) { flex: 0 0 auto; margin-left: auto; }
+  /* Beside the hint the header starts from its content's width, not the
+     row's, so in a wide pane the hint keeps its whole text and only a
+     narrow pane makes it give way. */
+  .output-header-row.with-hint .output-header { width: auto; }
   .formatted-output :global(pre) { white-space: pre-wrap; }
   .tool-preview, .meta-value { position: relative; }
   :global(.tool-preview .kit-sr-only), :global(.meta-tag .kit-sr-only) {
@@ -411,6 +421,7 @@
   .formatted-output :global(p) { overflow-wrap: anywhere; }
   .output-header:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
   :global(.tool-copy.kit-copy-btn) { flex: 0 0 auto; margin-right: 8px; }
+  .tool-header-row > :global(.tool-copy.kit-copy-btn) { margin-block: var(--tool-row-copy-trim, 0); }
   .tool-block:hover :global(.tool-copy.kit-copy-btn),
   .tool-header-row:focus-within :global(.tool-copy.kit-copy-btn),
   .output-header-row:focus-within :global(.tool-copy.kit-copy-btn) { opacity: 1; }
@@ -421,17 +432,62 @@
   }
   .history-header:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
   .output-label { font-family: var(--font-mono); font-weight: 500; font-size: 11px; color: var(--text-secondary); white-space: nowrap; flex-shrink: 0; }
-  .output-content { max-height: 300px; overflow-y: auto; }
+  /* A match scrolled into view keeps a line of air above it, so the first
+     output line is not cut by the block's top edge. */
+  .output-content { max-height: 300px; overflow-y: auto; scroll-padding-block: 8px; }
   .result-history, .result-event + .result-event { border-top: 1px solid var(--border-muted); }
   .result-event-meta { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px 0; }
   .history-content { border-top: 0; margin-top: 0; }
   .diff-view {
-    font-family: var(--font-mono); font-size: 12px; line-height: 1.5; overflow-x: auto;
+    font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; overflow-x: auto;
     border-top: 1px solid var(--border-muted); padding: 4px 0; max-height: 400px; overflow-y: auto;
   }
+  /* The file fields and the first hunk header form one muted strip above
+     the code, instead of a field row and a separate blue hunk band. */
+  .tool-meta.diff-strip {
+    align-items: baseline; padding: 3px 14px;
+    background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+    border-top-color: var(--border-muted);
+  }
+  /* A long function context wraps inside the strip instead of running
+     past the block's clipped edge. */
+  .diff-strip-hunk {
+    font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);
+    margin-inline-start: auto; min-width: 0; max-width: 100%; overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+  .diff-view.after-strip { border-top: none; }
   .diff-line { display: inline-block; min-width: 100%; padding: 0 14px; white-space: pre; }
-  .diff-hunk { color: var(--accent-blue, #58a6ff); background: color-mix(in srgb, var(--accent-blue, #58a6ff) 8%, transparent); padding: 2px 14px; margin: 2px 0; }
-  .diff-add { color: var(--accent-green, #3fb950); background: color-mix(in srgb, var(--accent-green, #3fb950) 10%, transparent); }
-  .diff-del { color: var(--accent-red, #f85149); background: color-mix(in srgb, var(--accent-red, #f85149) 10%, transparent); }
+  /* Later hunk headers use the same muted strip. */
+  .diff-hunk {
+    color: var(--text-muted); background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+    padding: 2px 14px; margin: 2px 0; font-size: 11px;
+  }
+  .diff-add {
+    color: color-mix(in srgb, var(--accent-green, #3fb950) 70%, var(--text-primary));
+    background: color-mix(in srgb, var(--accent-green, #3fb950) 9%, transparent);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent-green, #3fb950) 60%, transparent);
+  }
+  .diff-del {
+    color: color-mix(in srgb, var(--accent-red, #f85149) 70%, var(--text-primary));
+    background: color-mix(in srgb, var(--accent-red, #f85149) 8%, transparent);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent-red, #f85149) 60%, transparent);
+  }
+  /* Dark: a quiet wash keeps long runs of changes from glowing; the solid
+     edge carries the add/remove signal. */
+  :global(:root.dark) .diff-add {
+    background: color-mix(in srgb, var(--accent-green, #3fb950) 8%, transparent);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent-green, #3fb950) 75%, transparent);
+  }
+  :global(:root.dark) .diff-del {
+    background: color-mix(in srgb, var(--accent-red, #f85149) 8%, transparent);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent-red, #f85149) 75%, transparent);
+  }
+  /* The add/remove edge is a straight bar. */
+  .diff-add, .diff-del,
+  :global(:root.dark) .diff-add, :global(:root.dark) .diff-del {
+    border-start-start-radius: 0;
+    border-end-start-radius: 0;
+  }
   .diff-ctx { color: var(--text-muted); }
 </style>

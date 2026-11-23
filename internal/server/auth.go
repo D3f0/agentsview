@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -140,6 +142,9 @@ func (s *Server) authMiddlewareRequired(next http.Handler, force bool) http.Hand
 					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 					return
 				}
+				// Clients retry 500s as transient; the log is the only place
+				// an operator can see the cause.
+				log.Printf("raw sync authentication failed: %v", err)
 				http.Error(w, "raw sync authentication failed", http.StatusInternalServerError)
 				return
 			}
@@ -189,9 +194,10 @@ func (s *Server) authMiddlewareRequired(next http.Handler, force bool) http.Hand
 
 		// Check Bearer token in Authorization header. The ?token=
 		// query param fallback is restricted to SSE endpoints
-		// (see isSSEPath) because EventSource cannot set custom
-		// headers. All other endpoints must use the Authorization
-		// header.
+		// (see isSSEPath) for third-party clients built on native
+		// EventSource, which cannot set custom headers. The bundled
+		// frontend always sends the header. All other endpoints must
+		// use the Authorization header.
 		var provided string
 		auth := r.Header.Get("Authorization")
 		if t, ok := strings.CutPrefix(auth, "Bearer "); ok {
@@ -203,7 +209,7 @@ func (s *Server) authMiddlewareRequired(next http.Handler, force bool) http.Hand
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if provided != token {
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
 			setCORSOnAuthError(w, r)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -221,7 +227,8 @@ func (s *Server) authMiddlewareRequired(next http.Handler, force bool) http.Hand
 // Authorization header. The query-param fallback exists because
 // browser EventSource cannot set headers.
 func isSSEPath(path string) bool {
-	return strings.HasSuffix(path, "/watch") || path == "/api/v1/events"
+	return strings.HasSuffix(path, "/watch") || path == "/api/v1/events" ||
+		path == "/api/v1/changes/stream"
 }
 
 func isRemoteSyncPath(path string) bool {

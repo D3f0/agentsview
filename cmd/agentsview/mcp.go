@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -40,13 +41,14 @@ func newMCPCommand() *cobra.Command {
 		Long: `Start an MCP (Model Context Protocol) server over stdio (default) or
 StreamableHTTP, exposing read-only tools for searching and reading
 recorded agent sessions: search_sessions, list_sessions,
-get_session_overview, get_messages, get_memory_status, search_content,
-get_usage_summary, get_tool_calls, get_recent_edits, get_child_sessions,
-compare_usage, get_activity_report, get_tool_usage, get_quality_signals, and
-search_docs, plus query_recall for distilled session knowledge.
-Use --profile memory to advertise only get_memory_status, search_content, and
-get_messages for focused conversation-memory clients. The default full profile
-is unchanged.
+get_session_overview, get_messages, get_compaction_summaries, get_memory_status,
+search_content, get_usage_summary, get_tool_calls, get_recent_edits,
+get_child_sessions, compare_usage, get_activity_report, get_tool_usage,
+get_quality_signals, and search_docs, plus query_recall for distilled session
+knowledge and get_friction_digest/list_friction_patterns for the Friction Log.
+Use --profile memory to advertise only get_memory_status, search_content,
+get_messages, and get_compaction_summaries for focused conversation-memory
+clients. The full profile is the default.
 
 The server talks to the local agentsview daemon, starting it when needed, and
 reuses the connection until the daemon restarts or a call fails. A failed call
@@ -61,6 +63,9 @@ Add to your MCP client config (e.g. Claude Desktop):
       }
     }
   }`,
+		Example: "  agentsview mcp\n" +
+			"  agentsview mcp --profile memory\n" +
+			"  agentsview mcp status",
 		GroupID:      groupData,
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
@@ -91,6 +96,12 @@ Add to your MCP client config (e.g. Claude Desktop):
 				Profile: profile,
 			}
 
+			cfg, cfgErr := config.LoadPFlagsFor(cmd.Flags(), config.ScopeLocal)
+			if cfgErr == nil {
+				opts.CallLogDir = filepath.Join(cfg.DataDir, "mcp", "calls")
+			} else if httpAddr == "" {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: MCP calls will not be recorded: %v\n", cfgErr)
+			}
 			var serveErr error
 			if httpAddr != "" {
 				addr, err := normalizeMCPHTTPAddr(httpAddr, httpAllowInsecure)
@@ -101,15 +112,14 @@ Add to your MCP client config (e.g. Claude Desktop):
 				// an unauthenticated remote read surface over the session
 				// archive. Loopback binds stay local-trust (no listener
 				// auth), matching the daemon.
-				cfg, err := config.LoadPFlagsFor(cmd.Flags(), config.ScopeLocal)
-				if err != nil {
-					return fmt.Errorf("loading config: %w", err)
+				if cfgErr != nil {
+					return fmt.Errorf("loading config: %w", cfgErr)
 				}
 				if err := cfg.ApplyDeploymentAuth(); err != nil {
 					return fmt.Errorf("loading listener auth: %w", err)
 				}
 				// Provision a token when auth is required but none exists
-				// yet, matching serve/pg/duckdb so enabling require_auth is
+				// yet, matching serve and pg so enabling require_auth is
 				// sufficient for first-time authenticated startup.
 				if cfg.RequireAuth && cfg.AuthToken == "" {
 					if err := cfg.EnsureAuthToken(); err != nil {
@@ -163,7 +173,7 @@ Add to your MCP client config (e.g. Claude Desktop):
 	cmd.Flags().StringVar(&profileName, "profile", string(mcpserver.ProfileFull),
 		"Tool profile to advertise (full or memory)")
 
-	cmd.AddCommand(newMCPStatusCommand())
+	cmd.AddCommand(newMCPStatusCommand(), newMCPCallsCommand())
 	return cmd
 }
 
@@ -246,7 +256,7 @@ func resolveMCPService(
 		if err := cfg.ApplyDeploymentEmbeddings(); err != nil {
 			return nil, nil, fmt.Errorf("loading deployment embeddings: %w", err)
 		}
-		return newPGReadService(cfg, pgCfg)
+		return newPGReadService(cmd.Context(), cfg, pgCfg)
 	}
 	if err := cfg.ApplyDeploymentAuth(); err != nil {
 		return nil, nil, fmt.Errorf("loading daemon auth: %w", err)
@@ -271,12 +281,94 @@ func newMCPDaemonService(cfg config.Config) service.SessionService {
 	return &mcpDaemonService{cfg: cfg}
 }
 
+func (s *mcpDaemonService) SupportsFileReferences() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return servingDocbankEnabled(s.cfg)
+}
+
+// servingDocbankEnabled answers from the daemon that serves MCP calls. Without
+// one, the daemon MCP will start reads the same config.
+func servingDocbankEnabled(cfg config.Config) bool {
+	runtime := FindDaemonRuntime(cfg.DataDir, cfg.AuthToken)
+	if runtime == nil {
+		return cfg.Integrations.Docbank.Enabled()
+	}
+	base := urlFromDaemonRuntime(runtime)
+	capabilities, err := servicehttp.ProbeHTTPServerCapabilities(context.Background(), base, cfg.AuthToken)
+	return err == nil && service.SupportsFileReferences(servicehttp.NewHTTPBackendForServer(base, cfg.AuthToken, capabilities))
+}
+
 func (s *mcpDaemonService) SupportsRecallQueries() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	runtime := FindDaemonRuntime(s.cfg.DataDir, s.cfg.AuthToken)
 	return runtime == nil || !runtime.ReadOnly
+}
+
+// SupportsFriction asks a running read-only daemon, which may be a
+// ClickHouse replica without friction tables. A writable archive daemon, or
+// the one started on demand, serves the friction reads.
+func (s *mcpDaemonService) SupportsFriction() bool {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	runtime := FindDaemonRuntime(cfg.DataDir, cfg.AuthToken)
+	if runtime == nil || !runtime.ReadOnly {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	capabilities, err := servicehttp.ProbeHTTPServerCapabilities(ctx, urlFromDaemonRuntime(runtime), cfg.AuthToken)
+	return err == nil && capabilities.FrictionReadable
+}
+
+func (s *mcpDaemonService) FrictionDigest(
+	ctx context.Context, date string,
+) (*service.FrictionDigestView, error) {
+	return mcpFrictionCall(ctx, s, func(fs service.FrictionService) (*service.FrictionDigestView, error) {
+		return fs.FrictionDigest(ctx, date)
+	})
+}
+
+func (s *mcpDaemonService) FrictionDigests(
+	ctx context.Context, from, to string,
+) ([]service.FrictionDigestListItem, error) {
+	return mcpFrictionCall(ctx, s, func(fs service.FrictionService) ([]service.FrictionDigestListItem, error) {
+		return fs.FrictionDigests(ctx, from, to)
+	})
+}
+
+func (s *mcpDaemonService) FrictionFindings(
+	ctx context.Context, f service.FrictionFindingFilter,
+) (*service.FrictionFindingPage, error) {
+	return mcpFrictionCall(ctx, s, func(fs service.FrictionService) (*service.FrictionFindingPage, error) {
+		return fs.FrictionFindings(ctx, f)
+	})
+}
+
+func (s *mcpDaemonService) FrictionPatterns(
+	ctx context.Context, f service.FrictionPatternFilter,
+) (*service.FrictionPatternPage, error) {
+	return mcpFrictionCall(ctx, s, func(fs service.FrictionService) (*service.FrictionPatternPage, error) {
+		return fs.FrictionPatterns(ctx, f)
+	})
+}
+
+// mcpFrictionCall runs a Friction Log read on the selected daemon.
+func mcpFrictionCall[T any](
+	ctx context.Context, s *mcpDaemonService,
+	call func(service.FrictionService) (T, error),
+) (T, error) {
+	return mcpDaemonCall(ctx, s, func(svc service.SessionService) (T, error) {
+		fs, ok := svc.(service.FrictionService)
+		if !ok {
+			var zero T
+			return zero, errors.New("daemon backend does not serve the Friction Log")
+		}
+		return call(fs)
+	})
 }
 
 func (s *mcpDaemonService) daemonSelection(
@@ -446,6 +538,14 @@ func (s *mcpDaemonService) SignalAnalytics(
 	})
 }
 
+func (s *mcpDaemonService) TermTrends(
+	ctx context.Context, req service.TermTrendsRequest,
+) (*db.TrendsTermsResponse, error) {
+	return mcpDaemonCall(ctx, s, func(svc service.SessionService) (*db.TrendsTermsResponse, error) {
+		return svc.TermTrends(ctx, req)
+	})
+}
+
 func (s *mcpDaemonService) SignalSessions(
 	ctx context.Context, req service.SignalSessionsRequest,
 ) (*db.SignalSessionsResponse, error) {
@@ -507,6 +607,14 @@ func (s *mcpDaemonService) UsageSummary(
 ) (*service.UsageSummaryResult, error) {
 	return mcpDaemonCall(ctx, s, func(svc service.SessionService) (*service.UsageSummaryResult, error) {
 		return svc.UsageSummary(ctx, req)
+	})
+}
+
+func (s *mcpDaemonService) SessionUsage(
+	ctx context.Context, req service.SessionUsageRequest,
+) (*service.SessionUsageReport, error) {
+	return mcpDaemonCall(ctx, s, func(svc service.SessionService) (*service.SessionUsageReport, error) {
+		return svc.SessionUsage(ctx, req)
 	})
 }
 
@@ -643,4 +751,18 @@ func normalizeMCPHTTPAddr(addr string, allowInsecure bool) (string, error) {
 				"an authenticating reverse proxy)", trimmed)
 	}
 	return trimmed, nil
+}
+
+func (s *mcpDaemonService) SessionCommits(ctx context.Context, id string) (*db.SessionCommitList, error) {
+	return mcpDaemonCall(ctx, s, func(svc service.SessionService) (*db.SessionCommitList, error) { return svc.SessionCommits(ctx, id) })
+}
+
+func (s *mcpDaemonService) CommitSessions(ctx context.Context, shas []string) (*db.CommitSessionList, error) {
+	return mcpDaemonCall(ctx, s, func(svc service.SessionService) (*db.CommitSessionList, error) { return svc.CommitSessions(ctx, shas) })
+}
+
+func (s *mcpDaemonService) FileReferences(ctx context.Context, id string) (service.FileReferencesResult, error) {
+	return mcpDaemonCall(ctx, s, func(svc service.SessionService) (service.FileReferencesResult, error) {
+		return service.FileReferences(ctx, svc, id)
+	})
 }

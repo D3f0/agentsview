@@ -1,25 +1,31 @@
 <script lang="ts">
-  import { errorTelemetry } from "../../utils/error-telemetry.js";
-  import {
-    usage,
-    type GroupBy,
-    type AttributionView,
-  } from "../../stores/usage.svelte.js";
+  import LoadError from "../shared/LoadError.svelte";
+  import { usage } from "../../stores/usage.svelte.js";
+  import type { AttributionView, GroupBy } from "../../stores/usagePreferences.js";
   import { tick } from "svelte";
   import { Button } from "@kenn-io/kit-ui";
+  import { seriesSwatchBackground, type SeriesStyle } from "@kenn-io/kit-ui/utils/palette";
   import { shortenId } from "../../utils/shortId.js";
   import Treemap from "./Treemap.svelte";
+  import { TREEMAP_LABEL_SCALES, type TreemapLabelScale } from "./treemapLabelSize.js";
   import { m } from "../../i18n/index.js";
   import { formatMoney, moneyFromMicrodollars } from "../../money.js";
-  import { formatTokenCount } from "../../utils/format.js";
+  import { formatCount } from "../../utils/format.js";
   import { sumSelectedTokens } from "../../stores/usageTokenTypes.js";
   import type { DbTopSessionEntry } from "../../api/generated/index.js";
 
   interface Props {
-    colorMap: ReadonlyMap<string, string>;
+    styleMap: ReadonlyMap<string, SeriesStyle>;
   }
 
-  let { colorMap }: Props = $props();
+  let { styleMap }: Props = $props();
+
+  const MUTED_STYLE: SeriesStyle = {
+    color: "var(--text-muted)",
+    fill: "solid",
+    dash: "solid",
+    marker: "circle",
+  };
 
   function fmtPct(v: number, total: number): string {
     if (total <= 0) return "";
@@ -29,13 +35,15 @@
   const groupBy = $derived(usage.toggles.attribution.groupBy);
   const hasSelection = $derived(usage.hasSelection(groupBy));
   const view = $derived(usage.toggles.attribution.view);
+  const labelScale = $derived(usage.toggles.attribution.labelScale);
   const isTokenMode = $derived(usage.mode === "token");
 
   interface Row {
     id: string;
     label: string;
     value: number;
-    color: string;
+    style: SeriesStyle;
+    swatch: string;
     pct: number;
     // Billed only as plan usage: no tokens or cost to show.
     planOnly: boolean;
@@ -111,7 +119,8 @@
     } else if (groupBy === "project") {
       items = s!.projectTotals.map((p) => ({
         id: p.project_key,
-        label: p.project,
+        // Sessions with no resolved project still need a visible label.
+        label: p.project || m.insights_page_unassigned_project(),
         value: isTokenMode
           ? sumSelectedTokens(p, usage.selectedTokenTypes)
           : p.cost.microdollars,
@@ -145,6 +154,11 @@
     return items;
   });
 
+  function styleFields(style: SeriesStyle | undefined): Pick<Row, "style" | "swatch"> {
+    const resolved = style ?? MUTED_STYLE;
+    return { style: resolved, swatch: seriesSwatchBackground(resolved) };
+  }
+
   const rows = $derived.by((): Row[] => {
     const items = rowItems;
     const total = items.reduce((sum, item) => sum + item.value, 0);
@@ -153,9 +167,9 @@
       id: d.id,
       label: d.label,
       value: d.value,
-      color: zoomedProject
-        ? colorMap.get(zoomedProject.key) ?? "var(--text-muted)"
-        : colorMap.get(d.id) ?? "var(--text-muted)",
+      ...styleFields(
+        zoomedProject ? styleMap.get(zoomedProject.key) : styleMap.get(d.id),
+      ),
       pct: total > 0 ? d.value / total : 0,
       planOnly: d.planOnly ?? false,
     }));
@@ -166,7 +180,7 @@
       id: r.id,
       label: r.label,
       value: r.value,
-      color: r.color,
+      style: r.style,
       title: rowTitle(r.id, r.label),
       selected: usage.isSelected(groupBy, r.id),
       dimmed: !zoomedProject && hasSelection && !usage.isSelected(groupBy, r.id),
@@ -215,6 +229,12 @@
   function handleViewChange(v: AttributionView) {
     usage.setAttributionView(v);
   }
+
+  const labelScaleNames: Record<TreemapLabelScale, () => string> = {
+    linear: m.usage_label_scale_linear,
+    sqrt: m.usage_label_scale_sqrt,
+    log: m.usage_label_scale_log,
+  };
 </script>
 
 <svelte:window onkeydown={handleBackKey} />
@@ -279,14 +299,34 @@
           {m.usage_attribution_list()}
         </button>
       </div>
+      {#if view === "treemap"}
+        <div class="segment-toggle" role="group" aria-label={m.usage_label_scale_title()} title={m.usage_label_scale_title()}>
+          {#each TREEMAP_LABEL_SCALES as scale (scale)}
+            <button
+              class="toggle-btn"
+              class:active={labelScale === scale}
+              aria-pressed={labelScale === scale}
+              onclick={() => usage.setAttributionLabelScale(scale)}
+            >
+              {labelScaleNames[scale]()}
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
   </div>
   {#if zoomedProject && usage.errors.zoom}
-    <div class="empty" {@attach errorTelemetry("analytics")}>{usage.errors.zoom}</div>
+    <LoadError message={usage.errors.zoom} onRetry={() => void usage.fetchZoom()} telemetry="analytics" />
+  {/if}
+  {#if zoomedProject && usage.errors.zoom && usage.zoomRows === null}
+    <!-- Nothing loaded to keep under the error. -->
   {:else if zoomedProject && usage.loading.zoom && usage.zoomRows === null}
     <div class="empty">{m.usage_loading()}</div>
   {:else if rows.length === 0}
-    <div class="empty">{m.shared_no_data_for_period()}</div>
+    <!-- Without a current summary, the summary error or refresh status says why. -->
+    {#if zoomedProject ? !usage.errors.zoom : (usage.attributionSummary !== null || usage.summary !== null) && !usage.errors.summary}
+      <div class="empty">{m.shared_no_data_for_period()}</div>
+    {/if}
   {:else}
     {#if !zoomedProject}<div class="hint">{groupBy === "project" ? m.usage_click_project_hint() : m.usage_click_to_focus_hint()}</div>{/if}
     {#if view === "treemap"}
@@ -297,7 +337,8 @@
             height={260}
             onSelect={zoomedProject ? undefined : handleSelect}
             onOpen={!zoomedProject && groupBy === "project" ? handleOpen : undefined}
-            formatValue={isTokenMode ? formatTokenCount : undefined}
+            formatValue={isTokenMode ? formatCount : undefined}
+            {labelScale}
           />
         </div>
         <div class="side-rail">
@@ -319,14 +360,15 @@
               <span class="rail-rank">{i + 1}</span>
               <span
                 class="rail-dot"
-                style="background: {row.color}"
+                class:patterned={row.style.fill !== "solid"}
+                style="background: {row.swatch}"
               ></span>
               <span class="rail-label">{row.label}</span>
               <span class="rail-cost">
                 {row.planOnly
                   ? m.plan_usage_title()
                   : isTokenMode
-                    ? formatTokenCount(row.value)
+                    ? formatCount(row.value)
                     : formatMoney(moneyFromMicrodollars(row.value))}
               </span>
             </div>
@@ -334,6 +376,7 @@
         </div>
       </div>
     {:else}
+      <div class="list-view-frame">
       <div class="list-view">
         {#each rows as row, i (row.id)}
           <!-- svelte-ignore a11y_no_noninteractive_tabindex (Only selectable rows receive a button role and tab stop.) -->
@@ -353,17 +396,16 @@
             <span class="list-rank">{i + 1}</span>
             <span
               class="list-dot"
-              style="background: {row.color}"
+              class:patterned={row.style.fill !== "solid"}
+              style="background: {row.swatch}"
             ></span>
-            <div class="list-info">
-              <span class="list-label">{row.label}</span>
-              <div class="list-bar-track">
-                <div
-                  class="list-bar-fill"
-                  style="width: {row.planOnly ? 0 : Math.max(row.pct * 100, 1)}%;
-                         background: {row.color};"
-                ></div>
-              </div>
+            <span class="list-label">{row.label}</span>
+            <div class="list-bar-track">
+              <div
+                class="list-bar-fill"
+                style="width: {row.planOnly ? 0 : Math.max(row.pct * 100, 1)}%;
+                       background: {row.swatch};"
+              ></div>
             </div>
             <span class="list-pct">
               {row.planOnly ? "" : `${(row.pct * 100).toFixed(1)}%`}
@@ -372,11 +414,12 @@
               {row.planOnly
                 ? m.plan_usage_title()
                 : isTokenMode
-                  ? formatTokenCount(row.value)
+                  ? formatCount(row.value)
                   : formatMoney(moneyFromMicrodollars(row.value))}
             </span>
           </div>
         {/each}
+      </div>
       </div>
     {/if}
   {/if}
@@ -425,24 +468,27 @@
   .segment-toggle {
     display: flex;
     gap: 2px;
+    padding: 2px;
+    border-radius: var(--radius-md);
     background: var(--bg-inset);
-    border-radius: var(--radius-sm);
-    padding: 1px;
   }
 
   .toggle-btn {
     padding: 2px 8px;
-    font-size: 10px;
+    font-size: 11px;
+    font-weight: 500;
     border-radius: var(--radius-sm);
     color: var(--text-muted);
     cursor: pointer;
     transition: background 0.1s, color 0.1s;
   }
 
+  /* Shared selected-segment idiom (app.css): raised pill, medium weight. */
   .toggle-btn.active {
-    background: var(--bg-surface);
+    background: var(--selected-strong-bg);
+    box-shadow: var(--selected-strong-edge);
     color: var(--text-primary);
-    font-weight: 500;
+    font-weight: var(--selected-strong-weight);
   }
 
   .toggle-btn:hover:not(.active) {
@@ -474,7 +520,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 4px;
+    padding: 2px 4px;
+    line-height: 1.45;
     border-radius: var(--radius-sm);
     transition: background 0.1s;
   }
@@ -502,7 +549,7 @@
   .rail-rank {
     width: 14px;
     text-align: right;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--text-muted);
     font-family: var(--font-mono);
@@ -515,9 +562,26 @@
     flex-shrink: 0;
   }
 
+  /* Patterned swatches need room to show at least one full pattern tile.
+     Negative margins keep their footprint at the plain dot's width, so
+     labels stay aligned. */
+  .rail-dot.patterned {
+    width: 10px;
+    height: 10px;
+    margin-inline: -2px;
+    border-radius: 2px;
+  }
+
+  .list-dot.patterned {
+    width: 12px;
+    height: 12px;
+    margin-inline: -2px;
+    border-radius: 2px;
+  }
+
   .rail-label {
     flex: 1;
-    font-size: 10px;
+    font-size: 12px;
     color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
@@ -525,24 +589,53 @@
   }
 
   .rail-cost {
-    font-size: 10px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
     font-weight: 500;
     font-family: var(--font-mono);
     color: var(--text-primary);
   }
 
-  /* List view */
+  /* List view: a full-width table. The name column fits the longest
+     name (up to 13rem, longer names ellipsize), so each bar starts right
+     after the names; only the bar column flexes, and share and total keep
+     a stable rhythm. */
   .list-view {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    display: grid;
+    grid-template-columns: 18px 12px fit-content(13rem) minmax(96px, 1fr) 56px 88px;
+    column-gap: 12px;
+    row-gap: 2px;
+  }
+
+  /* Phones: the fixed columns would leave no room for names, so each name
+     takes the free column with its share and total beside it, and its bar
+     runs underneath across the same width. */
+  .list-view-frame {
+    container-type: inline-size;
+  }
+
+  @container (max-width: 420px) {
+    .list-view {
+      grid-template-columns: 14px 8px minmax(0, 1fr) max-content max-content;
+      column-gap: 8px;
+    }
+
+    /* Outranks the base track rule below, which comes later. */
+    .list-view .list-bar-track {
+      grid-column: 3 / -1;
+      grid-row: 2;
+      max-width: none;
+      margin-top: 3px;
+    }
   }
 
   .list-row {
-    display: flex;
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
     align-items: center;
-    gap: 8px;
-    padding: 4px 6px;
+    min-height: 26px;
+    padding: 3px 6px;
     border-radius: var(--radius-sm);
     transition: background 0.1s;
   }
@@ -552,67 +645,68 @@
   }
 
   .list-rank {
-    width: 18px;
     text-align: right;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--text-muted);
     font-family: var(--font-mono);
   }
 
   .list-dot {
+    justify-self: center;
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .list-info {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
   }
 
   .list-label {
-    font-size: 11px;
+    min-width: 0;
+    font-size: 12px;
     color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
+  /* The bar shows a share, so its track stops at half the row: a full
+     row of grey rail behind bars a few pixels wide reads as empty space.
+     Share and total stay at the right edge. */
   .list-bar-track {
-    height: 4px;
+    width: 100%;
+    max-width: 50cqi;
+    height: 6px;
     background: var(--bg-inset);
-    border-radius: 2px;
+    border-radius: 3px;
     overflow: hidden;
+  }
+
+  /* In dark the inset track nearly matches the card, so lift it one step
+     to show the full scale behind each bar. */
+  :global(:root.dark) .list-bar-track {
+    background: color-mix(in srgb, var(--text-primary) 8%, var(--bg-inset));
   }
 
   .list-bar-fill {
     height: 100%;
-    border-radius: 2px;
+    border-radius: 3px;
     transition: width 0.3s ease;
   }
 
   .list-pct {
-    flex-shrink: 0;
-    min-width: 36px;
     text-align: right;
-    font-size: 10px;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
     font-family: var(--font-mono);
     color: var(--text-muted);
   }
 
   .list-cost {
-    flex-shrink: 0;
-    min-width: 48px;
     text-align: right;
-    font-size: 11px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
     font-weight: 500;
     font-family: var(--font-mono);
-    color: var(--accent-blue);
+    color: var(--text-primary);
   }
 
   .empty {
@@ -623,8 +717,8 @@
   }
 
   .hint {
-    font-size: 10px;
-    color: var(--text-muted);
+    font-size: 11px;
+    color: var(--text-secondary);
     margin-bottom: 6px;
     line-height: 14px;
     height: 14px;

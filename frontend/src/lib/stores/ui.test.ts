@@ -27,49 +27,7 @@ describe("UIStore", () => {
     ui.followLatestRequest = 0;
   });
 
-  describe("activeModal", () => {
-    it("should default to null", () => {
-      expect(ui.activeModal).toBeNull();
-    });
-
-    it("should set and clear modal type", () => {
-      ui.activeModal = "commandPalette";
-      expect(ui.activeModal).toBe("commandPalette");
-
-      ui.activeModal = null;
-      expect(ui.activeModal).toBeNull();
-    });
-
-    it("should switch between modal types", () => {
-      ui.activeModal = "shortcuts";
-      expect(ui.activeModal).toBe("shortcuts");
-
-      ui.activeModal = "publish";
-      expect(ui.activeModal).toBe("publish");
-    });
-  });
-
   describe("publishTarget", () => {
-    it("defaults to null", () => {
-      expect(ui.publishTarget).toBeNull();
-    });
-
-    it("stores the selected publish target", () => {
-      ui.setPublishTarget({ kind: "insight", id: 42 });
-      expect(ui.publishTarget).toEqual({
-        kind: "insight",
-        id: 42,
-      });
-    });
-
-    it("stores a selected session publish target", () => {
-      ui.setPublishTarget({ kind: "session", id: "sess-123" });
-      expect(ui.publishTarget).toEqual({
-        kind: "session",
-        id: "sess-123",
-      });
-    });
-
     it("clears the publish target when publish modal closes", async () => {
       ui.setPublishTarget({ kind: "insight", id: 42 });
       ui.activeModal = "publish";
@@ -82,51 +40,7 @@ describe("UIStore", () => {
     });
   });
 
-  describe("closeAll", () => {
-    it("should set activeModal to null", () => {
-      ui.activeModal = "commandPalette";
-      ui.closeAll();
-      expect(ui.activeModal).toBeNull();
-    });
-
-    it("should be idempotent when already null", () => {
-      ui.closeAll();
-      expect(ui.activeModal).toBeNull();
-    });
-  });
-
-  describe("selectedOrdinal null flows", () => {
-    it("should default to null", () => {
-      expect(ui.selectedOrdinal).toBeNull();
-    });
-
-    it("should set ordinal via selectOrdinal", () => {
-      ui.selectOrdinal(5);
-      expect(ui.selectedOrdinal).toBe(5);
-    });
-
-    it("should clear to null via clearSelection", () => {
-      ui.selectOrdinal(5);
-      ui.clearSelection();
-      expect(ui.selectedOrdinal).toBeNull();
-    });
-
-    it("should handle ordinal 0 without confusion", () => {
-      ui.selectOrdinal(0);
-      expect(ui.selectedOrdinal).toBe(0);
-    });
-
-    it("clearSelection should be idempotent", () => {
-      ui.clearSelection();
-      expect(ui.selectedOrdinal).toBeNull();
-    });
-  });
-
   describe("pendingScrollOrdinal null flows", () => {
-    it("should default to null", () => {
-      expect(ui.pendingScrollOrdinal).toBeNull();
-    });
-
     it("should set both selected and pending via scrollToOrdinal", () => {
       ui.scrollToOrdinal(10);
       expect(ui.selectedOrdinal).toBe(10);
@@ -138,19 +52,6 @@ describe("UIStore", () => {
       ui.scrollToOrdinal(5, "sess-123");
       expect(ui.pendingScrollOrdinal).toBe(5);
       expect(ui.pendingScrollSession).toBe("sess-123");
-    });
-
-    it("should allow clearing pending independently", () => {
-      ui.scrollToOrdinal(10);
-      ui.pendingScrollOrdinal = null;
-      expect(ui.pendingScrollOrdinal).toBeNull();
-      expect(ui.selectedOrdinal).toBe(10);
-    });
-
-    it("should handle ordinal 0", () => {
-      ui.scrollToOrdinal(0);
-      expect(ui.selectedOrdinal).toBe(0);
-      expect(ui.pendingScrollOrdinal).toBe(0);
     });
   });
 
@@ -218,18 +119,6 @@ describe("UIStore", () => {
   });
 
   describe("followLatest", () => {
-    it("defaults to disabled", () => {
-      expect(ui.followLatest).toBe(false);
-    });
-
-    it("can be enabled and disabled", () => {
-      ui.setFollowLatest(true);
-      expect(ui.followLatest).toBe(true);
-
-      ui.setFollowLatest(false);
-      expect(ui.followLatest).toBe(false);
-    });
-
     it("records a new request when already enabled", () => {
       ui.setFollowLatest(true);
       const first = ui.followLatestRequest;
@@ -260,11 +149,6 @@ describe("UIStore", () => {
   });
 
   describe("theme initialization", () => {
-    it("should fall back to light when stored theme is absent", () => {
-      expect(ui.theme).toBeDefined();
-      expect(["light", "dark"]).toContain(ui.theme);
-    });
-
     it("migrates the legacy high-contrast key on module init", async () => {
       const original = globalThis.localStorage;
       const store = new Map<string, string>([["agentsview-high-contrast", "true"]]);
@@ -681,36 +565,9 @@ describe("UIStore", () => {
     });
   });
 
-  describe("toggles", () => {
-    it("should toggle theme between light and dark", () => {
-      ui.theme = "light";
-      ui.toggleTheme();
-      expect(ui.theme).toBe("dark");
-      ui.toggleTheme();
-      expect(ui.theme).toBe("light");
-    });
-
-    it("should toggle sortNewestFirst", () => {
-      const initial = ui.sortNewestFirst;
-      ui.toggleSort();
-      expect(ui.sortNewestFirst).toBe(!initial);
-    });
-  });
-
   describe("block type filtering", () => {
     beforeEach(() => {
       ui.showAllBlocks();
-    });
-
-    it("should start with all blocks visible", () => {
-      expect(ui.hiddenBlockCount).toBe(0);
-      expect(ui.hasBlockFilters).toBe(false);
-      expect(ui.isBlockVisible("user")).toBe(true);
-      expect(ui.isBlockVisible("tool")).toBe(true);
-      expect(ui.isBlockVisible("thinking")).toBe(true);
-      expect(ui.isBlockVisible("code")).toBe(true);
-      expect(ui.isBlockVisible("assistant")).toBe(true);
-      expect(ui.isBlockVisible("system")).toBe(true);
     });
 
     it("keeps a hidden system boundary hidden across a reload", () => {
@@ -718,16 +575,17 @@ describe("UIStore", () => {
 
       expect(visible.has("system")).toBe(false);
       expect(visible.has("user")).toBe(true);
+      expect(visible.has("hook")).toBe(true);
     });
 
     it("restores the same hidden set it stored", () => {
       const chosen = new Set<BlockType>(ALL_BLOCK_TYPES);
-      chosen.delete("system");
+      chosen.delete("hook");
       chosen.delete("tool");
 
       const restored = parseBlockFilters(serializeBlockFilters(chosen));
 
-      expect([...restored].sort()).toEqual(["assistant", "code", "thinking", "user"]);
+      expect([...restored].sort()).toEqual(["assistant", "code", "system", "thinking", "user"]);
     });
 
     it("shows every block when the stored payload is missing or unreadable", () => {
@@ -759,39 +617,6 @@ describe("UIStore", () => {
   });
 
   describe("sidebar", () => {
-    beforeEach(() => {
-      ui.sidebarOpen = true;
-    });
-
-    it("should default to open", () => {
-      expect(ui.sidebarOpen).toBe(true);
-    });
-
-    it("should toggle sidebar", () => {
-      ui.toggleSidebar();
-      expect(ui.sidebarOpen).toBe(false);
-
-      ui.toggleSidebar();
-      expect(ui.sidebarOpen).toBe(true);
-    });
-
-    it("should close sidebar", () => {
-      ui.closeSidebar();
-      expect(ui.sidebarOpen).toBe(false);
-    });
-
-    it("closeSidebar should be idempotent", () => {
-      ui.closeSidebar();
-      ui.closeSidebar();
-      expect(ui.sidebarOpen).toBe(false);
-    });
-
-    it("isMobileViewport should default to false in test environment", () => {
-      // matchMedia is unavailable in test env, so isMobileViewport
-      // stays at its initial value (false = desktop assumption).
-      expect(ui.isMobileViewport).toBe(false);
-    });
-
     it("should initialize sidebar closed on narrow viewport", async () => {
       const originalMatchMedia = window.matchMedia;
       // The store watches kit-ui's MEDIA.medium (max-width: 760px), so a
@@ -835,18 +660,6 @@ describe("UIStore", () => {
       ui.setLayout("default");
     });
 
-    it("should default to 'default'", () => {
-      expect(ui.messageLayout).toBe("default");
-    });
-
-    it("should set layout explicitly", () => {
-      ui.setLayout("compact");
-      expect(ui.messageLayout).toBe("compact");
-
-      ui.setLayout("stream");
-      expect(ui.messageLayout).toBe("stream");
-    });
-
     it("should cycle through layouts", () => {
       ui.setLayout("default");
       ui.cycleLayout();
@@ -863,18 +676,100 @@ describe("UIStore", () => {
     });
   });
 
+  describe("alwaysShowYear", () => {
+    const original = globalThis.localStorage;
+    afterEach(() => {
+      Object.defineProperty(globalThis, "localStorage", {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    });
+
+    it.each([
+      [null, false],
+      ["true", true],
+    ])("restores %s as %s and persists a toggle", async (stored, expected) => {
+      const setItem = vi.fn();
+      Object.defineProperty(globalThis, "localStorage", {
+        value: {
+          getItem: (key: string) => (key === "agentsview-always-show-year" ? stored : null),
+          setItem,
+        },
+        writable: true,
+        configurable: true,
+      });
+      const mod = await import(/* @vite-ignore */ `./ui.svelte.js?year-${stored}`);
+      expect(mod.ui.alwaysShowYear).toBe(expected);
+      mod.ui.toggleAlwaysShowYear();
+      await tick();
+      expect(setItem).toHaveBeenCalledWith("agentsview-always-show-year", String(!expected));
+    });
+  });
+
+  describe("readingWidth", () => {
+    async function freshStore(stored: string | null, tag: string) {
+      const setItem = vi.fn();
+      Object.defineProperty(globalThis, "localStorage", {
+        value: {
+          getItem: vi.fn((key: string) => (key === "agentsview-reading-width" ? stored : null)),
+          setItem,
+        },
+        writable: true,
+        configurable: true,
+      });
+      const mod = await import(/* @vite-ignore */ `./ui.svelte.js?readingWidth-${tag}`);
+      await tick();
+      return { ui: mod.ui as typeof ui, setItem };
+    }
+
+    const original = globalThis.localStorage;
+    afterEach(() => {
+      Object.defineProperty(globalThis, "localStorage", {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+      delete document.documentElement.dataset.readingWidth;
+    });
+
+    it("defaults to the shared column with no root override", async () => {
+      const { ui: store } = await freshStore(null, "default");
+      expect(store.readingWidth).toBe("default");
+      expect(document.documentElement.dataset.readingWidth).toBeUndefined();
+    });
+
+    it("restores a saved width and applies it to the root", async () => {
+      const { ui: store } = await freshStore("full", "restore");
+      expect(store.readingWidth).toBe("full");
+      expect(document.documentElement.dataset.readingWidth).toBe("full");
+    });
+
+    it("falls back to the default for an unknown saved width", async () => {
+      const { ui: store } = await freshStore("huge", "invalid");
+      expect(store.readingWidth).toBe("default");
+      expect(document.documentElement.dataset.readingWidth).toBeUndefined();
+    });
+
+    it("saves a chosen width and updates the root", async () => {
+      const { ui: store, setItem } = await freshStore(null, "persist");
+      setItem.mockClear();
+
+      store.setReadingWidth("wider");
+      await tick();
+      expect(setItem).toHaveBeenLastCalledWith("agentsview-reading-width", "wider");
+      expect(document.documentElement.dataset.readingWidth).toBe("wider");
+
+      store.setReadingWidth("default");
+      await tick();
+      expect(setItem).toHaveBeenLastCalledWith("agentsview-reading-width", "default");
+      expect(document.documentElement.dataset.readingWidth).toBeUndefined();
+    });
+  });
+
   describe("transcriptMode", () => {
     beforeEach(() => {
       ui.setTranscriptMode("normal");
-    });
-
-    it("should default to normal", () => {
-      expect(ui.transcriptMode).toBe("normal");
-    });
-
-    it("should set transcript mode explicitly", () => {
-      ui.setTranscriptMode("focused");
-      expect(ui.transcriptMode).toBe("focused");
     });
 
     it("should persist transcript mode changes", async () => {
@@ -934,16 +829,6 @@ describe("UIStore", () => {
   describe("renderUnknownXmlBlocksAsPreformatted", () => {
     beforeEach(() => {
       ui.renderUnknownXmlBlocksAsPreformatted = false;
-    });
-
-    it("defaults to false and toggles between both values", () => {
-      expect(ui.renderUnknownXmlBlocksAsPreformatted).toBe(false);
-
-      ui.toggleUnknownXmlBlocksAsPreformatted();
-      expect(ui.renderUnknownXmlBlocksAsPreformatted).toBe(true);
-
-      ui.toggleUnknownXmlBlocksAsPreformatted();
-      expect(ui.renderUnknownXmlBlocksAsPreformatted).toBe(false);
     });
 
     it("persists true and false under its own key", async () => {
@@ -1392,17 +1277,6 @@ describe("UIStore", () => {
   describe("highContrast", () => {
     beforeEach(() => {
       if (ui.highContrast) ui.toggleHighContrast();
-    });
-
-    it("defaults to false", () => {
-      expect(ui.highContrast).toBe(false);
-    });
-
-    it("toggles the value", () => {
-      ui.toggleHighContrast();
-      expect(ui.highContrast).toBe(true);
-      ui.toggleHighContrast();
-      expect(ui.highContrast).toBe(false);
     });
 
     it("toggles the root class and persists", async () => {

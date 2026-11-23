@@ -14,6 +14,83 @@ import (
 	pricingpkg "go.kenn.io/agentsview/internal/pricing"
 )
 
+func TestPricingResolverConfiguredAliasUsesTargetLadder(t *testing.T) {
+	pricingpkg.SetConfiguredAliases(map[string]string{"gpt-5.6-luna": "ai21.j2-mid-v1"})
+	t.Cleanup(func() { pricingpkg.SetConfiguredAliases(nil) })
+	embedded := pricingpkg.EmbeddedGenAIDocument()
+	resolver := NewPricingResolver([]EffectivePricingRow{
+		{ModelPattern: "ai21.j2-mid-v1", Rates: ModelRates{InputPerMTok: money.MustParseDollars("12.50"), Source: PricingRowSourceFetched}},
+		{GenAI: embedded.Prices, GenAIVersion: embedded.Version, GenAISource: PricingRowSourceEmbedded},
+	})
+	model, lookup := resolver.ResolveAt("gpt-5.6-luna", "gpt-5.6-luna", time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
+	require.True(t, lookup.OK)
+	assert.Equal(t, "ai21.j2-mid-v1", model)
+	assert.Equal(t, money.MustParseDollars("12.50"), lookup.Rates.InputPerMTok)
+
+	pricingpkg.SetConfiguredAliases(map[string]string{"gpt-5.6-luna": "missing-model"})
+	_, lookup = resolver.ResolveAt("gpt-5.6-luna", "gpt-5.6-luna", time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
+	assert.False(t, lookup.OK)
+
+	pricingpkg.SetConfiguredAliases(map[string]string{"gateway-kimi": "kimi-for-coding"})
+	resolver = NewPricingResolver([]EffectivePricingRow{
+		{ModelPattern: pricingpkg.KimiK26Canonical, Rates: ModelRates{InputPerMTok: money.MustParseDollars("2"), Source: PricingRowSourceFetched}},
+		{ModelPattern: pricingpkg.KimiK3Canonical, Rates: ModelRates{InputPerMTok: money.MustParseDollars("3"), Source: PricingRowSourceFetched}},
+	})
+	for _, at := range []time.Time{{}, pricingpkg.KimiModelEraCutoff.Add(-time.Second), pricingpkg.KimiModelEraCutoff} {
+		canonical := pricingpkg.CanonicalModelForDate("kimi-for-coding", at)
+		wantModel, want := resolver.ResolveAt("kimi-for-coding", canonical, at)
+		gotModel, got := resolver.ResolveAt("gateway-kimi", "gateway-kimi", at)
+		require.True(t, want.OK)
+		assert.Equal(t, wantModel, gotModel)
+		assert.Equal(t, want, got)
+	}
+	pricingpkg.SetConfiguredAliases(map[string]string{"gateway-fixed": "k2d6-agent", "gateway-custom": "internal-model"})
+	resolver = NewPricingResolver([]EffectivePricingRow{
+		{ModelPattern: pricingpkg.KimiK26Canonical, Rates: ModelRates{InputPerMTok: money.MustParseDollars("2"), Source: PricingRowSourceFetched}},
+		{ModelPattern: "internal-model", Rates: ModelRates{InputPerMTok: money.MustParseDollars("7"), Source: PricingRowSourceCustom}},
+	})
+	_, fixed := resolver.ResolveAt("gateway-fixed", "gateway-fixed", time.Time{})
+	require.True(t, fixed.OK)
+	assert.Equal(t, money.MustParseDollars("2"), fixed.Rates.InputPerMTok)
+	_, custom := resolver.ResolveAt("gateway-custom", "gateway-custom", time.Time{})
+	require.True(t, custom.OK)
+	assert.Equal(t, money.MustParseDollars("7"), custom.Rates.InputPerMTok)
+}
+
+func TestPricingResolverExactCustomRateBeatsConfiguredAlias(t *testing.T) {
+	pricingpkg.SetConfiguredAliases(map[string]string{"foo": "gpt-6-sol"})
+	t.Cleanup(func() { pricingpkg.SetConfiguredAliases(nil) })
+	resolver := NewPricingResolver([]EffectivePricingRow{
+		{ModelPattern: "gateway/foo", Rates: ModelRates{Source: PricingRowSourceCustom}},
+		{ModelPattern: "gpt-6-sol", Rates: ModelRates{InputPerMTok: money.MustParseDollars("9"), Source: PricingRowSourceFetched}},
+	})
+	_, lookup := resolver.ResolveAt("gateway/foo", "gateway/foo", time.Time{})
+	require.True(t, lookup.OK)
+	assert.Zero(t, lookup.Rates.InputPerMTok.Microdollars)
+}
+
+func TestPricingResolverCopyReplayAndResolvedBandIsolation(t *testing.T) {
+	resolver := NewPricingResolver([]EffectivePricingRow{
+		{ModelPattern: "gateway/foo", Rates: ModelRates{Source: PricingRowSourceCustom, Bands: []PricingBand{{AboveInputTokens: 100}}}},
+	})
+	first := resolver.Copy()
+	_, copied := first.Resolve("gateway/foo", "gateway/foo")
+	first.RecordResolvedComputedRequest("gateway/foo", "gateway/foo", copied, 200, 0, 0)
+	first.RecordResolvedReported("gateway/foo", "gateway/foo", copied)
+	first.RecordUnattributedReported()
+	records, unattributed := first.RecordedCounts()
+	replayed := resolver.Copy()
+	replayed.ReplayRecordedCounts(records, unattributed)
+	want, err := first.BuildBlock()
+	require.NoError(t, err)
+	got, err := replayed.BuildBlock()
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	copied.Rates.Bands[0].AboveInputTokens = 999
+	_, again := resolver.Resolve("gateway/foo", "gateway/foo")
+	require.Equal(t, 100, again.Rates.Bands[0].AboveInputTokens)
+}
+
 func TestPricingResolverUsesHistoricalGenAIPricesBeforeFlatFallback(t *testing.T) {
 	embedded := pricingpkg.EmbeddedGenAIDocument()
 	genAI := EffectivePricingRow{
@@ -515,6 +592,42 @@ func TestModelRatesCostForTokensScopedAggregateUsesBaseRate(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, money.Money{Microdollars: 300_000}, cost)
+}
+
+func TestPricingResolverRecordResolvedCountsMatchesIndividualRecords(t *testing.T) {
+	rows := []EffectivePricingRow{{
+		ModelPattern: "priced-model",
+		Rates: ModelRates{
+			InputPerMTok: money.MustParseDollars("1"),
+			Source:       PricingRowSourceFetched,
+			Bands:        []PricingBand{{AboveInputTokens: 200_000, InputPerMTok: money.MustParseDollars("2")}},
+		},
+	}}
+	for _, model := range []string{"priced-model", "unknown-model"} {
+		t.Run(model, func(t *testing.T) {
+			individual := NewPricingResolver(rows)
+			counts := NewPricingResolver(rows)
+			lookup := individual.Lookup(model)
+			for range 2 {
+				individual.RecordResolvedReported("reported-model", model, lookup)
+				individual.RecordResolvedComputedRequest("reported-model", model, lookup, 100, 0, 0)
+			}
+			for range 3 {
+				individual.RecordResolvedComputedRequest("reported-model", model, lookup, 200_001, 0, 0)
+			}
+			for range 4 {
+				individual.RecordResolvedComputedAggregate("reported-model", model, lookup)
+			}
+			counts.RecordResolvedCounts("reported-model", model, lookup, 2, 2, 4, nil)
+			counts.RecordResolvedCounts("reported-model", model, lookup, 0, 3, 0, new(200_000))
+			counts.RecordResolvedCounts("unused-model", model, lookup, 0, 0, 0, nil)
+			want, err := individual.BuildBlock()
+			require.NoError(t, err)
+			got, err := counts.BuildBlock()
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		})
+	}
 }
 
 func TestPricingResolverBuildBlockPricingBandsAndApplicationCounts(t *testing.T) {
@@ -1362,6 +1475,8 @@ func TestPricingResolverDependencyFingerprint(t *testing.T) {
 			fetched("kimi-x", "3"),
 			fetched("kimi-y:cloud", "6"),
 			fetched("kimi-y", "3"),
+			fetched("gpt-5.6-luna", "0.2"),
+			fetched("gpt-5.6-luna@priority", "0.4"),
 			custom("genai-gamma", "7"),
 		}
 	}
@@ -1377,6 +1492,7 @@ func TestPricingResolverDependencyFingerprint(t *testing.T) {
 		"genai-alpha":       {reported: "genai-alpha", canonical: "genai-alpha"},
 		"genai-alpha:cloud": {reported: "genai-alpha:cloud", canonical: "genai-alpha:cloud"},
 		"genai-gamma":       {reported: "genai-gamma", canonical: "genai-gamma"},
+		"priority":          {provider: pricingpkg.OpenAIPriorityProviderID, reported: "gpt-5.6-luna", canonical: "gpt-5.6-luna"},
 	}
 	usesModelA := []string{"model-a", "alias-a", "billed", "tier"}
 
@@ -1469,10 +1585,37 @@ func TestPricingResolverDependencyFingerprint(t *testing.T) {
 			rows[genAIIndex].GenAI = genAIDocument("2", "2", "3")
 			return rows
 		}, nil},
+		{"priority rate", func(rows []EffectivePricingRow) []EffectivePricingRow {
+			index := slices.IndexFunc(rows, func(row EffectivePricingRow) bool {
+				return row.ModelPattern == "gpt-5.6-luna@priority"
+			})
+			require.NotEqual(t, -1, index, "the priority row belongs to this fixture")
+			rows[index].Rates.InputPerMTok = money.MustParseDollars("0.6")
+			return rows
+		}, []string{"priority"}},
 		{"custom rate removed exposes genai", func(rows []EffectivePricingRow) []EffectivePricingRow {
 			return rows[:len(rows)-1]
 		}, []string{"genai-gamma"}},
 	}
+	t.Run("configured target eras and mappings", func(t *testing.T) {
+		t.Cleanup(func() { pricingpkg.SetConfiguredAliases(nil) })
+		in := input{reported: "gateway-kimi", canonical: "gateway-kimi"}
+		rows := append(baseRows(), fetched(pricingpkg.KimiK26Canonical, "2"), fetched(pricingpkg.KimiK3Canonical, "3"))
+		before := fingerprint(rows, in)
+		pricingpkg.SetConfiguredAliases(map[string]string{"gateway-kimi": "kimi-for-coding"})
+		mapped := fingerprint(rows, in)
+		assert.NotEqual(t, before, mapped)
+		repriced := slices.Clone(rows)
+		repriced[len(repriced)-2] = fetched(pricingpkg.KimiK26Canonical, "4")
+		assert.NotEqual(t, mapped, fingerprint(repriced, in))
+
+		pricingpkg.SetConfiguredAliases(map[string]string{"gateway-kimi": "kimi-for-coding", "other": "model-a"})
+		assert.Equal(t, mapped, fingerprint(rows, in))
+		pricingpkg.SetConfiguredAliases(map[string]string{"gateway-kimi": "model-a"})
+		assert.NotEqual(t, mapped, fingerprint(rows, in))
+		pricingpkg.SetConfiguredAliases(nil)
+		assert.Equal(t, before, fingerprint(rows, in))
+	})
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for name, in := range inputs {
@@ -1487,4 +1630,166 @@ func TestPricingResolverDependencyFingerprint(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPricingResolverResolvesGeminiDisplayNames(t *testing.T) {
+	genAI, err := pricingpkg.ParseGenAIPrices([]byte(`[
+		{
+			"id": "google",
+			"name": "Google",
+			"api_pattern": "https://example.invalid",
+			"model_match": {"contains": "gemini"},
+			"provider_match": {"or": [{"contains": "google"}, {"contains": "gemini"}]},
+			"models": [
+				{
+					"id": "gemini-4-neon",
+					"match": {"or": [{"equals": "gemini-4-neon"}, {"starts_with": "gemini-4-neon-preview"}]},
+					"prices": {"input_mtok": 3, "cache_read_mtok": 0.15, "output_mtok": 15}
+				},
+				{
+					"id": "gemini-4-argon",
+					"match": {"equals": "gemini-4-argon"},
+					"prices": [
+						{"prices": {"input_mtok": 2, "cache_read_mtok": 0.1, "output_mtok": 10}},
+						{"constraint": {"start_date": "2026-12-01"}, "prices": {"input_mtok": 4, "cache_read_mtok": 0.2, "output_mtok": 20}}
+					]
+				},
+				{
+					"id": "gemini-3.5-flash",
+					"match": {"equals": "gemini-3.5-flash"},
+					"prices": {"input_mtok": 1.5, "cache_read_mtok": 0.15, "output_mtok": 6}
+				}
+			]
+		}
+	]`))
+	require.NoError(t, err)
+
+	flatRows := []EffectivePricingRow{
+		{
+			ModelPattern: "gemini/gemini-4-neon",
+			Rates: ModelRates{
+				InputPerMTok:     money.MustParseDollars("3"),
+				OutputPerMTok:    money.MustParseDollars("15"),
+				CacheReadPerMTok: money.MustParseDollars("0.15"),
+				Source:           PricingRowSourceFetched,
+			},
+		},
+		{
+			ModelPattern: "vertex_ai/gemini-4-neon",
+			Rates: ModelRates{
+				InputPerMTok:     money.MustParseDollars("3"),
+				OutputPerMTok:    money.MustParseDollars("15"),
+				CacheReadPerMTok: money.MustParseDollars("0.15"),
+				Source:           PricingRowSourceFetched,
+			},
+		},
+		{
+			ModelPattern: "github_copilot/gemini-4-neon",
+			Rates: ModelRates{
+				InputPerMTok:     money.MustParseDollars("3"),
+				OutputPerMTok:    money.MustParseDollars("15"),
+				CacheReadPerMTok: money.MustParseDollars("0.15"),
+				Source:           PricingRowSourceFetched,
+			},
+		},
+	}
+
+	resolver := NewPricingResolver(append(slices.Clone(flatRows), EffectivePricingRow{
+		GenAI: genAI, GenAISource: PricingRowSourceFetched,
+	}))
+
+	nov := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	dec := time.Date(2026, 12, 2, 12, 0, 0, 0, time.UTC)
+
+	t.Run("timestamped display names match GenAI Prices including date windows", func(t *testing.T) {
+		tests := []struct {
+			model       string
+			at          time.Time
+			wantPattern string
+			wantInput   string
+			wantOutput  string
+			wantRead    string
+		}{
+			{"Gemini 4 Neon (High)", nov, "google/gemini-4-neon", "3", "15", "0.15"},
+			{"Gemini 4 Neon", nov, "google/gemini-4-neon", "3", "15", "0.15"},
+			{"Gemini 4 Argon (High)", nov, "google/gemini-4-argon", "2", "10", "0.1"},
+			{"Gemini 4 Argon (High)", dec, "google/gemini-4-argon", "4", "20", "0.2"},
+			{"Gemini 3.5 Flash (High)", nov, "google/gemini-3.5-flash", "1.5", "6", "0.15"},
+		}
+		for _, tt := range tests {
+			priced, lookup := resolver.ResolveAt(tt.model, tt.model, tt.at)
+			require.True(t, lookup.OK, "%s should resolve", tt.model)
+			assert.Equal(t, tt.model, priced)
+			assert.Equal(t, tt.wantPattern, lookup.Pattern)
+			assert.Equal(t, money.MustParseDollars(tt.wantInput), lookup.Rates.InputPerMTok)
+			assert.Equal(t, money.MustParseDollars(tt.wantOutput), lookup.Rates.OutputPerMTok)
+			assert.Equal(t, money.MustParseDollars(tt.wantRead), lookup.Rates.CacheReadPerMTok)
+		}
+	})
+
+	t.Run("untimestamped display name resolves via fixed Gemini 4 flat fallback", func(t *testing.T) {
+		for _, model := range []string{"Gemini 4 Neon (High)", "gemini-4-neon"} {
+			priced, lookup := resolver.ResolveAt(model, model, time.Time{})
+			require.True(t, lookup.OK, "%s should resolve", model)
+			assert.Equal(t, model, priced)
+			assert.Equal(t, "gemini/gemini-4-neon", lookup.Pattern)
+			assert.Equal(t, money.MustParseDollars("3"), lookup.Rates.InputPerMTok)
+			assert.Equal(t, money.MustParseDollars("15"), lookup.Rates.OutputPerMTok)
+			assert.Equal(t, money.MustParseDollars("0.15"), lookup.Rates.CacheReadPerMTok)
+		}
+	})
+
+	t.Run("dependency fingerprint tracks flat Gemini 4 target for uncanonicalized bare id", func(t *testing.T) {
+		flatOnly := NewPricingResolver(flatRows)
+		before, err := flatOnly.DependencyFingerprint("", "gemini-4-neon", "gemini-4-neon")
+		require.NoError(t, err)
+		repricedRows := slices.Clone(flatRows)
+		repricedRows[0].Rates.InputPerMTok = money.MustParseDollars("4")
+		after, err := NewPricingResolver(repricedRows).DependencyFingerprint("", "gemini-4-neon", "gemini-4-neon")
+		require.NoError(t, err)
+		assert.NotEqual(t, before, after)
+	})
+
+	t.Run("custom override wins over GenAI Prices for display name", func(t *testing.T) {
+		customResolver := NewPricingResolver([]EffectivePricingRow{
+			{
+				ModelPattern: "Gemini 4 Neon (High)",
+				Rates: ModelRates{
+					InputPerMTok: money.MustParseDollars("9"),
+					Source:       PricingRowSourceCustom,
+				},
+			},
+			{GenAI: genAI, GenAISource: PricingRowSourceFetched},
+		})
+		priced, lookup := customResolver.ResolveAt("Gemini 4 Neon (High)", "Gemini 4 Neon (High)", nov)
+		require.True(t, lookup.OK)
+		assert.Equal(t, "Gemini 4 Neon (High)", priced)
+		assert.Equal(t, PricingRowSourceCustom, lookup.Rates.Source)
+		assert.Equal(t, money.MustParseDollars("9"), lookup.Rates.InputPerMTok)
+	})
+
+	t.Run("dependency fingerprint tracks GenAI rate changes for display names", func(t *testing.T) {
+		updatedGenAI, parseErr := pricingpkg.ParseGenAIPrices([]byte(`[
+			{
+				"id": "google",
+				"name": "Google",
+				"api_pattern": "https://example.invalid",
+				"model_match": {"contains": "gemini"},
+				"models": [{
+					"id": "gemini-4-neon",
+					"match": {"equals": "gemini-4-neon"},
+					"prices": {"input_mtok": 5, "cache_read_mtok": 0.25, "output_mtok": 25}
+				}]
+			}
+		]`))
+		require.NoError(t, parseErr)
+		before, err := resolver.DependencyFingerprint("", "Gemini 4 Neon (High)", "Gemini 4 Neon (High)")
+		require.NoError(t, err)
+		afterResolver := NewPricingResolver(append(slices.Clone(flatRows), EffectivePricingRow{
+			GenAI: updatedGenAI, GenAISource: PricingRowSourceFetched,
+		}))
+		after, err := afterResolver.DependencyFingerprint("", "Gemini 4 Neon (High)", "Gemini 4 Neon (High)")
+		require.NoError(t, err)
+		assert.NotEqual(t, before, after)
+	})
 }

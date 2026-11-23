@@ -1,21 +1,24 @@
 import { test, expect, Page, Locator } from '@playwright/test';
 import { join } from 'path';
+import { readFileSync } from 'fs';
 
-const DIR = process.env.SCREENSHOT_DIR || join(
-  __dirname, '..', '..', 'assets', 'generated', 'screenshots'
-);
-
+const DIR = process.env.SCREENSHOT_DIR;
+const manifestPath = process.env.SCREENSHOT_MANIFEST;
+if (!DIR || !manifestPath || !process.env.SCREENSHOT_NOW) {
+  throw new Error('Capture requires an output directory, corpus manifest, and clock');
+}
+const CORPUS = JSON.parse(readFileSync(manifestPath, 'utf8'));
+const CAPTURE_NOW = new Date(process.env.SCREENSHOT_NOW);
+if (!Number.isFinite(CAPTURE_NOW.getTime())) throw new Error('Invalid capture clock');
 const FULL = { width: 1440, height: 900 };
-// Imported session IDs can contain original machine names.
-const CAPTURE_STYLE = '.session-id { visibility: hidden !important; }';
-
-// PG serve instance for pg-sync screenshots (machine labels, etc.)
+// Query latency is measured with performance.now(), independently of the fixed clock.
+const CAPTURE_STYLE = `
+  .session-id, .kit-refresh-control__text { visibility: hidden !important; }
+`;
 const PG_BASE_URL = process.env.PG_BASE_URL || '';
 
 test.beforeEach(async ({ page }) => {
-  if (process.env.SCREENSHOT_NOW) {
-    await page.clock.setFixedTime(new Date(process.env.SCREENSHOT_NOW));
-  }
+  await page.clock.setFixedTime(CAPTURE_NOW);
 });
 
 async function snap(page: Page, name: string) {
@@ -28,14 +31,37 @@ async function snap(page: Page, name: string) {
   });
 }
 
-async function snapEl(loc: Locator, name: string) {
-  await loc.page().evaluate(() => document.fonts.ready);
-  await loc.screenshot({
-    animations: 'disabled',
-    style: CAPTURE_STYLE,
-    path: join(DIR, `${name}.png`),
-    type: 'png',
+// Height by which the element exceeds the scrolling area that shows it. An
+// element screenshot past that area picks up fixed footers and blank space.
+async function overflowHeight(loc: Locator): Promise<number> {
+  return loc.evaluate((el) => {
+    let area = el.parentElement;
+    while (area && !/(auto|scroll)/.test(getComputedStyle(area).overflowY)) {
+      area = area.parentElement;
+    }
+    const visible = area ? area.clientHeight : window.innerHeight;
+    return Math.ceil(el.getBoundingClientRect().height - visible);
   });
+}
+
+async function snapEl(loc: Locator, name: string) {
+  const page = loc.page();
+  await page.evaluate(() => document.fonts.ready);
+  const size = page.viewportSize();
+  const overflow = size ? await overflowHeight(loc) : 0;
+  if (size && overflow > 0) {
+    await page.setViewportSize({ ...size, height: size.height + overflow });
+  }
+  try {
+    await loc.screenshot({
+      animations: 'disabled',
+      style: CAPTURE_STYLE,
+      path: join(DIR, `${name}.png`),
+      type: 'png',
+    });
+  } finally {
+    if (size && overflow > 0) await page.setViewportSize(size);
+  }
 }
 
 async function snapRange(
@@ -93,14 +119,30 @@ async function selectFirstSession(page: Page) {
   await page.waitForTimeout(1000);
 }
 
-// Find a session likely to have thinking/tool content
-// by looking for ones with higher message counts
+// Sessions holding only hook output appear in the sidebar but render
+// no messages, so a scan skips them instead of failing. Waiting for the
+// clicked session's transcript to load, rather than for a timeout,
+// keeps both capture passes choosing the same session.
+async function openSessionWithMessages(item: Locator): Promise<boolean> {
+  const page = item.page();
+  const id = await item.getAttribute('data-session-id');
+  if (!id) throw new Error('session item has no id');
+  await item.click();
+  const list = page.locator('.message-list-scroll');
+  await expect(list).toHaveAttribute('data-messages-session-id', id, { timeout: 10_000 });
+  await expect(list).toHaveAttribute('data-loaded', 'true', { timeout: 10_000 });
+  return page
+    .locator('.message')
+    .first()
+    .waitFor({ timeout: 2_000 })
+    .then(
+      () => true,
+      () => false,
+    );
+}
+
 async function selectRichSession(page: Page) {
-  const items = page.locator('.session-item');
-  const count = await items.count();
-  // Try the 3rd session (index 2) for variety, fall back to first
-  const idx = Math.min(2, count - 1);
-  await items.nth(idx).click();
+  await page.goto('/sessions/' + encodeURIComponent(CORPUS.targets.rich.session_id));
   await page.waitForSelector('.message', { timeout: 10_000 });
   await page.waitForTimeout(1000);
 }
@@ -293,22 +335,18 @@ test.describe('Dashboard', () => {
     );
     await page.waitForTimeout(500);
 
-    const panels = page.locator('.chart-panel');
-    const count = await panels.count();
-    for (let i = 0; i < count; i++) {
-      const text = await panels.nth(i).textContent();
-      if (text && (text.includes('Shape') || text.includes('Distribution'))) {
-        await panels.nth(i).scrollIntoViewIfNeeded();
-        await page.waitForTimeout(300);
-        await snapRange(
-          page,
-          panels.nth(i).locator('.shape-header'),
-          panels.nth(i).locator('.shape-footer'),
-          'session-shape'
-        );
-        break;
-      }
-    }
+    const panel = page.locator('.chart-panel').filter({
+      has: page.locator('.shape-header'),
+    });
+    await expect(panel).toBeVisible({ timeout: 5_000 });
+    await panel.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(300);
+    await snapRange(
+      page,
+      panel.locator('.shape-header'),
+      panel.locator('.shape-footer'),
+      'session-shape'
+    );
   });
 
   test('tool usage', async ({ page }) => {
@@ -392,17 +430,13 @@ test.describe('Dashboard', () => {
     );
     await page.waitForTimeout(500);
 
-    const panels = page.locator('.chart-panel');
-    const count = await panels.count();
-    for (let i = 0; i < count; i++) {
-      const text = await panels.nth(i).textContent();
-      if (text && text.includes('Comparison')) {
-        await panels.nth(i).scrollIntoViewIfNeeded();
-        await page.waitForTimeout(300);
-        await snapEl(panels.nth(i), 'agent-comparison');
-        break;
-      }
-    }
+    const panel = page.locator('.chart-panel').filter({
+      hasText: 'Agent comparison',
+    });
+    await expect(panel).toBeVisible({ timeout: 5_000 });
+    await panel.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(300);
+    await snapEl(panel, 'agent-comparison');
   });
 
   test('dashboard model filter', async ({ page }) => {
@@ -422,8 +456,11 @@ test.describe('Dashboard', () => {
       { state: 'visible', timeout: 5_000 }
     );
 
+    // Totals count subagent sessions but the other panels show root
+    // sessions only, so a model that only subagents use leaves them empty.
+    // claude-opus-4-6 runs root sessions throughout the corpus window.
     const rows = modelDropdown.locator('.kit-filter-dropdown__item');
-    await rows.filter({ hasText: /claude/i }).first().click();
+    await rows.filter({ hasText: 'claude-opus-4-6' }).click();
     await page.waitForTimeout(1500);
     await snap(page, 'analytics-model-filter');
 
@@ -439,18 +476,11 @@ test.describe('Dashboard', () => {
 
 test.describe('Activity dashboard', () => {
   async function navigateToActivity(page: Page, path = '/activity') {
-    // Anchor the range to the fixture, so a release run never captures an empty today.
-    const response = await page.request.get('/api/v1/sessions?limit=1');
-    const latest = (await response.json()).sessions[0];
-    const timestamp = new Date(
-      latest.ended_at || latest.started_at || latest.created_at
-    );
-    expect(
-      timestamp.getTime(), 'latest session must have a valid activity date'
-    ).not.toBeNaN();
+    // Use the completed previous week. The current week's report is clamped
+    // to the server's wall clock, independently of the browser's fixed clock.
     const date = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/Chicago',
-    }).format(timestamp);
+      timeZone: CORPUS.timezone,
+    }).format(new Date(CAPTURE_NOW.getTime() - 7 * 86_400_000));
     await page.goto(`${path}${path.includes('?') ? '&' : '?'}date=${date}`);
     await page.waitForSelector('.activity-page', { timeout: 10_000 });
     await expect(
@@ -1028,6 +1058,7 @@ test.describe('Message viewer', () => {
     });
     await page.goto(`/sessions/${encodeURIComponent(remote.id)}`);
     await expect(page.locator('.message').first()).toBeVisible();
+    await expect(page.locator('.cost-badge')).toBeVisible();
     await page.locator('.resume-btn').click();
     const menu = page.locator('.open-menu');
     await expect(menu.getByRole('button', { name: 'Copy command', exact: true })).toBeVisible();
@@ -1036,18 +1067,9 @@ test.describe('Message viewer', () => {
   });
 
   test('thinking blocks', async ({ page }) => {
-    // Sessions with thinking blocks are rare and never recent, so run.sh
-    // resolves one session id and passes it in; navigate straight there.
-    // Fall back to a rich session when the id is absent (e.g. local runs).
-    const thinkingId = process.env.SCREENSHOT_THINKING_SESSION_ID;
-    if (thinkingId) {
-      await page.goto('/sessions/' + encodeURIComponent(thinkingId));
-      await page.waitForSelector('.message', { timeout: 15_000 });
-      await page.waitForTimeout(500);
-    } else {
-      await selectRichSession(page);
-      await page.waitForTimeout(500);
-    }
+    await page.goto('/sessions/' + encodeURIComponent(CORPUS.targets.thinking.session_id));
+    await page.waitForSelector('.message', { timeout: 15_000 });
+    await page.waitForTimeout(500);
 
     // Surface a thinking block, scrolling the virtualized transcript if needed.
     let thinking = page.locator('.thinking-block').first();
@@ -1108,30 +1130,10 @@ test.describe('Message viewer', () => {
   });
 
   test('formatted tool output', async ({ page }) => {
-    const toolOutputId = process.env.SCREENSHOT_TOOL_OUTPUT_SESSION_ID;
-    const toolOutputOrdinal =
-      process.env.SCREENSHOT_TOOL_OUTPUT_MESSAGE_ORDINAL;
-    let toolScope: Page | Locator = page;
-    if (toolOutputId || toolOutputOrdinal) {
-      if (!toolOutputId || toolOutputOrdinal === undefined) {
-        throw new Error(
-          'tool-output screenshot requires both session id and message ordinal'
-        );
-      }
-      const ordinal = Number(toolOutputOrdinal);
-      if (!Number.isSafeInteger(ordinal) || ordinal < 0) {
-        throw new Error('tool-output screenshot ordinal must be non-negative');
-      }
-      await page.goto(
-        '/sessions/' + encodeURIComponent(toolOutputId) +
-          '?msg=' + encodeURIComponent(String(ordinal))
-      );
-      const selectedRow = page.locator('.virtual-row.selected');
-      await expect(selectedRow).toBeVisible({ timeout: 15_000 });
-      toolScope = selectedRow;
-    } else {
-      await selectRichSession(page);
-    }
+    const target = CORPUS.targets.tool_output;
+    await page.goto('/sessions/' + encodeURIComponent(target.session_id) + '?msg=' + target.message_ordinal);
+    const toolScope = page.locator('.virtual-row.selected');
+    await expect(toolScope).toBeVisible({ timeout: 15_000 });
 
     const tool = await findVisibleToolBlockWithOutput(toolScope);
 
@@ -1239,22 +1241,13 @@ test.describe('Message viewer', () => {
   test('block-type filter dropdown', async ({ page }) => {
     await selectRichSession(page);
 
-    // Click the block-type filter button
-    const filterBtn = page.locator(
-      'button[title="Filter block types"]'
-    );
-    if (await filterBtn.count() > 0) {
-      await filterBtn.click();
-      await page.waitForTimeout(300);
-
-      const dropdown = page.locator('.block-filter-dropdown');
-      if (await dropdown.count() > 0) {
-        await snapEl(dropdown, 'block-filter');
-      }
-
-      // Close by clicking elsewhere
-      await page.keyboard.press('Escape');
-    }
+    // Block visibility lives in the Transcript view menu.
+    await page.getByRole('button', { name: /^Transcript view:/ }).click();
+    const menu = page.getByRole('menu');
+    await expect(menu.getByText('Block Visibility', { exact: true })).toBeVisible();
+    await page.waitForTimeout(300);
+    await snapEl(menu, 'block-filter');
+    await page.keyboard.press('Escape');
   });
 
   test('copy button on message', async ({ page }) => {
@@ -1272,37 +1265,9 @@ test.describe('Message viewer', () => {
   });
 
   test('copy button on code block', async ({ page }) => {
-    const codeBlockId = process.env.SCREENSHOT_CODE_BLOCK_SESSION_ID;
-    if (codeBlockId) {
-      await page.goto('/sessions/' + encodeURIComponent(codeBlockId));
-      await page.waitForSelector('.code-block', { timeout: 15_000 });
-      await page.waitForTimeout(500);
-    }
-
-    // Walk sessions until we find one with at least one fenced
-    // code block. We scan more aggressively than selectRichSession
-    // because most sessions have only inline code or no code at
-    // all, and we need a `.code-block` (CodeBlock.svelte:34) for
-    // this test to be meaningful.
-    if (!codeBlockId) {
-      const items = page.locator('.session-item');
-      const total = await items.count();
-      const max = Math.min(40, total);
-      let found = false;
-      for (let i = 0; i < max; i++) {
-        await items.nth(i).click();
-        await page.waitForSelector('.message', { timeout: 10_000 });
-        await page.waitForTimeout(400);
-        if (await page.locator('.code-block').first().count() > 0) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        test.skip(true,
-          `No .code-block found in the first ${max} sessions`);
-      }
-    }
+    await page.goto('/sessions/' + encodeURIComponent(CORPUS.targets.code_block.session_id));
+    await page.waitForSelector('.code-block', { timeout: 15_000 });
+    await page.waitForTimeout(500);
 
     // Capture just the top of a code block where the copy
     // button lives (CopyButton is absolutely positioned at
@@ -1377,12 +1342,10 @@ test.describe('Command palette', () => {
     );
 
     const setup = palette.locator('.semantic-setup');
-    await expect(setup).toContainText(
-      "Semantic search isn't set up",
-      { timeout: 10_000 }
-    );
-    await expect(setup).toContainText('[vector]');
-    await expect(setup).toContainText('agentsview embeddings build');
+    await expect(setup).toContainText('Search by meaning', {
+      timeout: 10_000,
+    });
+    await expect(setup.getByRole('button', { name: 'Turn on' })).toBeVisible();
     await snapEl(palette.locator('.palette'), 'semantic-search-setup');
   });
 
@@ -1391,7 +1354,7 @@ test.describe('Command palette', () => {
     const palette = page.locator('.palette-overlay');
     await palette.locator('.palette-input').fill('implement');
     await palette.getByTitle('Select project', { exact: true }).click();
-    await page.getByRole('option', { name: /^agentsview \(/ }).first().click();
+    await page.getByRole('option', { name: /^agentsview \S+$/ }).first().click();
     await expect(palette.locator('.palette-item').first()).toBeVisible();
     await palette.getByRole('button', { name: 'All time', exact: true }).click();
     await expect(page.getByRole('radio', { name: 'Calendar', exact: true })).toBeVisible();
@@ -1444,12 +1407,8 @@ test.describe('Modals', () => {
 
   test('publish modal', async ({ page }) => {
     await selectFirstSession(page);
-    await page.locator(
-      'button[aria-label="Publish to Gist"]'
-    ).click();
-    await page.locator('.export-dropdown .overflow-item', {
-      hasText: 'Publish public Gist',
-    }).click();
+    await page.getByRole('button', { name: 'More actions', exact: true }).click();
+    await page.getByRole('menuitem', { name: /Publish public Gist/ }).click();
     const dialog = page.getByRole('dialog', {
       name: 'Publish to public GitHub Gist',
     });
@@ -1577,8 +1536,24 @@ test.describe('Recall and Quality', () => {
           })),
         }),
       };
+      // The header adds the step count and cost after the page's own usage
+      // request returns. Waiting for both keeps the capture passes identical.
+      // The page can cancel and repeat that request, so ask the server for
+      // the same usage instead of reading the browser's response.
+      const usage = await (
+        await page.request.get(
+          `/api/v1/sessions/${encodeURIComponent(session.id)}/usage?rollup=true`
+        )
+      ).json();
       await page.goto(`/sessions/${encodeURIComponent(session.id)}`);
       await expect(page.locator('.message').first()).toBeVisible();
+      if ((usage.breakdown_count ?? 0) > 0) {
+        await expect(page.locator('.usage-breakdown')).toBeVisible();
+      }
+      const rollup = usage.rollup_subagent_count > 0 && usage.has_rollup_cost === true;
+      if (rollup ? usage.rollup_cost != null : usage.has_cost) {
+        await expect(page.locator('.cost-badge')).toBeVisible();
+      }
       await page.getByRole('button', { name: 'Session actions', exact: true }).click();
       await expect(page.getByRole('button', { name: 'Analyze tool effectiveness', exact: true })).toBeVisible();
       await snap(page, 'tool-effectiveness-action');
@@ -1719,19 +1694,23 @@ test.describe('Settings', () => {
   });
 
   test('settings archive image retention', async ({ page }) => {
-    // Save only in this browser's response fixture; other captures keep their policy.
+    // Save only in this browser's response fixture; other captures keep their
+    // policy. A real save reports that the new policy waits for a restart.
     await page.route('**/api/v1/settings', async (route) => {
       if (route.request().method() !== 'PUT') return route.continue();
       const current = await (await page.request.get('/api/v1/settings')).json();
-      await route.fulfill({ json: { ...current, ...route.request().postDataJSON() } });
+      await route.fulfill({ json: { ...current, ...route.request().postDataJSON(), restart_required: true } });
     });
     await openSettings(page);
-    const section = await openSettingsPanel(page, 'Archive content');
-    const offload = section.getByRole('radio', { name: 'Offload', exact: true });
+    // The ingest policy heads the Tool-result images section; capture just
+    // its row so the image cleanup below stays out of this shot.
+    const section = await openSettingsPanel(page, 'Tool-result images');
+    const policy = section.locator('.archive-content-settings');
+    const offload = policy.getByRole('radio', { name: 'Offload', exact: true });
     await offload.click();
     await expect(offload).toHaveAttribute('aria-checked', 'true');
-    await expect(section.getByRole('status')).toContainText('Restart');
-    await snapEl(section, 'settings-archive-content');
+    await expect(policy.getByRole('status')).toContainText('Restart');
+    await snapEl(policy, 'settings-archive-content');
   });
 
   test('settings alternate agent homes', async ({ page }) => {
@@ -1746,7 +1725,7 @@ test.describe('Settings', () => {
       await route.fulfill({ response, json: settings });
     });
     await openSettings(page);
-    const section = await openSettingsPanel(page, 'Session Providers');
+    const section = await openSettingsPanel(page, 'Session providers');
     const card = section.locator('.provider-row').filter({
       has: page.locator('.provider-name', { hasText: /^Codex$/ }),
     });
@@ -1777,8 +1756,7 @@ test.describe('Settings', () => {
     await openSettings(page);
     const remoteSection = await openSettingsPanel(
       page,
-      'Remote access',
-      'Remote Access'
+      'Remote access'
     );
     await remoteSection.scrollIntoViewIfNeeded();
     await page.waitForTimeout(500);
@@ -1805,12 +1783,10 @@ test.describe('Settings', () => {
   });
 
   test('settings embedding build progress', async ({ page }) => {
-    let statusPolls = 0;
-    const startedAt = new Date(Date.now() - 65_000).toISOString();
+    const startedAt = new Date(CAPTURE_NOW.getTime() - 65_000).toISOString();
 
     await page.route('**/api/v1/embeddings/status', async (route) => {
-      statusPolls += 1;
-      const done = 240 + statusPolls * 120;
+      const done = 360;
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -1824,6 +1800,16 @@ test.describe('Settings', () => {
           phase: 'embedding',
           rate_per_second: 10,
           running: true,
+          setup: {
+            action: '',
+            busy: false,
+            downloaded_bytes: 0,
+            enabled: true,
+            installing: false,
+            missing_bytes: 0,
+            provider: 'built-in',
+            total_bytes: 0,
+          },
           started_at: startedAt,
           total: 1000,
         }),
@@ -1860,10 +1846,10 @@ test.describe('Settings', () => {
     await embeddingsSection.scrollIntoViewIfNeeded();
     await expect(
       embeddingsSection.getByRole('progressbar', {
-        name: 'Embedding progress',
+        name: 'Search by meaning setup',
       })
     ).toBeVisible();
-    await expect(embeddingsSection.getByText(/^ETA /)).toBeVisible({
+    await expect(embeddingsSection.getByText(/^Indexing 360 of 1,000 text sections · .* left/)).toBeVisible({
       timeout: 5_000,
     });
 
@@ -2101,20 +2087,18 @@ test.describe('Focused transcript mode', () => {
   });
 
   test('focused transcript view', async ({ page }) => {
-    // Click the "Focused" pill in the transcript strip
-    const focusedPill = page.locator(
-      'button[aria-label="Focused transcript mode"]'
-    );
-    await expect(focusedPill).toBeVisible({ timeout: 5_000 });
-    await focusedPill.click();
+    // Content mode lives in the Transcript view menu.
+    const viewMenu = page.getByRole('button', { name: /^Transcript view:/ });
+    await viewMenu.click();
+    await page.getByRole('menuitemradio', {
+      name: /Only your prompts and final answers/,
+    }).click();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('menu')).toBeHidden();
+    await expect(viewMenu).toHaveAccessibleName(/prompts and answers/);
+    await viewMenu.blur();
     await page.waitForTimeout(1000);
     await snap(page, 'focused-transcript');
-
-    // Toggle back to normal mode
-    const normalPill = page.locator(
-      'button[aria-label="Normal transcript mode"]'
-    );
-    await normalPill.click();
   });
 });
 
@@ -2122,7 +2106,7 @@ test.describe('Focused transcript mode', () => {
 
 test.describe('Machine labels', () => {
   test('machine labels on session items', async ({ page }) => {
-    test.skip(!PG_BASE_URL, 'PG_BASE_URL not set');
+    expect(PG_BASE_URL, 'PG_BASE_URL is required').not.toBe('');
 
     await page.setViewportSize(FULL);
     await page.goto(PG_BASE_URL);
@@ -2219,31 +2203,35 @@ test.describe('Import conversations', () => {
     await waitForApp(page);
   });
 
-  test('import button in header', async ({ page }) => {
-    const importBtn = page.locator(
-      'button[title="Import conversations"]'
-    );
-    await expect(importBtn).toBeVisible({ timeout: 5_000 });
+  // Import lives in the header's More actions menu.
+  async function openImportMenu(page: Page) {
+    await page.getByRole('button', { name: 'More actions', exact: true }).click();
+    const item = page.getByRole('menuitem', { name: 'Import conversations' });
+    await expect(item).toBeVisible({ timeout: 5_000 });
+    return item;
+  }
 
-    // Capture a region around the button for context — snap
-    // the header-right section that contains it.
-    const headerRight = page.locator('.header-right');
-    if (await headerRight.count() > 0) {
-      await snapEl(headerRight, 'import-button');
-    } else {
-      await snapEl(importBtn, 'import-button');
-    }
+  async function openImportModal(page: Page) {
+    await (await openImportMenu(page)).click();
+    const modal = page.getByRole('dialog');
+    await expect(modal).toBeVisible({ timeout: 5_000 });
+    return modal;
+  }
+
+  test('import button in header', async ({ page }) => {
+    await openImportMenu(page);
+    await page.waitForTimeout(300);
+    // The open menu with the header buttons it drops from.
+    await snapRange(
+      page,
+      page.getByRole('button', { name: 'Keyboard shortcuts', exact: true }),
+      page.getByRole('menu'),
+      'import-button'
+    );
   });
 
   test('import modal claude-ai', async ({ page }) => {
-    const importBtn = page.locator(
-      'button[title="Import conversations"]'
-    );
-    await expect(importBtn).toBeVisible({ timeout: 5_000 });
-    await importBtn.click();
-
-    const modal = page.locator('div[role="dialog"]');
-    await expect(modal).toBeVisible({ timeout: 5_000 });
+    const modal = await openImportModal(page);
     await page.waitForTimeout(300);
 
     // Claude.ai is the default provider
@@ -2253,14 +2241,7 @@ test.describe('Import conversations', () => {
   });
 
   test('import modal chatgpt', async ({ page }) => {
-    const importBtn = page.locator(
-      'button[title="Import conversations"]'
-    );
-    await expect(importBtn).toBeVisible({ timeout: 5_000 });
-    await importBtn.click();
-
-    const modal = page.locator('div[role="dialog"]');
-    await expect(modal).toBeVisible({ timeout: 5_000 });
+    const modal = await openImportModal(page);
     await page.waitForTimeout(300);
 
     // Select ChatGPT provider via its label
@@ -2276,8 +2257,7 @@ test.describe('Import conversations', () => {
     await page.route('**/api/v1/import/claude-ai/chrome', (route) =>
       route.fulfill({ json: { connected: true } })
     );
-    await page.getByTitle('Import conversations', { exact: true }).click();
-    const modal = page.getByRole('dialog');
+    const modal = await openImportModal(page);
     await expect(modal.getByText('Connected', { exact: true })).toBeVisible();
     await expect(modal.getByRole('button', { name: 'Sync', exact: true })).toBeEnabled();
     await snapEl(modal, 'import-claude-sync');
@@ -2304,8 +2284,7 @@ test.describe('Session Vital Signs', () => {
       'button[aria-label="Show session analysis"], button[aria-label="Hide session analysis"]',
     );
     for (let i = 0; i < limit; i++) {
-      await items.nth(i).click();
-      await page.waitForSelector('.message', { timeout: 10_000 });
+      if (!(await openSessionWithMessages(items.nth(i)))) continue;
       await page.waitForTimeout(400);
       if (!(await vitalsBtn.count()) || !(await vitalsBtn.isVisible())) {
         continue;
@@ -2346,28 +2325,6 @@ test.describe('Session Vital Signs', () => {
   });
 });
 
-// ── Trends ──────────────────────────────────────────────
-
-test.describe('Trends', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.setViewportSize(FULL);
-    await waitForApp(page);
-  });
-
-  test('trends page', async ({ page }) => {
-    await page.goto('/trends');
-    await page.waitForSelector('.trends-page', { timeout: 10_000 });
-    // The default-terms request resolves async; wait for both the
-    // chart svg lines and the term-table rows so the page is fully
-    // populated before we snap.
-    await page.waitForSelector('.term-table-wrap tbody tr', {
-      timeout: 15_000,
-    });
-    await page.waitForTimeout(1500);
-    await snap(page, 'trends');
-  });
-});
-
 // ── Session intelligence ────────────────────────────────
 
 test.describe('Session intelligence', () => {
@@ -2385,8 +2342,7 @@ test.describe('Session intelligence', () => {
     const total = await items.count();
     const limit = Math.min(total, 25);
     for (let i = 0; i < limit; i++) {
-      await items.nth(i).click();
-      await page.waitForSelector('.message', { timeout: 10_000 });
+      if (!(await openSessionWithMessages(items.nth(i)))) continue;
       await page.waitForTimeout(400);
       const badge = page.locator('.grade-badge');
       if (
@@ -2413,8 +2369,7 @@ test.describe('Session intelligence', () => {
     const limit = Math.min(total, 30);
     let firstGradedIdx = -1;
     for (let i = 0; i < limit; i++) {
-      await items.nth(i).click();
-      await page.waitForSelector('.message', { timeout: 10_000 });
+      if (!(await openSessionWithMessages(items.nth(i)))) continue;
       await page.waitForTimeout(300);
       const badge = page.locator('.grade-badge').first();
       if (!(await badge.count()) || !(await badge.isVisible())) {
@@ -2639,7 +2594,7 @@ test.describe('Recent Edits', () => {
     await page.waitForSelector('.recent-edits-page', {
       timeout: 10_000,
     });
-    await page.waitForSelector('.re-file', { timeout: 10_000 });
+    await page.waitForSelector('.re-file-row', { timeout: 10_000 });
 
     const firstRow = page.locator('.re-file-row').first();
     await firstRow.click();
@@ -2647,5 +2602,190 @@ test.describe('Recent Edits', () => {
     await page.waitForTimeout(500);
 
     await snap(page, 'recent-edits');
+  });
+});
+
+// ── Friction Log ────────────────────────────────────────
+
+test.describe('Friction Log', () => {
+  const DATE = new Date(CAPTURE_NOW.getTime() - 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const PREVIOUS = new Date(CAPTURE_NOW.getTime() - 2 * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const FIRST = 'fl1:' + 'a'.repeat(64);
+  const SECOND = 'fl1:' + 'b'.repeat(64);
+
+  function finding(overrides: Record<string, unknown>) {
+    return {
+      kind: 'correction',
+      detector: 'correction.coding',
+      subject_id: 'session-a',
+      subject_kind: 'session',
+      title: '',
+      fingerprint: 'fl1:' + 'c'.repeat(64),
+      text: '',
+      tool_name: '',
+      label: '',
+      evidence: '',
+      message_ordinal: 3,
+      call_index: null,
+      occurred_at: null,
+      seat: '',
+      agent: 'claude',
+      machine: '',
+      persona: '',
+      channel: '',
+      session_url: '',
+      ...overrides,
+    };
+  }
+
+  const signals = [
+    finding({
+      kind: 'error',
+      detector: 'error',
+      subject_id: 'session-b',
+      tool_name: 'Bash',
+      title: 'make test exited 2: missing fixture',
+      text: 'make test exited 2: missing fixture',
+      fingerprint: FIRST,
+      message_ordinal: 14,
+    }),
+    finding({
+      kind: 'workaround',
+      detector: 'workaround',
+      title: 'Skipped the failing migration test',
+      text: 'Skipped the failing migration test for now',
+      fingerprint: SECOND,
+      message_ordinal: 21,
+    }),
+    finding({
+      title: 'Use the existing retry helper',
+      text: 'No, use the existing retry helper',
+      message_ordinal: 7,
+    }),
+    finding({
+      kind: 'interruption',
+      detector: 'interruption',
+      subject_id: 'session-b',
+      fingerprint: 'fl1:' + 'd'.repeat(64),
+      message_ordinal: 9,
+    }),
+  ];
+
+  const pattern = {
+    kind: 'error',
+    last_ordinal: 14,
+    last_seen_date: DATE,
+    last_subject_id: 'session-b',
+  };
+
+  const digest = {
+    date: DATE,
+    timezone: CORPUS.timezone || 'UTC',
+    rules_version: 'friction-v1',
+    built_at: DATE + 'T23:59:00Z',
+    revision: 1,
+    sessions_scanned: 18,
+    markdown_sha256: '0'.repeat(64),
+    summary: {
+      date: DATE,
+      schema_version: 1,
+      sessions_scanned: 18,
+      corrections: 1,
+      errors: 1,
+      workarounds: 1,
+      deferrals: 0,
+      patterns: 0,
+      frustrations: 0,
+      interruptions: 1,
+      p0_alerts: { Bash: ['session-a', 'session-b', 'session-c'] },
+    },
+    signals,
+    p0_alerts: [
+      { tool: 'Bash', subject_ids: ['session-a', 'session-b', 'session-c'] },
+    ],
+    patterns: [
+      {
+        ...pattern,
+        fingerprint: FIRST,
+        title: 'make test exited 2: missing fixture',
+        first_seen_date: '2026-03-24',
+        occurrence_count: 9,
+        session_count: 5,
+        issue: {
+          issue_uid: 'issue-1',
+          linked_at: DATE + 'T12:00:00Z',
+          qualified_id: 'project-a#42',
+          source: 'filed',
+        },
+      },
+      {
+        ...pattern,
+        kind: 'workaround',
+        fingerprint: SECOND,
+        title: 'Skipped the failing migration test',
+        first_seen_date: DATE,
+        last_ordinal: 21,
+        last_subject_id: 'session-a',
+        occurrence_count: 2,
+        session_count: 2,
+      },
+    ],
+    sessions: {
+      'session-a': { agent: 'claude', project: 'project-a', display_name: 'Add retry handling' },
+      'session-b': { agent: 'codex', project: 'project-a', display_name: 'Fix fixture loading' },
+      'session-c': { agent: 'claude', project: 'project-b', display_name: 'Update build scripts' },
+    },
+  };
+
+  test('daily digest', async ({ page }) => {
+    await page.route('**/api/v1/version', async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        json: {
+          ...(await response.json()),
+          friction_available: true,
+          friction_build_allowed: true,
+          friction_readable: true,
+        },
+      });
+    });
+    await page.route('**/api/v1/kata/status', (route) =>
+      route.fulfill({ json: { project: 'project-a', state: 'ready' } })
+    );
+    await page.route('**/api/v1/friction/**', async (route) => {
+      const path = new URL(route.request().url()).pathname.replace(/\/+$/, '');
+      const item = (date: string) => ({
+        date,
+        timezone: digest.timezone,
+        rules_version: digest.rules_version,
+        built_at: date + 'T23:59:00Z',
+        revision: 1,
+        sessions_scanned: 18,
+      });
+      if (path.endsWith('/friction/digests')) {
+        await route.fulfill({ json: { digests: [item(DATE), item(PREVIOUS)] } });
+      } else if (path.endsWith('/friction/digests/' + DATE)) {
+        await route.fulfill({ json: digest });
+      } else if (path.endsWith('/friction/digests/' + DATE + '/md')) {
+        await route.fulfill({ contentType: 'text/markdown', body: '# Friction Log\n' });
+      } else {
+        await route.fulfill({ status: 404, json: { detail: 'unmocked ' + path } });
+      }
+    });
+
+    await page.setViewportSize(FULL);
+    await page.goto('/friction?date=' + DATE);
+    const friction = page.locator('.friction-page');
+    await expect(friction.getByRole('heading', { level: 1 })).toContainText(DATE, {
+      timeout: 15_000,
+    });
+    await expect(friction).toContainText('make test exited 2');
+    await page.waitForTimeout(500);
+    await snap(page, 'friction-log');
   });
 });

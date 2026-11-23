@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,4 +176,98 @@ func TestSearchContent_ActiveFilterHTTPCompatibility(t *testing.T) {
 			assert.Equal(t, map[string]int{"active": 1, "idle": 1, "malformed": 1, "missing-active": 1, "missing-idle": 1, "boundary": 1, "crossing": 1}, lookups)
 		})
 	}
+}
+
+func TestSearchContent_HintsApplyLegacyActivityFilter(t *testing.T) {
+	for _, response := range []string{"active", "mixed", "idle", "active first page"} {
+		t.Run(response, func(t *testing.T) {
+			// The idle case shows automated sessions, so its hint search serves
+			// one-shot sessions alone and keeps the caller's limit of one.
+			limit, hintLimit, includeAutomated := 10, "500", false
+			if response == "idle" {
+				limit, hintLimit, includeAutomated = 1, "1", true
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/api/v1/search/content" {
+					assert.Equal(t, "2024-06-15T11:50:00Z", r.URL.Query().Get("exclude_active_since"))
+					if r.URL.Query().Get("include_one_shot") != "true" {
+						assert.Equal(t, strconv.Itoa(limit), r.URL.Query().Get("limit"))
+						if response == "active first page" {
+							_, _ = w.Write([]byte(`{"matches":[{"session_id":"active"}]}`))
+						} else {
+							_, _ = w.Write([]byte(`{"matches":[]}`))
+						}
+						return
+					}
+					// A hint search shared between one-shot and automated
+					// sessions asks for the widest page.
+					assert.Equal(t, hintLimit, r.URL.Query().Get("limit"))
+					switch response {
+					case "active":
+						_, _ = w.Write([]byte(`{"matches":[{"session_id":"active"}]}`))
+					case "idle":
+						_, _ = w.Write([]byte(`{"matches":[{"session_id":"idle"}],"next_cursor":1}`))
+					default:
+						_, _ = w.Write([]byte(`{"matches":[{"session_id":"active"},{"session_id":"idle"}]}`))
+					}
+					return
+				}
+				if r.URL.Path == "/api/v1/sessions" {
+					_, _ = w.Write([]byte(`{"sessions":[{"id":"active","user_message_count":1},{"id":"idle","user_message_count":1}]}`))
+					return
+				}
+				id := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
+				activity := "2024-06-15T11:59:00Z"
+				if id == "idle" {
+					activity = "2024-06-15T10:00:00Z"
+				}
+				_, _ = fmt.Fprintf(w, `{"id":%q,"ended_at":%q}`, id, activity)
+			}))
+			defer srv.Close()
+			ts := &toolset{svc: servicehttp.NewHTTPBackend(srv.URL, "", false, ""), now: func() time.Time { return fixedNow }}
+			_, out, err := ts.searchContent(t.Context(), nil, searchContentIn{Pattern: "marker", Limit: limit, IncludeAutomated: includeAutomated})
+			require.NoError(t, err)
+			assert.Empty(t, out.Matches)
+			if response == "active first page" {
+				assert.Equal(t, 1, out.ExcludedActive)
+			}
+			if response == "active" {
+				assert.Empty(t, out.Hints)
+				return
+			}
+			require.Len(t, out.Hints, 1)
+			assert.Equal(t, "at least 1 match is in one-shot sessions, hidden by default", out.Hints[0].Message)
+			assert.Equal(t, map[string]any{"include_one_shot": true}, out.Hints[0].RetryWith)
+		})
+	}
+}
+
+func TestSearchContent_CurrentSessionRawID(t *testing.T) {
+	ts, d := newTestToolset(t)
+	seedFTSSession(t, d, "codex:current", "proj", "needle current", "2024-06-15T11:59:00Z")
+	seedFTSSession(t, d, "other", "proj", "needle other", "2024-06-15T11:58:00Z")
+
+	_, out, err := ts.searchContent(t.Context(), nil, searchContentIn{Pattern: "needle", CurrentSessionID: "current", IncludeOneShot: true})
+	require.NoError(t, err)
+	require.Len(t, out.Matches, 1)
+	assert.Equal(t, "other", out.Matches[0].SessionID)
+	assert.Equal(t, "codex:current", out.Exclusions.CurrentSessionID)
+	assert.False(t, out.Exclusions.RecentActive)
+
+	_, out, err = ts.searchContent(t.Context(), nil, searchContentIn{Pattern: "needle", SessionID: "current", IncludeActive: true, IncludeOneShot: true})
+	require.NoError(t, err)
+	require.Len(t, out.Matches, 1)
+	assert.Equal(t, "codex:current", out.Matches[0].SessionID)
+
+	_, out, err = ts.searchContent(t.Context(), nil, searchContentIn{Pattern: "needle", CurrentSessionID: "unindexed", IncludeOneShot: true})
+	require.NoError(t, err)
+	require.Len(t, out.Matches, 2)
+	assert.Equal(t, "unindexed", out.Exclusions.CurrentSessionID)
+	assert.False(t, out.Exclusions.RecentActive)
+
+	dbtest.SeedSession(t, d, "codex:duplicate", "proj")
+	dbtest.SeedSession(t, d, "host~duplicate", "proj")
+	_, _, err = ts.searchContent(t.Context(), nil, searchContentIn{Pattern: "needle", CurrentSessionID: "duplicate"})
+	require.ErrorContains(t, err, `ambiguous session UUID "duplicate"`)
 }

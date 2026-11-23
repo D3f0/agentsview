@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { fileReferences } from "../../stores/file-references.svelte.js";
   import { errorTelemetry } from "../../utils/error-telemetry.js";
   import { onDestroy, tick, untrack } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import { Button, EmptyState } from "@kenn-io/kit-ui";
   // kit-ui-check-ignore: MessageList uses the local TanStack wrapper for pinned-message scroll reconciliation and per-session measurement cache resets; kit-ui VirtualList does not expose those controls yet.
   import type { Virtualizer } from "@tanstack/virtual-core";
@@ -13,6 +15,7 @@
   import { cancelScrollReconcile, createVirtualizer } from "../../virtual/createVirtualizer.svelte.js";
   import MessageContent from "./MessageContent.svelte";
   import CompactBoundaryDivider from "./CompactBoundaryDivider.svelte";
+  import EmptyMessagesRow from "./EmptyMessagesRow.svelte";
   import SystemBoundaryCard from "../system/SystemBoundaryCard.svelte";
   import ToolCallGroup from "./ToolCallGroup.svelte";
   import type { DbMessage as Message } from "../../api/generated/index.js";
@@ -25,6 +28,8 @@
   import { inSessionSearch } from "../../stores/inSessionSearch.svelte.js";
   import { sessionActivity } from "../../stores/sessionActivity.svelte.js";
   import SessionFindView from "./SessionFindView.svelte";
+  import LoadError from "../shared/LoadError.svelte";
+  import LoadingState from "../shared/LoadingState.svelte";
   import {
     getLatestDisplayIndex,
     type ScrollAlign,
@@ -39,7 +44,38 @@
     projectSessionScope,
   } from "../../search/session-scope.js";
 
+  $effect(() => {
+    const id = messages.sessionId;
+    const revision = messages.loadedRevision;
+    if (fileReferences.enabled) untrack(() => void fileReferences.track(id, revision));
+  });
+
+  onDestroy(() => fileReferences.reset());
+
   let containerRef: HTMLDivElement | undefined = $state(undefined);
+
+  // Classic scrollbars take width from the transcript, which moves its
+  // centered reading column left by half their width. Publish that width
+  // on the content column so the session header above can center its
+  // title and stats on the same column.
+  $effect(() => {
+    const scroller = containerRef;
+    // SessionFindView wraps the scroller; its parent holds the header too.
+    const column = scroller?.closest(".find-viewport")?.parentElement;
+    if (!scroller || !column) return;
+    const publish = () => {
+      const width = scroller.offsetWidth - scroller.clientWidth;
+      column.style.setProperty("--transcript-scrollbar", `${width}px`);
+    };
+    publish();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(publish);
+    observer.observe(scroller);
+    return () => {
+      observer.disconnect();
+      column.style.removeProperty("--transcript-scrollbar");
+    };
+  });
   let containerScrollTop = $state(0);
   let scrollRaf: number | null = null;
   let lastScrollRequest = 0;
@@ -110,6 +146,9 @@
         if (!item) return `${sid}-${index}`;
         if (item.kind === "tool-group") {
           return `${sid}-tg-${item.ordinals[0]}`;
+        }
+        if (item.kind === "empty-group") {
+          return `${sid}-eg-${item.ordinals[0]}`;
         }
         return `${sid}-m-${item.message.ordinal}`;
       },
@@ -217,7 +256,12 @@
         continue;
       }
 
-      for (const ordinal of visibleToolGroupOrdinals(row.index)) {
+      // A closed empty row stands for all its members; an open one has a
+      // card per member, so only cards on screen count as read.
+      const groupOrdinals = item.kind === "empty-group" && !emptyGroupOpen(item)
+        ? item.ordinals
+        : visibleToolGroupOrdinals(row.index);
+      for (const ordinal of groupOrdinals) {
         visibleOrdinals.add(ordinal);
         maxVisibleOrdinal = maxVisibleOrdinal === null
           ? ordinal
@@ -526,6 +570,47 @@
     return new Promise((r) => requestAnimationFrame(() => r()));
   }
 
+  // Ordinals of empty messages whose collapsed row is open. Ordinals are
+  // per session, so a session change closes every row.
+  const openEmptyOrdinals = new SvelteSet<number>();
+  $effect(() => {
+    void messages.sessionId;
+    untrack(() => openEmptyOrdinals.clear());
+  });
+
+  function setEmptyGroupOpen(ordinals: number[], open: boolean) {
+    for (const ordinal of ordinals) {
+      if (open) openEmptyOrdinals.add(ordinal);
+      else openEmptyOrdinals.delete(ordinal);
+    }
+  }
+
+  function emptyGroupOpen(item: DisplayItem): boolean {
+    return item.ordinals.some((ordinal) => openEmptyOrdinals.has(ordinal));
+  }
+
+  // A click on a card inside an open empty row selects that card's message.
+  function clickedEmptyMemberOrdinal(
+    item: DisplayItem,
+    target: EventTarget | null,
+  ): number | undefined {
+    if (item.kind !== "empty-group" || !(target instanceof Element)) return undefined;
+    const card = target.closest<HTMLElement>("[data-message-ordinal]");
+    const ordinal = Number(card?.dataset.messageOrdinal);
+    return item.ordinals.includes(ordinal) ? ordinal : undefined;
+  }
+
+  // Distance from the top of a display row to the card of `ordinal` inside an
+  // open empty row, so a jump lands on that card instead of the row's top.
+  function emptyMemberOffset(index: number, ordinal: number): number {
+    const item = itemAt(index);
+    if (!containerRef || item?.kind !== "empty-group") return 0;
+    const row = containerRef.querySelector<HTMLElement>(`.virtual-row[data-index="${index}"]`);
+    const card = row?.querySelector<HTMLElement>(`[data-message-ordinal="${ordinal}"]`);
+    if (!row || !card) return 0;
+    return card.getBoundingClientRect().top - row.getBoundingClientRect().top;
+  }
+
   function displayIndexOf(ordinal: number): number {
     const ascIndex = displayItemsAsc.findIndex((item) => item.ordinals.includes(ordinal));
     if (ascIndex < 0) return -1;
@@ -585,8 +670,10 @@
     // TanStack's private getMeasurements() rebuilds it; getTotalSize() runs that rebuild publicly.
     // getOffsetForIndex also initializes scrollOffset through TanStack's private getter.
     instance.getTotalSize();
-    const offset = instance.getOffsetForIndex(index, "start")?.[0];
-    if (offset === undefined) return;
+    const rowOffset = instance.getOffsetForIndex(index, "start")?.[0];
+    if (rowOffset === undefined) return;
+    const memberOffset = emptyMemberOffset(index, jump.ordinal);
+    const offset = rowOffset + memberOffset;
     const previousOffset = untrack(() => jump.offset);
     jump.offset = offset;
     if (Math.abs(offset - (instance.scrollOffset ?? 0)) <= 1) return;
@@ -595,7 +682,8 @@
       endScrollOwnership(jump.reqId);
       return;
     }
-    instance.scrollToIndex(index, { align: "start" });
+    if (memberOffset > 0) instance.scrollToOffset(offset);
+    else instance.scrollToIndex(index, { align: "start" });
   });
 
   function endScrollOwnership(reqId = lastScrollRequest): number {
@@ -636,6 +724,22 @@
       await messages.ensureOrdinalLoaded(ordinal);
       if (!isCurrent() || !targetHolds()) return endScrollOwnership(reqId);
       // Loading needs one frame for Svelte and another for resize observation.
+      await raf();
+      if (!isCurrent()) return endScrollOwnership(reqId);
+      await raf();
+      if (!isCurrent() || !targetHolds()) return endScrollOwnership(reqId);
+    }
+
+    // A message inside a collapsed empty row has no card until the row opens.
+    const emptyGroup = displayItemsAsc.find(
+      (item) => item.kind === "empty-group" && item.ordinals.includes(ordinal),
+    );
+    if (emptyGroup && !emptyGroupOpen(emptyGroup)) {
+      setEmptyGroupOpen(emptyGroup.ordinals, true);
+      // Let the opened row render and be measured before the jump scrolls
+      // into it. A row that grows above the scroll position makes the
+      // virtualizer shift the scroll by the growth, past the target card.
+      await tick();
       await raf();
       if (!isCurrent()) return endScrollOwnership(reqId);
       await raf();
@@ -714,7 +818,7 @@
   function latestDisplaySignature(): string {
     const item = displayItemsAsc[displayItemsAsc.length - 1];
     if (!item) return "";
-    if (item.kind === "tool-group") {
+    if (item.kind !== "message") {
       return item.messages
         .map((m) => `${m.ordinal}:${m.content_length}:${m.timestamp}`)
         .join("|");
@@ -769,6 +873,17 @@
     return match ? `${match.ordinal}:${match.blockKey}:${match.occurrence}` : "";
   });
 
+  // Row of the current match in ascending display order. The reveal effect
+  // re-runs when the match moves within the rendered rows (filters, mode,
+  // history loading in front of it), not when a live refresh adds rows: that
+  // must leave the user's scroll position alone. A $derived is needed so the
+  // effect sees the number, not the rebuilt items array.
+  let searchMatchRow = $derived.by(() => {
+    const ordinal = inSessionSearch.resolvedCurrent?.ordinal;
+    if (ordinal === undefined) return -1;
+    return displayItemsAsc.findIndex((item) => item.ordinals.includes(ordinal));
+  });
+
   async function revealSearchMatch(match: Match, sessionId: string, reqId: number): Promise<boolean> {
     return revealMatch({
       ordinal: match.ordinal,
@@ -789,11 +904,11 @@
     const request = inSessionSearch.navigationRevision;
     const key = searchRevealKey;
     const sessionId = messages.sessionId;
-    const count = displayItemsAsc.length;
+    const matchRow = searchMatchRow;
     const newestFirst = ui.sortNewestFirst;
     if (!inSessionSearch.isActive || !key || !sessionId || !containerRef) return;
     void request;
-    void count;
+    void matchRow;
     void newestFirst;
     return untrack(() => {
       const match = inSessionSearch.resolvedCurrent;
@@ -883,7 +998,7 @@
     {/snippet}
   </EmptyState>
 {:else if messages.loading && messages.messages.length === 0}
-  <EmptyState title={m.message_list_loading()} />
+  <LoadingState align="center" label={m.message_list_loading()} />
 {:else if sessions.activeSessionNotFound && messages.messages.length === 0}
   <div class="missing-session" {@attach errorTelemetry("session")}>
     <EmptyState
@@ -898,7 +1013,22 @@
       </Button>
     </EmptyState>
   </div>
+{:else if messages.loadError && messages.messages.length === 0}
+  <LoadError
+    class="message-list-error"
+    message={messages.loadError}
+    onRetry={() => void messages.retryLoad()}
+    telemetry="session"
+  />
 {:else}
+  {#if messages.loadError}
+    <LoadError
+      class="message-list-error"
+      message={messages.loadError}
+      onRetry={() => void messages.retryLoad()}
+      telemetry="session"
+    />
+  {/if}
   <SessionFindView
     items={displayItemsAsc}
     totalSize={virtualizer.instance?.getTotalSize() ?? 0}
@@ -929,10 +1059,10 @@
             data-index={row.index}
             style="position: absolute; top: 0; left: 0; width: 100%; transform: translateY({row.start}px);"
             use:measureElement={virtualizer.instance}
-            onclick={() => {
+            onclick={(event) => {
               const sel = window.getSelection();
               if (sel && sel.toString().length > 0) return;
-              ui.selectOrdinal(item.ordinals[0]!);
+              ui.selectOrdinal(clickedEmptyMemberOrdinal(item, event.target) ?? item.ordinals[0]!);
             }}
           >
             {#if item.kind !== "tool-group" && readProgressDivider !== null && item.ordinals.includes(readProgressDivider.ordinal)}
@@ -949,6 +1079,12 @@
                 divider={readProgressDivider !== null && item.ordinals.includes(readProgressDivider.ordinal)
                   ? readProgressDivider
                   : undefined}
+              />
+            {:else if item.kind === "empty-group"}
+              <EmptyMessagesRow
+                messages={item.messages}
+                open={emptyGroupOpen(item)}
+                onToggle={(open) => setEmptyGroupOpen(item.ordinals, open)}
               />
             {:else if item.message.is_compact_boundary}
               <CompactBoundaryDivider message={item.message} />
@@ -977,11 +1113,15 @@
     display: contents;
   }
 
+  :global(.message-list-error) {
+    margin: 8px 12px;
+  }
+
   .message-list-scroll {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 8px 0;
+    padding: 4px 0 8px;
     overflow-anchor: none;
   }
 
@@ -990,9 +1130,17 @@
     overflow-anchor: none;
   }
 
+  /* One reading column for every layout: cards, tool rows, and their
+     timestamps share both edges. The find bar, SignalPanel, and
+     ToolSequencesPanel align their content to the same shared column. */
+  .virtual-row > :global(*) {
+    max-width: var(--reading-column);
+    margin-inline: auto;
+  }
+
   .virtual-row.selected > :global(*) {
-    outline: 2px solid var(--accent-blue);
-    outline-offset: -2px;
+    outline: 1px solid color-mix(in srgb, var(--accent-blue) 65%, transparent);
+    outline-offset: -1px;
     border-radius: var(--radius-md, 6px);
   }
 
@@ -1029,8 +1177,26 @@
 
   .layout-compact :global(.message) {
     padding: 6px 12px;
+    border-radius: 0;
+  }
+
+  /* Pattern mode keeps the full bar width, which the line patterns need. */
+  :global(:root:not([data-message-role-patterns])) .layout-compact :global(.message) {
     border-left-width: 2px;
     border-radius: 0;
+  }
+
+  .layout-compact :global(.tool-group) {
+    padding-inline: 12px;
+  }
+
+  /* Compact packs tool rows 2px tighter than the 24px Default rows (see
+     ToolBlock); the copy trim grows to match so the 26px hover button
+     still does not set the row height. */
+  .layout-compact :global(.tool-group-body),
+  .layout-compact :global(.pg-members) {
+    --tool-row-pad-block: 2px;
+    --tool-row-copy-trim: -2px;
   }
 
   .layout-compact :global(.message-header) {
@@ -1051,9 +1217,13 @@
     font-weight: 700;
   }
 
+  /* Token and turn summaries match the timestamp: 11px, the smallest size
+     the transcript uses for text that is read, not just scanned. */
   .layout-compact :global(.timestamp),
-  .layout-compact :global(.group-timestamp) {
-    font-size: 10px;
+  .layout-compact :global(.group-timestamp),
+  .layout-compact :global(.message-tokens),
+  .layout-compact :global(.turn-summary) {
+    font-size: 11px;
   }
 
   .layout-compact :global(.text-content) {
@@ -1066,8 +1236,10 @@
   }
 
   /* ── Stream layout ── */
+  /* Rows touch, but the first prompt keeps the same space under the
+     header as Default (list 4px + row 5px). */
   .layout-stream {
-    padding: 0;
+    padding: 9px 0 0;
   }
 
   .layout-stream .virtual-row {
@@ -1075,15 +1247,30 @@
   }
 
   .layout-stream :global(.message) {
-    border-left: none;
     border-radius: 0;
     padding: 16px 24px;
   }
 
+  /* Stream hides the role header, so the role rail is the only role
+     marker: both roles keep the same thin rule as every other layout, and
+     pattern mode keeps its patterned bars. */
+  :global(:root:not([data-message-role-patterns])) .layout-stream :global(.message) {
+    border-left-width: 2px;
+    border-left-style: solid;
+    border-start-start-radius: 0;
+    border-end-start-radius: 0;
+  }
+
+  /* Light takes the Default user card tint, so the prompt reads the same
+     across layouts instead of a stronger gray-blue over the page. */
   .layout-stream :global(.message.is-user) {
+    background: var(--user-bg) !important;
+  }
+
+  :global(:root.dark) .layout-stream :global(.message.is-user) {
     background: color-mix(
       in srgb,
-      var(--accent-blue) 5%,
+      var(--role-user-accent) 9%,
       transparent
     ) !important;
   }
@@ -1094,6 +1281,10 @@
 
   .layout-stream :global(.message-header) {
     display: none;
+  }
+
+  .layout-stream :global(.tool-group) {
+    padding-inline: 24px;
   }
 
   .layout-stream :global(.text-content) {
@@ -1114,6 +1305,12 @@
     display: none;
   }
 
+  /* Skim rows touch, so rounded corners would leave notches between
+     neighboring cards; the run reads as one continuous stack. */
+  .layout-skim :global(.message) {
+    border-radius: 0;
+  }
+
   .layout-skim :global(.tool-block) {
     border-left: none;
     border-radius: 0;
@@ -1132,6 +1329,45 @@
     pointer-events: none;
   }
 
+  /* Every tool row, standalone or inside a message, is one full-width
+     band with its name on the prose edge (the message bar plus its 16px
+     padding). Rows inside a message bleed through the message's 16px
+     padding to its bar, so both kinds share one indent and one fill. */
+  .layout-skim .virtual-row > :global(:not(.message) .tool-header) {
+    padding-inline-start: calc(var(--role-assistant-bar-width) + 16px);
+  }
+
+  .layout-skim :global(.message .tool-block),
+  .layout-skim :global(.message .parallel-group) {
+    margin-inline: -16px;
+  }
+
+  /* A parallel group bleeds as a whole; its members then sit flush in it. */
+  .layout-skim :global(.message .parallel-group .tool-block) {
+    margin-inline: 0;
+  }
+
+  .layout-skim :global(.message .tool-header) {
+    padding-inline-start: 16px;
+  }
+
+  /* A standalone Thinking row puts its label on the same edge as the tool
+     names, with its chevron in the gutter before it. */
+  .layout-skim .virtual-row > :global(:not(.message) .thinking-header) {
+    padding-inline-start: calc(var(--role-assistant-bar-width) + 16px - 16px);
+  }
+
+  /* Skim is read by scanning tool names down the left. They keep the
+     calm tool ink and medium weight of the other layouts, so a long MCP
+     name is never the loudest text. Names take their own width and show
+     in full when they fit; only a name wider than most of the row ends in
+     an ellipsis instead of crowding out the command. */
+  .layout-skim :global(.tool-label) {
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .layout-skim :global(.tool-meta),
   .layout-skim :global(.tool-content),
   .layout-skim :global(.diff-view),
@@ -1147,10 +1383,12 @@
     display: none;
   }
 
+  /* Only the block margin is reset, so standalone tool runs keep the
+     reading column's auto inline margins and line up with the messages. */
   .layout-skim :global(.tool-group),
   .layout-skim :global(.parallel-group) {
     border: none;
-    margin: 0;
+    margin-block: 0;
     padding: 0;
     background: transparent;
   }

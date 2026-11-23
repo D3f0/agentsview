@@ -124,6 +124,10 @@ func (s *stubGetService) ActivityReport(context.Context, service.ActivityReportR
 	panic("ActivityReport not expected")
 }
 
+func (s *stubGetService) TermTrends(context.Context, service.TermTrendsRequest) (*db.TrendsTermsResponse, error) {
+	panic("TermTrends not expected")
+}
+
 func (s *stubGetService) ToolAnalytics(context.Context, service.AnalyticsRequest) (*db.ToolsAnalyticsResponse, error) {
 	panic("ToolAnalytics not expected")
 }
@@ -158,6 +162,10 @@ func (s *stubGetService) SearchContent(context.Context, service.ContentSearchReq
 
 func (s *stubGetService) UsageSummary(context.Context, service.UsageRequest) (*service.UsageSummaryResult, error) {
 	panic("UsageSummary not expected")
+}
+
+func (s *stubGetService) SessionUsage(context.Context, service.SessionUsageRequest) (*service.SessionUsageReport, error) {
+	panic("SessionUsage not expected")
 }
 
 func (s *stubGetService) UsagePairwiseComparison(context.Context, service.UsagePairwiseComparisonRequest) (*service.UsagePairwiseComparisonResponse, error) {
@@ -846,4 +854,12 @@ func TestCodebuffMachineMatches_EmptyFilter(t *testing.T) {
 	assert.False(t, codebuffMachineMatches(
 		"other", "", "test-machine",
 	), "empty filter must still reject mismatched machines")
+}
+
+func (s *stubGetService) SessionCommits(context.Context, string) (*db.SessionCommitList, error) {
+	panic("SessionCommits not expected")
+}
+
+func (s *stubGetService) CommitSessions(context.Context, []string) (*db.CommitSessionList, error) {
+	panic("CommitSessions not expected")
 }

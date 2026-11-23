@@ -18,11 +18,14 @@ type reportingSourceLoadStats struct {
 }
 
 type reportingExportSource struct {
+	localMachineID      string
+	machineAliases      map[string]string
 	activitySessions    []reportingSourceSession
 	activityEvents      []activity.ActivityEvent
 	usageSessions       []activity.SessionMeta
 	usageCandidates     []activityReportUsageCandidate
 	standaloneUsage     []activity.UsageRow
+	accountUsage        []reportingAccountRow
 	pricing             []export.EffectivePricingRow
 	createdAt           map[string]time.Time
 	projectObservations []export.ProjectIdentityObservation
@@ -40,12 +43,16 @@ type reportingSourceSession struct {
 }
 
 type reportingDaySource struct {
+	localMachineID   string
+	machineAliases   map[string]string
+	archiveID        string
 	activitySessions []activity.SessionMeta
 	activityIDs      []string
 	activityEvents   []activity.ActivityEvent
 	usageSessions    []activity.SessionMeta
 	usageCandidates  []activityReportUsageCandidate
 	standaloneUsage  []activity.UsageRow
+	accountUsage     []reportingAccountRow
 	pricing          []export.EffectivePricingRow
 	createdAt        map[string]time.Time
 	projects         map[string]export.ProjectMapEntry
@@ -124,7 +131,7 @@ func (db *DB) loadReportingExportSource(
 		return source, err
 	}
 	standaloneUsage, err := db.reportingStandaloneUsageCandidatesFrom(
-		ctx, tx, query,
+		ctx, tx, query, schemaVersion,
 	)
 	if err != nil {
 		return source, err
@@ -161,7 +168,7 @@ func (db *DB) loadReportingExportSource(
 	labels := activity.ProjectLabels(allSessions)
 	observations := []export.ProjectIdentityObservation{}
 	archiveScope := export.IdentityScope{}
-	if len(labels) > 0 || schemaVersion == export.ReportingJointSchemaVersion {
+	if len(labels) > 0 || export.IsJointReportingSchema(schemaVersion) {
 		archiveID, archiveSalt, scopeErr := reportingArchiveScope(ctx, tx)
 		if scopeErr != nil {
 			return source, scopeErr
@@ -180,7 +187,7 @@ func (db *DB) loadReportingExportSource(
 		}
 	}
 	var references map[string]export.ProjectReference
-	if schemaVersion == export.ReportingJointSchemaVersion {
+	if export.IsJointReportingSchema(schemaVersion) {
 		references, err = db.reportingSessionReferences(ctx, tx, allSessions)
 		if err != nil {
 			return source, err
@@ -238,12 +245,12 @@ func (src reportingExportSource) forDate(
 	usageCandidates := make([]activityReportUsageCandidate, 0, len(src.usageCandidates))
 	usageIDs := make(map[string]struct{}, len(src.usageCandidates))
 	for _, candidate := range src.usageCandidates {
-		if candidate.row.Timestamp < lowerBound || candidate.row.Timestamp > upperBound {
+		if candidate.scan.ts < lowerBound || candidate.scan.ts > upperBound {
 			continue
 		}
 		usageCandidates = append(usageCandidates, candidate)
-		if candidate.row.SessionID != "" {
-			usageIDs[candidate.row.SessionID] = struct{}{}
+		if candidate.scan.sessionID != "" {
+			usageIDs[candidate.scan.sessionID] = struct{}{}
 		}
 	}
 	usageSessions := make([]activity.SessionMeta, 0, len(src.usageSessions))
@@ -256,6 +263,12 @@ func (src reportingExportSource) forDate(
 	for _, row := range src.standaloneUsage {
 		if row.Timestamp >= lowerBound && row.Timestamp <= upperBound {
 			standaloneUsage = append(standaloneUsage, row)
+		}
+	}
+	var accountUsage []reportingAccountRow
+	for _, row := range src.accountUsage {
+		if !row.at.Before(date) && row.at.Before(end) {
+			accountUsage = append(accountUsage, row)
 		}
 	}
 
@@ -287,12 +300,16 @@ func (src reportingExportSource) forDate(
 		}
 	}
 	return reportingDaySource{
+		localMachineID:   src.localMachineID,
+		machineAliases:   src.machineAliases,
+		archiveID:        src.archiveScope.ArchiveID,
 		activitySessions: selectedSessions,
 		activityIDs:      activityIDs,
 		activityEvents:   activityEvents,
 		usageSessions:    usageSessions,
 		usageCandidates:  usageCandidates,
 		standaloneUsage:  standaloneUsage,
+		accountUsage:     accountUsage,
 		pricing:          src.pricing,
 		createdAt:        createdAt,
 		projects:         projects,

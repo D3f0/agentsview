@@ -2,7 +2,9 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { mount, tick, unmount } from "svelte";
 import { setLocale } from "../../i18n/index.js";
+import { contrastRatio } from "@kenn-io/kit-ui";
 import Treemap from "./Treemap.svelte";
+import { ui } from "../../stores/ui.svelte.js";
 
 describe("Treemap", () => {
   afterEach(() => {
@@ -20,7 +22,7 @@ describe("Treemap", () => {
             id: "alpha",
             label: "Alpha",
             value: 42,
-            color: "#1f77b4",
+            style: { color: "#1f77b4", fill: "solid" as const },
             meta: "Meta",
           },
         ],
@@ -47,12 +49,114 @@ describe("Treemap", () => {
 
     unmount(component);
   });
+  it("gives every tile in a theme the same ink at readable contrast", async () => {
+    const startTheme = ui.theme;
+    if (ui.theme !== "light") ui.toggleTheme();
+    document.documentElement.style.setProperty("--test-series-lime", "#a3e635");
+    document.documentElement.style.setProperty("--test-series-navy", "#1f3a8a");
+    const component = mount(Treemap, {
+      target: document.body,
+      props: {
+        items: [
+          {
+            id: "lime",
+            label: "Lime",
+            value: 60,
+            style: { color: "var(--test-series-lime)", fill: "solid" as const },
+          },
+          {
+            id: "navy",
+            label: "Navy",
+            value: 40,
+            style: { color: "var(--test-series-navy)", fill: "solid" as const },
+          },
+        ],
+      },
+    });
+    await tick();
+
+    const tiles = [...document.querySelectorAll<SVGGElement>(".tile")];
+    const ink = tiles.map((tile) => tile.style.getPropertyValue("--tile-ink"));
+    const fill = tiles.map((tile) => tile.style.getPropertyValue("--tile-fill"));
+    // Light labels are all white, whatever the tile hue.
+    expect(ink).toEqual(["#ffffff", "#ffffff"]);
+    // Bright lime darkens until white reads on it; navy already does and
+    // keeps its exact series color.
+    expect(fill[0]).not.toBe("#a3e635");
+    expect(fill[1]).toBe("#1f3a8a");
+    for (const tileFill of fill) {
+      expect(contrastRatio(tileFill, "#ffffff")).toBeGreaterThanOrEqual(4.5);
+    }
+
+    unmount(component);
+    if (ui.theme !== startTheme) ui.toggleTheme();
+    document.documentElement.style.removeProperty("--test-series-lime");
+    document.documentElement.style.removeProperty("--test-series-navy");
+  });
+
+  it("repaints mounted tiles when the theme changes", async () => {
+    const root = document.documentElement.style;
+    const startTheme = ui.theme;
+    if (ui.theme !== "light") ui.toggleTheme();
+    root.setProperty("--test-series-swap", "#a3e635");
+    const component = mount(Treemap, {
+      target: document.body,
+      props: {
+        items: [
+          {
+            id: "swap",
+            label: "Swap",
+            value: 1,
+            style: { color: "var(--test-series-swap)", fill: "solid" as const },
+          },
+        ],
+      },
+    });
+    await tick();
+    const tile = () => document.querySelector<SVGGElement>(".tile")!;
+    expect(tile().style.getPropertyValue("--tile-ink")).toBe("#ffffff");
+
+    // A theme switch changes what the variable resolves to; the same mounted
+    // items must pick up the new color without being replaced. Dark labels
+    // stay white, so navy keeps its exact series color.
+    root.setProperty("--test-series-swap", "#1f3a8a");
+    ui.toggleTheme();
+    await tick();
+    expect(tile().style.getPropertyValue("--tile-ink")).toBe("#ffffff");
+    expect(tile().style.getPropertyValue("--tile-fill")).toBe("#1f3a8a");
+
+    root.setProperty("--test-series-swap", "#a3e635");
+    ui.highContrast = !ui.highContrast;
+    await tick();
+    const lime = tile().style.getPropertyValue("--tile-fill");
+    expect(lime).not.toBe("#1f3a8a");
+    expect(lime).not.toBe("#a3e635");
+    expect(contrastRatio(lime, "#ffffff")).toBeGreaterThanOrEqual(4.5);
+
+    unmount(component);
+    ui.highContrast = !ui.highContrast;
+    if (ui.theme !== startTheme) ui.toggleTheme();
+    root.removeProperty("--test-series-swap");
+  });
+
   it("selects with Enter and opens on double click", async () => {
     const onSelect = vi.fn();
     const onOpen = vi.fn();
     const items = [
-      { id: "alpha", label: "Alpha", value: 42, color: "#1f77b4", selected: true },
-      { id: "beta", label: "Beta", value: 21, color: "#ff7f0e", dimmed: true },
+      {
+        id: "alpha",
+        label: "Alpha",
+        value: 42,
+        style: { color: "#1f77b4", fill: "solid" as const },
+        selected: true,
+      },
+      {
+        id: "beta",
+        label: "Beta",
+        value: 21,
+        style: { color: "#ff7f0e", fill: "solid" as const },
+        dimmed: true,
+      },
     ];
     const component = mount(Treemap, { target: document.body, props: { items, onSelect } });
     await tick();
@@ -79,5 +183,38 @@ describe("Treemap", () => {
     expect(onOpen).toHaveBeenCalledWith("alpha");
     expect(onSelect.mock.calls).toEqual([["beta"], ["alpha"], ["alpha"]]);
     await unmount(project);
+  });
+  it("sizes labels by tile share on the chosen scale", async () => {
+    const items = [
+      {
+        id: "big",
+        label: "Big",
+        value: 80,
+        style: { color: "#1f77b4", fill: "solid" as const },
+      },
+      {
+        id: "small",
+        label: "Small",
+        value: 20,
+        style: { color: "#ff7f0e", fill: "solid" as const },
+      },
+    ];
+    const labelSizes = () =>
+      [...document.querySelectorAll<SVGTextElement>(".tile-label")].map((label) =>
+        parseFloat(label.style.fontSize),
+      );
+
+    const linear = mount(Treemap, {
+      target: document.body,
+      props: { items, labelScale: "linear" },
+    });
+    await tick();
+    expect(labelSizes()).toEqual([17, 12]);
+    unmount(linear);
+
+    const log = mount(Treemap, { target: document.body, props: { items, labelScale: "log" } });
+    await tick();
+    expect(labelSizes()).toEqual([18, 16]);
+    unmount(log);
   });
 });

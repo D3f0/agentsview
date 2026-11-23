@@ -44,7 +44,6 @@ func expandLocalPaths(cfg *Config) error {
 		{"proxy binary", &cfg.Proxy.Bin},
 		{"proxy TLS certificate", &cfg.Proxy.TLSCert},
 		{"proxy TLS key", &cfg.Proxy.TLSKey},
-		{"DuckDB path", &cfg.DuckDB.Path},
 		{"vector database path", &cfg.Vector.DBPath},
 		{"recall prompt directory", &cfg.Recall.Extract.Prompts.Dir},
 	}
@@ -55,6 +54,14 @@ func expandLocalPaths(cfg *Config) error {
 	}
 	if err := expandSlice("sync cwd prefix", cfg.SyncIncludeCwdPrefixes); err != nil {
 		return err
+	}
+	for i := range cfg.ArchiveSources {
+		if err := expand("archive directory", &cfg.ArchiveSources[i].Directory); err != nil {
+			return err
+		}
+		if err := expand("archive repository", &cfg.ArchiveSources[i].Repository); err != nil {
+			return err
+		}
 	}
 	for agent, dirs := range cfg.AgentDirs {
 		if err := expandSlice(fmt.Sprintf("%s session directory", agent), dirs); err != nil {

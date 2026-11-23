@@ -514,10 +514,10 @@ backend-neutral seam, `UnitBoundsQuerier`, with two batched methods:
 `NearestUserBoundaries` (the nearest exclusive embeddable-user boundaries around
 each probe) and `RunExtents` (the first/last member ordinals of the anchor's
 same-sidechain run within an exclusive interval). `internal/db`,
-`internal/postgres`, and `internal/duckdb` each implement the seam with their
-own dialect SQL; `internal/db` never references the other stores, and co-located
-parity and reducer-parity tests in each package pin identical observable output
-across backends.
+`internal/postgres`, and `internal/clickhouse` each implement the seam with
+their own dialect SQL; `internal/db` never references the other stores, and
+co-located parity and reducer-parity tests in each package pin identical
+observable output across backends.
 
 - **Shared resolvers, SQL-only backends.** `ResolveUserBoundaries` and
   `ResolveRunExtents` own the orchestration — probe dedup, chunking at the
@@ -577,6 +577,7 @@ covers the invariants.
   content duplicated into PG so snippets and anchoring reuse the exact local
   mirror semantics (rebuilding content from `messages` at query time would
   need duplicate extraction logic that can drift).
+- Kit attaches to each application-owned chunk table for replacement and raw nearest-chunk search. AgentsView owns generations, document metadata, and result hydration.
 - `vector_chunks_g<id>` is one table per generation with a `halfvec(N)` column
   and an HNSW cosine index. Per-generation tables are required because a
   pgvector column has a fixed typed dimension; `halfvec` stays under HNSW's
@@ -679,9 +680,7 @@ covers the invariants.
   below k for large fetches, so each search runs
   `SET LOCAL hnsw.ef_search = clamp(k, 40, 1000)` in the query transaction.
   For k past pgvector's 1000 ceiling, `hnsw.iterative_scan = 'relaxed_order'`
-  (pgvector >= 0.8) lets the scan continue; the GUC is probed with
-  `current_setting(..., missing_ok)` first so older pgvector skips it instead
-  of aborting the transaction.
+  lets the scan continue. Semantic search requires pgvector 0.8.0 or newer.
 - The hybrid keyword leg selects ILIKE candidates in recency order over the
   embedded-universe predicates, resolves them to units through
   `ResolveMessageUnits` point lookups against `vector_documents`, and feeds
@@ -691,8 +690,12 @@ covers the invariants.
 
 ## Error taxonomy
 
-Two sentinel errors carry every semantic/hybrid failure across CLI, HTTP, and
-MCP:
+CLI and MCP hybrid requests opt into one keyword-only retry after
+`ErrSemanticUnavailable`. A successful retry returns `effective_mode: hybrid_keyword`
+and a reason in `note`. Semantic-only requests and HTTP callers that leave
+`allow_keyword_fallback` off still receive the errors below.
+
+Two sentinel errors classify semantic/hybrid failures:
 
 | Sentinel                 | Meaning                                                                                                                                        | HTTP |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
@@ -706,8 +709,8 @@ stale-fingerprint case.
 
 The distinction matters for callers: 501 means the feature will not work until
 something is configured or built; 503 means it should work and is worth
-retrying. CLI and MCP surface the same cause-specific remediation text described
-in the [user-facing error taxonomy](/docs/semantic-search/#error-taxonomy).
+retrying. Calls that return an error surface the cause-specific remediation
+text described in the [user-facing error taxonomy](/docs/semantic-search/#error-taxonomy).
 
 ## Skill generation
 

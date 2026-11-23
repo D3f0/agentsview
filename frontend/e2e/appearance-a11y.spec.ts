@@ -39,12 +39,22 @@ function contrastRatio(
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+/** Parses a computed color: rgb()/rgba(), or the color(srgb r g b) form
+ * Chromium reports for color-mix() results, with channels in 0..1. */
 function parseRgb(value: string): [number, number, number] {
-  const match = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-  if (!match) {
-    throw new Error(`Expected rgb() color, got ${value}`);
+  const rgb = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (rgb) {
+    return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
   }
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+  const srgb = value.match(/color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  if (srgb) {
+    return [
+      Math.round(Number(srgb[1]) * 255),
+      Math.round(Number(srgb[2]) * 255),
+      Math.round(Number(srgb[3]) * 255),
+    ];
+  }
+  throw new Error(`Expected rgb() or color(srgb) color, got ${value}`);
 }
 
 async function elementColors(locator: Locator): Promise<{
@@ -64,6 +74,23 @@ function expectReadableContrast(colors: { background: string; foreground: string
   expect(
     contrastRatio(parseRgb(colors.foreground), parseRgb(colors.background)),
   ).toBeGreaterThanOrEqual(4.5);
+}
+
+/** Resolves an element's computed color through a canvas, so color-mix()
+ * results compare as plain sRGB bytes on every engine. */
+async function resolvedColor(
+  locator: Locator,
+  property: string,
+): Promise<[number, number, number]> {
+  return locator.evaluate((element, name) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = getComputedStyle(element).getPropertyValue(name);
+    context.fillRect(0, 0, 1, 1);
+    const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
+    return [r!, g!, b!] as [number, number, number];
+  }, property);
 }
 
 test.describe("Appearance accessibility", () => {
@@ -155,7 +182,7 @@ test.describe("Appearance accessibility", () => {
     );
 
     await page.goto("/quality");
-    await expect(page.getByRole("heading", { name: "Quality Patterns" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Quality patterns" })).toBeVisible();
     await page.locator(".driver-row").first().click();
     await expect(page.locator(".evidence-panel-live")).toBeVisible();
 
@@ -164,7 +191,7 @@ test.describe("Appearance accessibility", () => {
         getComputedStyle(document.querySelector(selector)!).display;
       return {
         recommendation: display(".recommendation-content"),
-        summary: display(".summary-card-content"),
+        summary: display(".summary-grid .stat-card"),
         pattern: display(".pattern-card-content"),
         evidence: display(".evidence-panel-live"),
       };
@@ -262,9 +289,11 @@ test.describe("Appearance accessibility", () => {
 
     // Measure a real kit-ui primary/solid Button (the Import modal's
     // confirm action) rather than a synthetic element, so a kit-ui Button
-    // styling regression fails this test. Computed color/background still
-    // reflect the tone tokens while the button is disabled.
-    await page.locator(".import-btn").click();
+    // styling regression fails this test. The button is disabled here, so
+    // this measures the disabled-primary treatment: accent-tinted ink on a
+    // faint accent wash must stay readable.
+    await page.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: "Import conversations" }).click();
     const solidButton = page.locator(".kit-button--solid.kit-button--info");
     await expect(solidButton).toBeVisible();
     expectReadableContrast(await elementColors(solidButton));
@@ -300,6 +329,95 @@ test.describe("Appearance accessibility", () => {
     const assistantRoleIcon = page.locator(".role-icon", { hasText: "A" }).first();
     await expect(assistantRoleIcon).toBeVisible();
     expectReadableContrast(await elementColors(assistantRoleIcon));
+  });
+
+  test("custom message colors render readably in every theme mode", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("theme", "light");
+      localStorage.setItem(
+        "agentsview-message-colors",
+        JSON.stringify({
+          colors: { user: "#0072b2", assistant: "#d55e00", tool: "#009e73" },
+          patterns: true,
+        }),
+      );
+    });
+    const sp = new SessionsPage(page);
+    await sp.goto();
+    await sp.selectFirstSession();
+    const user = page.locator(".message.is-user").first();
+    const assistant = page.locator(".message:not(.is-user)").first();
+    await expect(user).toBeVisible();
+    await expect(assistant).toBeVisible();
+
+    for (const mode of [
+      { dark: false, highContrast: false },
+      { dark: true, highContrast: false },
+      { dark: false, highContrast: true },
+      { dark: true, highContrast: true },
+    ]) {
+      await page.evaluate(({ dark, highContrast }) => {
+        document.documentElement.classList.toggle("dark", dark);
+        document.documentElement.classList.toggle("high-contrast", highContrast);
+      }, mode);
+      const label = JSON.stringify(mode);
+      expect(await resolvedColor(user, "border-left-color"), label).toEqual([0, 114, 178]);
+      // Reading the rail back through a canvas can round a channel by one,
+      // so compare each channel within 1.
+      const assistantRail = await resolvedColor(assistant, "border-left-color");
+      [213, 94, 0].forEach((channel, index) => {
+        expect(Math.abs(assistantRail[index]! - channel), label).toBeLessThanOrEqual(1);
+      });
+      await expect(user).toHaveCSS("border-left-style", "solid");
+      await expect(assistant).toHaveCSS("border-left-style", "double");
+      for (const message of [user, assistant]) {
+        const ratio = contrastRatio(
+          await resolvedColor(message.locator(".role-label"), "color"),
+          await resolvedColor(message, "background-color"),
+        );
+        expect(ratio, label).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  test("parallel tool calls carry the tool marker in pattern mode", async ({ page }) => {
+    // Use a small fixture so the injected calls stay in view without a reload.
+    await page.route("**/api/v1/sessions/*/messages*", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const assistant = body.messages?.find(
+        (message: { role: string }) => message.role === "assistant",
+      );
+      if (assistant) {
+        assistant.has_tool_use = true;
+        assistant.tool_calls = ["a", "b"].map((id) => ({
+          tool_use_id: `parallel-${id}`,
+          tool_name: "Read",
+          category: "Read",
+          input_json: "{}",
+          result_content: "",
+        }));
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto("/sessions/test-session-small-5");
+    const rail = page.locator(".parallel-group").first();
+    await expect(rail).toBeVisible();
+    // By default one solid neutral rule encloses the group.
+    await expect(rail).toHaveCSS("border-left-style", "solid");
+    await expect(rail).toHaveCSS("border-left-width", "2px");
+
+    await page.evaluate(() =>
+      localStorage.setItem(
+        "agentsview-message-colors",
+        JSON.stringify({ colors: { tool: "#009e73" }, patterns: true }),
+      ),
+    );
+    await page.reload();
+    await expect(rail).toBeVisible();
+    await expect(rail).toHaveCSS("border-left-style", "dashed");
+    await expect(rail).toHaveCSS("border-left-width", "3px");
+    expect(await resolvedColor(rail, "border-left-color")).toEqual([0, 158, 115]);
   });
 });
 
@@ -483,6 +601,34 @@ test("Zoom menus keep the interface scale and stay aligned with their trigger", 
       Math.abs(panel.y + panel.height - button.y),
     ),
   ).toBeLessThanOrEqual(4);
+});
+
+test("transcript header menus open beside their triggers at 120% zoom", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("agentsview-zoom-level", "120"));
+  const sp = new SessionsPage(page);
+  await sp.goto();
+  await sp.selectFirstSession();
+  await expect.poll(() => readZoom(page)).toBe("1.2");
+
+  for (const trigger of [
+    page.locator(".view-trigger"),
+    page.getByRole("button", { name: "More actions" }),
+  ]) {
+    await trigger.click();
+    const menu = page.getByRole("menu");
+    await expect(menu).toBeVisible();
+    const button = (await trigger.boundingBox())!;
+    const box = (await menu.boundingBox())!;
+    const viewport = page.viewportSize()!;
+    // The menu opens just below its trigger, right-aligned to it, and
+    // stays inside the window.
+    expect(Math.abs(box.y - (button.y + button.height))).toBeLessThanOrEqual(8);
+    expect(Math.abs(box.x + box.width - (button.x + button.width))).toBeLessThanOrEqual(8);
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+    await trigger.click();
+    await expect(menu).toHaveCount(0);
+  }
 });
 
 test("configured zoom is a default and browser choices stay independent", async ({

@@ -303,3 +303,40 @@ func TestCatchUpBuildsDeferredDateAfterBudgetSkip(t *testing.T) {
 	assert.Zero(t, got.SessionsScanned)
 	assert.Equal(t, 1, stored(t, d, "2026-09-21").Revision)
 }
+
+func TestRunWithoutOptionsCatchesUpOneLockPerDay(t *testing.T) {
+	d := dbtest.OpenTestDB(t)
+	r := newRunner(d)
+	r.BackfillDays = 3
+	seed(t, d, subject{id: "old", ended: "2026-09-01T10:00:00Z"})
+	locks := 0
+	exclusive := func(work func() error) error {
+		locks++
+		return work()
+	}
+	var dates []string
+	err := r.Run(t.Context(), review.RunRequest{}, exclusive, func(rep review.Report) {
+		assert.True(t, rep.Written, rep.Date)
+		dates = append(dates, rep.Date)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"2026-09-19", "2026-09-20", "2026-09-21"}, dates)
+	assert.Equal(t, 3, locks, "each day takes the lock on its own")
+}
+
+func TestRunDryRunOfBuiltDayKeepsItsSessions(t *testing.T) {
+	d := dbtest.OpenTestDB(t)
+	r := newRunner(d)
+	seed(t, d, subject{id: "s1", ended: "2026-09-20T10:00:00Z", findings: []db.FrictionFinding{correction("s1", "no, the other file")}})
+	_, err := r.BuildDate(t.Context(), "2026-09-20", review.BuildOptions{})
+	require.NoError(t, err)
+	var preview []review.Report
+	err = r.Run(t.Context(), review.RunRequest{Date: "2026-09-20", DryRun: true}, nil, func(rep review.Report) {
+		preview = append(preview, rep)
+	})
+	require.NoError(t, err)
+	require.Len(t, preview, 1)
+	assert.False(t, preview[0].Written)
+	assert.Equal(t, 1, preview[0].Snapshot.SessionsScanned)
+	assert.Len(t, preview[0].Snapshot.Signals, 1)
+}

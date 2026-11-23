@@ -412,6 +412,26 @@ func TestPGPusherScopesChangeVectorPushes(t *testing.T) {
 		"startup full-read, scoped change, full interval, scoped change that defers, reconciling change, scoped change")
 }
 
+// Only a change push may skip when the archive holds nothing new. Startup,
+// interval, shutdown, and full pushes keep the upkeep a skipped push leaves.
+func TestReplicaPusherSkipsOnlyChangePushes(t *testing.T) {
+	target := &fakeTarget{}
+	pusher, _ := newTestReplicaPusher(target)
+	ctx := t.Context()
+
+	require.NoError(t, pusher.push(ctx, reasonStartup, false))
+	require.NoError(t, pusher.push(ctx, reasonChange, false))
+	require.NoError(t, pusher.push(ctx, reasonInterval, false))
+	require.NoError(t, pusher.push(ctx, reasonChange, true))
+	require.NoError(t, pusher.push(ctx, reasonShutdown, false))
+
+	skip := make([]bool, 0, len(target.pushOpts))
+	for _, o := range target.pushOpts {
+		skip = append(skip, o.SkipIfUnchanged)
+	}
+	assert.Equal(t, []bool{false, true, false, false, false}, skip)
+}
+
 // TestPGPusherZeroGenerationKeepsReconcile pins that a generation-wide
 // phase reporting no generation id — a daemon predating the field — never
 // clears the reconcile bit. Clearing on it would let the next change push
@@ -869,4 +889,34 @@ func TestPGPusherFullVectorRepairNarrowsToDeferredSessions(t *testing.T) {
 		{sessions: []string{"s1"}},
 		{scoped: true},
 	}, got)
+}
+
+// TestPusherKeepsRewriteRequestUntilAFullPushStarts pins how a --full
+// watch asks for every session to be rewritten: incremental pushes do not
+// carry the request, a full push that never started keeps it, and once a
+// full push starts, later full pushes rewrite only what changed.
+func TestPusherKeepsRewriteRequestUntilAFullPushStarts(t *testing.T) {
+	steps := []struct {
+		full bool
+		err  error
+	}{
+		{full: false},
+		{full: true, err: storage.PushNotStartedError{Err: errors.New("mirror unreachable")}},
+		{full: true, err: errors.New("session failed")},
+		{full: true},
+	}
+	// A failed push drops its connection; every reconnect gets the same target.
+	target := &fakeTarget{}
+	pusher, _ := newTestReplicaPusher(target, target, target, target)
+	pusher.vectors.rewritePending = true
+	for _, step := range steps {
+		target.pushErr = step.err
+		_ = pusher.push(t.Context(), reasonChange, step.full)
+	}
+	require.Len(t, target.pushOpts, len(steps))
+	var rewrite []bool
+	for _, opts := range target.pushOpts {
+		rewrite = append(rewrite, opts.RewriteUnchanged)
+	}
+	assert.Equal(t, []bool{false, true, true, false}, rewrite)
 }

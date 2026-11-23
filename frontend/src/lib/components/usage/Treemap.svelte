@@ -1,15 +1,22 @@
 <script lang="ts">
   import { Chart, Group, Layer, Rect, Text } from "layerchart";
+  import { contrastRatio, mixHexColors, parseHexColor, WCAG_AA_TEXT } from "@kenn-io/kit-ui";
   import { Treemap as LayerTreemap } from "layerchart/hierarchy";
   import { hierarchy } from "d3-hierarchy";
   import { m } from "../../i18n/index.js";
+  import type { SeriesStyle } from "@kenn-io/kit-ui/utils/palette";
   import { formatMoney, moneyFromMicrodollars } from "../../money.js";
+  import { ui } from "../../stores/ui.svelte.js";
+  import { seriesPaint } from "../../utils/seriesPaint.js";
+  import { resolveRootColor } from "../../utils/calmSeriesColor.js";
+  import SeriesPatternDefs from "../shared/SeriesPatternDefs.svelte";
+  import { treemapLabelSize, type TreemapLabelScale } from "./treemapLabelSize.js";
 
   interface TreemapItem {
     id: string;
     label: string;
     value: number;
-    color: string;
+    style: Pick<SeriesStyle, "color" | "fill">;
     meta?: string;
     title?: string;
     selected?: boolean;
@@ -22,6 +29,7 @@
     onSelect?: (id: string) => void;
     onOpen?: (id: string) => void;
     formatValue?: (value: number) => string;
+    labelScale?: TreemapLabelScale;
   }
 
   const uid = $props.id();
@@ -36,6 +44,7 @@
     onSelect,
     onOpen,
     formatValue = formatCost,
+    labelScale = "sqrt",
   }: Props = $props();
 
   const root = $derived.by(() =>
@@ -44,8 +53,37 @@
       .sort((a, b) => (b.value ?? 0) - (a.value ?? 0))
   );
 
+  const total = $derived(root.value ?? 0);
+
   let measuredWidth = $state(0);
   const chartWidth = $derived(measuredWidth > 0 ? measuredWidth : 600);
+
+  // Tiles use the same series color as the chart and legend. Every label is
+  // white in both themes, so labels never alternate between tiles; a tile
+  // too light for white text darkens only as far as it needs to keep the
+  // label above 4.5:1.
+  // Palette colors can be CSS variables such as var(--chart-series-1).
+  // Resolve them against the root so the contrast math sees the real hex;
+  // reading the theme here re-runs the resolution when the theme changes.
+  function resolveColor(color: string): string {
+    void ui.theme;
+    void ui.highContrast;
+    return resolveRootColor(color);
+  }
+
+  const TILE_INK = "#ffffff";
+
+  function tilePaint(color: string): { fill: string; ink: string } | null {
+    const hex = parseHexColor(resolveColor(color));
+    if (!hex) return null;
+    let weight = 1;
+    let fill = hex;
+    while (weight > 0.3 && contrastRatio(fill, TILE_INK) < WCAG_AA_TEXT) {
+      weight -= 0.02;
+      fill = mixHexColors(hex, "#000000", weight);
+    }
+    return { fill, ink: TILE_INK };
+  }
 
   function handleKey(e: KeyboardEvent, id: string) {
     if (e.key === "Enter" || e.key === " ") {
@@ -58,6 +96,7 @@
 <div class="treemap-container" bind:clientWidth={measuredWidth}>
   <Chart width={chartWidth} {height} padding={0}>
     <Layer class="treemap" title={m.usage_treemap()}>
+      <SeriesPatternDefs scope={uid} styles={items.map((item) => item.style)} />
       <LayerTreemap hierarchy={root} padding={2}>
         {#snippet children({ nodes })}
           {#each nodes.filter((node) => node.depth === 1) as node, index ((node.data as TreemapItem).id)}
@@ -74,6 +113,10 @@
             <g
               class="tile"
               class:dimmed={tile.dimmed}
+              class:patterned={tile.style.fill !== "solid"}
+              style:--tile-color={tile.style.color}
+              style:--tile-fill={tilePaint(tile.style.color)?.fill}
+              style:--tile-ink={tilePaint(tile.style.color)?.ink}
               clip-path={`url(#${clipId})`}
               tabindex={onSelect ? 0 : undefined}
               role={onSelect ? "button" : undefined}
@@ -89,13 +132,14 @@
                   width={tileWidth}
                   height={tileHeight}
                   rx={3}
-                  fill={tile.color}
+                  fill={seriesPaint(uid, tile.style)}
                 />
                 {#if large}
-                  <Text value={tile.label} x={6} y={16} width={tileWidth - 12} truncate class="tile-label" />
-                  <Text value={formatValue(tile.value)} x={6} y={30} width={tileWidth - 12} truncate class="tile-value" />
+                  {@const fontSize = treemapLabelSize(tile.value, total, tileHeight, labelScale)}
+                  <Text value={tile.label} x={6} y={fontSize + 5} width={tileWidth - 12} truncate class="tile-label" style={`font-size: ${fontSize}px`} />
+                  <Text value={formatValue(tile.value)} x={6} y={fontSize + 19} width={tileWidth - 12} truncate class="tile-value" />
                   {#if tile.meta}
-                    <Text value={tile.meta} x={6} y={42} width={tileWidth - 12} truncate class="tile-meta" />
+                    <Text value={tile.meta} x={6} y={fontSize + 31} width={tileWidth - 12} truncate class="tile-meta" />
                   {/if}
                 {:else if medium}
                   <Text value={tile.label} x={4} y={14} width={tileWidth - 8} truncate class="tile-label-sm" />
@@ -121,6 +165,15 @@
 
   .treemap-container :global(.tile) {
     touch-action: manipulation;
+  }
+
+  /* On a patterned tile, a halo in the tile's color keeps labels clear of
+     the pattern lines. */
+  .treemap-container :global(.tile.patterned text) {
+    paint-order: stroke;
+    stroke: var(--tile-color);
+    stroke-width: 3px;
+    stroke-linejoin: round;
   }
 
   .treemap-container :global(.tile.dimmed) {
@@ -152,6 +205,20 @@
     stroke: white;
   }
 
+  /* Solid tiles keep their series color so a project matches across the
+     legend, chart, and treemap; a surface-colored seam separates tiles. */
+  .treemap-container :global(.tile:not(.patterned) rect) {
+    fill: var(--tile-fill, var(--tile-color));
+    stroke: var(--bg-surface);
+    stroke-width: 1;
+  }
+
+  .treemap-container :global(.tile:not(.patterned):focus-visible rect),
+  .treemap-container :global(.tile:not(.patterned)[aria-pressed="true"] rect) {
+    stroke: var(--text-primary);
+    stroke-width: 2;
+  }
+
   .treemap-container :global(.tile-label) {
     fill: white;
     font-size: 11px;
@@ -161,7 +228,6 @@
   }
 
   .treemap-container :global(.tile-value) {
-    /* White regardless of theme: drawn over saturated per-agent tile fills */
     fill: white;
     fill-opacity: 0.85;
     font-size: 11px;
@@ -171,19 +237,36 @@
   }
 
   .treemap-container :global(.tile-meta) {
-    /* White regardless of theme: drawn over saturated per-agent tile fills */
     fill: white;
     fill-opacity: 0.7;
-    font-size: 9px;
+    font-size: 11px;
     font-family: var(--font-sans);
     pointer-events: none;
   }
 
   .treemap-container :global(.tile-label-sm) {
     fill: white;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 500;
     font-family: var(--font-sans);
     pointer-events: none;
+  }
+
+  .treemap-container :global(.tile:not(.patterned) .tile-label),
+  .treemap-container :global(.tile:not(.patterned) .tile-label-sm),
+  .treemap-container :global(.tile:not(.patterned) .tile-value),
+  .treemap-container :global(.tile:not(.patterned) .tile-meta) {
+    fill: var(--tile-ink, white);
+  }
+
+  /* tilePaint() darkens a tile only until opaque ink reaches 4.5:1, so
+     every solid-tile line stays opaque; weight and face set the order. */
+  .treemap-container :global(.tile:not(.patterned) .tile-value),
+  .treemap-container :global(.tile:not(.patterned) .tile-meta) {
+    fill-opacity: 1;
+  }
+
+  .treemap-container :global(.tile:not(.patterned) .tile-value) {
+    font-variant-numeric: tabular-nums;
   }
 </style>

@@ -12,7 +12,6 @@ import (
 	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
-	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/pricing"
 	"go.kenn.io/agentsview/internal/pricingrefresh"
 	"go.kenn.io/agentsview/internal/service"
@@ -52,6 +51,7 @@ type sessionUsageQuery struct {
 	SessionID string
 	OwnOnly   bool
 	NoSync    bool
+	Wait      bool
 }
 
 // dailyUsageReport is a daily usage result plus the sessions its token and
@@ -259,7 +259,7 @@ func (b localArchiveQueryBackend) ActivityReport(
 ) (activity.Report, error) {
 	ensureFreshData(ctx, b.cfg, b.database, b.skipFreshData)
 	return resolveActivityReportPriced(
-		cfg, b.database, b.cfg.CustomModelPricing,
+		ctx, cfg, b.database, b.cfg.CustomModelPricing,
 	)
 }
 
@@ -269,7 +269,7 @@ func (b localArchiveQueryBackend) DailyUsage(
 ) (dailyUsageReport, error) {
 	ensureFreshData(ctx, b.cfg, b.database, b.skipFreshData)
 	ensureUsagePricing(
-		b.database, b.offline, b.cfg.CustomModelPricing,
+		ctx, b.database, b.offline, b.cfg.CustomModelPricing,
 	)
 	filter := localDailyUsageFilter(query)
 	var err error
@@ -324,7 +324,7 @@ func (b localArchiveQueryBackend) SessionUsage(
 	query sessionUsageQuery,
 ) (*sessionUsageOutput, int, error) {
 	applyCustomPricing(b.database, b.cfg)
-	ensureUsagePricing(b.database, b.offline, b.cfg.CustomModelPricing)
+	ensureUsagePricing(ctx, b.database, b.offline, b.cfg.CustomModelPricing)
 
 	resolvedID, known := resolveRawSessionID(
 		ctx, b.database, b.cfg.AgentDirs, query.SessionID,
@@ -353,19 +353,17 @@ func (b localArchiveQueryBackend) SessionUsage(
 		if syncErr != nil {
 			refreshIncomplete = true
 			fmt.Fprintf(os.Stderr,
-				"warning: usage refresh incomplete; showing usage currently stored in the archive: %v\n", syncErr)
+				"warning: couldn't refresh usage; saved totals may be out of date: %v\n", syncErr)
 		}
 		// Flush pending debounced signal recomputes before the
 		// usage query reads the session.
 		engine.Close()
 	}
 
-	load := func() (*db.SessionUsage, error) {
-		if query.OwnOnly {
-			return b.database.GetSessionUsage(ctx, resolvedID, true)
-		}
-		return service.SessionUsageWithSubagents(
-			ctx, b.database, resolvedID, true)
+	load := func() (*service.SessionUsageReport, error) {
+		return service.LoadSessionUsage(ctx, b.database, service.SessionUsageRequest{
+			ID: resolvedID, OwnOnly: query.OwnOnly,
+		})
 	}
 
 	u, err := load()
@@ -379,7 +377,6 @@ func (b localArchiveQueryBackend) SessionUsage(
 				"session usage is not yet available; retry after the archive rebuild finishes",
 			)
 		}
-		fmt.Fprintf(os.Stderr, "session not found: %s\n", query.SessionID)
 		return nil, tokenUseExitNotFound, nil
 	}
 	if stale && !b.skipFreshData && !query.NoSync {
@@ -387,14 +384,14 @@ func (b localArchiveQueryBackend) SessionUsage(
 	}
 	if len(u.UnpricedModels) > 0 && !b.offline {
 		refreshed, refErr := pricingrefresh.RefreshIfStale(
-			b.database, pricing.FetchCatalog,
+			ctx, b.database, pricing.FetchCatalogContext,
 			pricingrefresh.RefreshCooldown, time.Now(),
 		)
 		if refErr != nil {
 			fmt.Fprintf(os.Stderr,
 				"warning: pricing refresh failed: %v\n", refErr)
 		}
-		// A degraded refresh (see pricing.FetchCatalog) stores rows and
+		// A degraded refresh (see pricing.FetchCatalogContext) stores rows and
 		// reports an error at once, so re-read whenever rows changed.
 		if refreshed {
 			if u2, e := load(); e == nil && u2 != nil {
@@ -402,13 +399,9 @@ func (b localArchiveQueryBackend) SessionUsage(
 			}
 		}
 	}
-	if u.Agent == "" {
-		if def, ok := parser.AgentByPrefix(u.SessionID); ok {
-			u.Agent = string(def.Type)
-		}
+	out := &sessionUsageOutput{
+		SessionUsageReport: *u, RefreshIncomplete: refreshIncomplete,
 	}
-	out := newStoreSessionUsageOutput(u)
-	out.RefreshIncomplete = refreshIncomplete
 	return out, usageExitCode(out), nil
 }
 

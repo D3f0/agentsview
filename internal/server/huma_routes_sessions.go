@@ -22,10 +22,12 @@ import (
 	"go.kenn.io/agentsview/internal/ingest"
 	"go.kenn.io/agentsview/internal/money"
 	"go.kenn.io/agentsview/internal/parser"
+	"go.kenn.io/agentsview/internal/secrets"
 	"go.kenn.io/agentsview/internal/service"
 	"go.kenn.io/agentsview/internal/sessionwatch"
 	"go.kenn.io/agentsview/internal/signals"
 	"go.kenn.io/agentsview/internal/stringutil"
+	syncpkg "go.kenn.io/agentsview/internal/sync"
 )
 
 func (s *Server) registerSessionRoutes() {
@@ -37,6 +39,8 @@ func (s *Server) registerSessionRoutes() {
 	s.get(group, "/session-ids/resolve", "Resolve session IDs", s.humaResolveSessionIDs)
 	s.get(group, "/sessions/{id}", "Get session", s.humaGetSession)
 	s.get(group, "/sessions/{id}/messages", "List session messages", s.humaGetMessages)
+	s.get(group, "/sessions/{id}/commits", "List session commits", s.humaSessionCommits)
+	s.get(group, "/sessions/{id}/file-references", "Find session images in Docbank", s.humaFileReferences)
 	s.get(group, "/sessions/{id}/tool-calls", "List session tool calls", s.humaToolCalls)
 	s.get(group, "/sessions/{id}/tool-sequences", "Get session tool sequences", s.humaToolSequences)
 	s.get(group, "/sessions/{id}/children", "List child sessions", s.humaGetChildSessions)
@@ -100,7 +104,7 @@ type sessionFilterInput struct {
 	HasSecret        bool              `query:"has_secret" doc:"Filter sessions with secret findings"`
 	Starred          bool              `query:"starred" doc:"Filter sessions by starred status"`
 	Label            []string          `query:"label,explode" doc:"Keep sessions carrying this exact label; repeat to require several"`
-	PR               string            `query:"pr" doc:"Keep sessions linked to a pull request: owner/repo, owner/repo#123, or github.com::owner/repo#123"`
+	PR               string            `query:"pr" doc:"Keep sessions linked to a pull request: owner/repo, owner/repo#123, or github.com::owner/repo#123. Includes URLs in user prompts; a mention does not mean work was done on the PR"`
 	OrderBy          string            `query:"order_by" default:"recent" doc:"Sort order: a comma-separated list of keys, each optionally suffixed :asc or :desc (e.g. messages:desc,started:asc). A key with no suffix uses the descending param, then its natural direction. Valid keys: recent, started, messages, user-messages, output-tokens, peak-context, failures, retries, edit-churn, compactions, context-pressure, health, secrets, id."`
 	Descending       optionalBoolParam `query:"descending" doc:"Default sort direction for keys in order_by that carry no explicit :asc/:desc suffix"`
 }
@@ -111,6 +115,8 @@ type SessionListFilters = sessionFilterInput
 
 // Batch selection belongs only to the session list, not sidebar discovery.
 type listSessionsInput struct {
+	Flat            bool              `query:"flat" doc:"Match child sessions individually when include_children is true"`
+	ExclusionCounts optionalBoolParam `query:"exclusion_counts" doc:"Include default-exclusion counts; true also samples hidden children, false counts only one-shot and automated sessions. First page only."`
 	SessionListFilters
 	IDs    string `query:"ids" doc:"Comma-separated list of 1 to 100 session IDs. Quote IDs containing commas or line breaks with RFC 4180 CSV quoting; IDs containing CRLF are rejected. Raw IDs include host copies; tilde-qualified IDs match exactly. Explicit filters intersect the selection; discovery exclusions do not apply."`
 	IDsSet bool
@@ -136,7 +142,7 @@ func parseSessionIDs(raw string) ([]string, error) {
 		service.SessionIDsRequireCSVEncoding(records[0]) {
 		members = records[0]
 	}
-	if len(members) > 100 {
+	if len(members) > service.MaxListSessionIDs {
 		return nil, apiError(http.StatusBadRequest, "ids must contain 1 to 100 non-empty session IDs")
 	}
 	ids := make([]string, 0, len(members))
@@ -155,6 +161,7 @@ func parseSessionIDs(raw string) ([]string, error) {
 }
 
 type messageListInput struct {
+	CompactBoundary  bool             `query:"compact_boundary" doc:"Only compact boundary messages"`
 	ID               string           `path:"id" required:"true" doc:"Session ID"`
 	Limit            int              `query:"limit" minimum:"0" doc:"Maximum number of messages"`
 	Direction        messageDirection `query:"direction" enum:"asc,desc" doc:"Message ordering direction"`
@@ -295,6 +302,8 @@ func (s *Server) humaListSessions(
 	if err != nil {
 		return nil, err
 	}
+	filter.Flat = in.Flat
+	filter.ExclusionCounts = optionalBoolValue(in.ExclusionCounts)
 	if in.IDsSet {
 		filter.IDs, err = parseSessionIDs(in.IDs)
 		if err != nil {
@@ -400,6 +409,7 @@ func (s *Server) humaGetMessages(
 		ExpectedRevision: in.ExpectedRevision,
 		EvidenceSource:   in.EvidenceSource,
 	}
+	filter.CompactBoundaryOnly = in.CompactBoundary
 	if in.From.IsSet {
 		filter.From = &in.From.Value
 	}
@@ -655,19 +665,25 @@ type sessionUsageResponse struct {
 	HasCost           bool        `json:"has_cost"`
 	// CostUSD is a deprecated compatibility alias for
 	// Cost.Microdollars/1e6; see db.SessionUsage.CostUSD.
-	CostUSD             *float64                        `json:"cost_usd,omitempty"`
-	CostSource          export.CostSource               `json:"cost_source,omitempty"`
-	AICredits           float64                         `json:"ai_credits,omitzero"`
-	Models              []string                        `json:"models"`
-	UnpricedModels      []string                        `json:"unpriced_models"`
-	BreakdownCount      int                             `json:"breakdown_count"`
-	SubagentCount       int                             `json:"subagent_count,omitzero"`
-	Breakdown           []sessionUsageBreakdownResponse `json:"breakdown"`
-	ServerRunning       bool                            `json:"server_running"`
-	RollupCost          *money.Money                    `json:"rollup_cost,omitempty"`
-	RollupCostSource    export.CostSource               `json:"rollup_cost_source,omitempty"`
-	HasRollupCost       *bool                           `json:"has_rollup_cost,omitempty"`
-	RollupSubagentCount *int                            `json:"rollup_subagent_count,omitempty"`
+	CostUSD        *float64                        `json:"cost_usd,omitempty"`
+	CostSource     export.CostSource               `json:"cost_source,omitempty"`
+	AICredits      float64                         `json:"ai_credits,omitzero"`
+	Models         []string                        `json:"models"`
+	UnpricedModels []string                        `json:"unpriced_models"`
+	BreakdownCount int                             `json:"breakdown_count"`
+	SubagentCount  int                             `json:"subagent_count,omitzero"`
+	Breakdown      []sessionUsageBreakdownResponse `json:"breakdown"`
+	// RecordedCost compares cost with the cost the agent recorded; present
+	// only with breakdown=true and when a row carries a recorded cost.
+	RecordedCost *db.SessionRecordedCost `json:"recorded_cost,omitempty"`
+	// SessionTotal is the usage total the agent recorded for the session
+	// as a whole; see db.SessionUsage.SessionTotal.
+	SessionTotal        *db.SessionUsageTotal `json:"session_total,omitempty"`
+	ServerRunning       bool                  `json:"server_running"`
+	RollupCost          *money.Money          `json:"rollup_cost,omitempty"`
+	RollupCostSource    export.CostSource     `json:"rollup_cost_source,omitempty"`
+	HasRollupCost       *bool                 `json:"has_rollup_cost,omitempty"`
+	RollupSubagentCount *int                  `json:"rollup_subagent_count,omitempty"`
 	// PlanUsage carries codex-cloud plan figures. A session with only plan
 	// usage keeps has_token_data and has_cost false.
 	PlanUsage       *db.PlanUsageView       `json:"plan_usage,omitempty"`
@@ -696,11 +712,17 @@ type sessionUsageBreakdownResponse struct {
 	WebSearchRequests        int         `json:"web_search_requests,omitzero"`
 	Cost                     money.Money `json:"cost"`
 	HasCost                  bool        `json:"has_cost"`
+	// RecordedCost is the cost the agent recorded for this row, when it
+	// recorded one; RecordedCostPriced reports that it priced the row
+	// because the catalog has no rate for the model.
+	RecordedCost       *money.Money `json:"recorded_cost,omitempty"`
+	RecordedCostPriced bool         `json:"recorded_cost_priced,omitzero"`
 }
 
 type sessionUsageErrorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string   `json:"code"`
+	Message    string   `json:"message"`
+	Candidates []string `json:"candidates,omitempty"`
 }
 
 type sessionUsageError struct {
@@ -738,6 +760,8 @@ func newSessionUsageHumaResponse(usage *db.SessionUsage) sessionUsageResponse {
 			WebSearchRequests:        entry.WebSearchRequests,
 			Cost:                     entry.Cost,
 			HasCost:                  entry.HasCost,
+			RecordedCost:             entry.RecordedCost,
+			RecordedCostPriced:       entry.RecordedCostPriced,
 		})
 	}
 	return sessionUsageResponse{
@@ -757,6 +781,8 @@ func newSessionUsageHumaResponse(usage *db.SessionUsage) sessionUsageResponse {
 		BreakdownCount:    usage.BreakdownCount,
 		SubagentCount:     usage.SubagentCount,
 		Breakdown:         breakdown,
+		RecordedCost:      usage.RecordedCost,
+		SessionTotal:      usage.SessionTotal,
 		ServerRunning:     true,
 		PlanUsage:         usage.PlanUsage.PlanUsageView(),
 		CaptureCoverage:   usage.PlanUsage.CaptureCoverageView(),
@@ -767,16 +793,68 @@ func (s *Server) humaSessionUsage(
 	ctx context.Context,
 	in *sessionUsageInput,
 ) (*jsonOutput[sessionUsageResponse], error) {
+	response, err := s.exactSessionUsage(ctx, in)
+	usageErr, ok := errors.AsType[*sessionUsageError](err)
+	if !ok || (usageErr.Body.Code != "session_not_found" && usageErr.Body.Code != "ambiguous_session_id") {
+		return response, err
+	}
+	if strings.Contains(in.ID, "~") {
+		return nil, err
+	}
+	if agent, ok := parser.AgentByPrefix(in.ID); ok && agent.IDPrefix != "" {
+		return nil, err
+	}
+	candidates, resolveErr := s.sessions.FindSessionIDsByRawSuffix(ctx, in.ID, 5)
+	if resolveErr != nil {
+		return nil, sessionUsageQueryError(resolveErr)
+	}
+	switch len(candidates) {
+	case 0:
+		return nil, &sessionUsageError{Status: http.StatusNotFound, Body: sessionUsageErrorBody{
+			Code: "session_not_found", Message: "session not found",
+		}}
+	case 1:
+		resolved := *in
+		resolved.ID = candidates[0]
+		return s.exactSessionUsage(ctx, &resolved)
+	default:
+		return nil, &sessionUsageError{Status: http.StatusConflict, Body: sessionUsageErrorBody{
+			Code: "ambiguous_session_id", Message: "multiple sessions match; retry with a canonical candidate ID", Candidates: candidates,
+		}}
+	}
+}
+
+func sessionUsageQueryError(err error) error {
+	if handled := handleHumaContextError(err); handled != nil {
+		return handled
+	}
+	if identity, ok := errors.AsType[*db.SessionIdentityError](err); ok && identity.State == "ambiguous" {
+		return &sessionUsageError{Status: http.StatusConflict, Body: sessionUsageErrorBody{
+			Code: "ambiguous_session_id", Message: "multiple sessions match; retry with a canonical candidate ID",
+			Candidates: identity.Variants[:min(len(identity.Variants), 5)],
+		}}
+	}
+	return &sessionUsageError{Status: http.StatusInternalServerError, Body: sessionUsageErrorBody{
+		Code: "usage_query_failed", Message: "failed to query session usage",
+	}}
+}
+
+func (s *Server) exactSessionUsage(
+	ctx context.Context,
+	in *sessionUsageInput,
+) (*jsonOutput[sessionUsageResponse], error) {
 	if in.Rollup {
 		rollup, err := service.GetSessionUsageRollup(ctx, s.db, in.ID, in.Breakdown)
 		if err != nil {
-			if handled := handleHumaContextError(err); handled != nil {
-				return nil, handled
-			}
-			return nil, &sessionUsageError{Status: http.StatusInternalServerError, Body: sessionUsageErrorBody{Code: "usage_query_failed", Message: "failed to query session usage"}}
+			return nil, sessionUsageQueryError(err)
 		}
 		if rollup == nil {
 			return nil, &sessionUsageError{Status: http.StatusNotFound, Body: sessionUsageErrorBody{Code: "session_not_found", Message: "session not found"}}
+		}
+		// The comparison covers the rows of this response's breakdown, which
+		// is the session's own usage; rollup_* fields carry the subagents.
+		if rollup.Usage.RecordedCost, err = db.SummarizeRecordedCost(rollup.Usage.Breakdown); err != nil {
+			return nil, sessionUsageQueryError(err)
 		}
 		body := newSessionUsageHumaResponse(rollup.Usage)
 		if rollup.HasCost {
@@ -800,15 +878,11 @@ func (s *Server) humaSessionUsage(
 		usage, err = s.db.GetSessionUsage(ctx, in.ID, in.Breakdown)
 	}
 	if err != nil {
-		if handled := handleHumaContextError(err); handled != nil {
-			return nil, handled
-		}
-		return nil, &sessionUsageError{
-			Status: http.StatusInternalServerError,
-			Body: sessionUsageErrorBody{
-				Code:    "usage_query_failed",
-				Message: "failed to query session usage",
-			},
+		return nil, sessionUsageQueryError(err)
+	}
+	if usage != nil {
+		if usage.RecordedCost, err = db.SummarizeRecordedCost(usage.Breakdown); err != nil {
+			return nil, sessionUsageQueryError(err)
 		}
 	}
 	if usage == nil {
@@ -864,6 +938,7 @@ type openSessionResponse struct {
 type publishSessionInput struct {
 	ID     string `path:"id" required:"true" doc:"Session ID"`
 	Secret bool   `query:"secret" doc:"Create a secret gist instead of a public one"`
+	Reveal bool   `query:"reveal" doc:"Publish unredacted secret values; localhost callers only"`
 }
 
 type publishResponse struct {
@@ -951,25 +1026,60 @@ func (s *Server) humaOpenSession(
 	}, nil
 }
 
+// gistDescription names a published session by its project and the start of
+// its first prompt. Unless reveal is set, the prompt is masked. The stored
+// first prompt is a preview cut to 300 characters, so a long private key block
+// can lose its END line, and the detector needs that line to match the block.
+// The description therefore ends before any private key header that masking
+// left in place.
+func gistDescription(project string, firstMessage *string, reveal bool) string {
+	first := ""
+	if firstMessage != nil {
+		first = *firstMessage
+		if !reveal {
+			first = cutAtPrivateKeyHeader(secrets.Redact(first))
+		}
+		first = stringutil.TruncateRunes(first, 100, "...")
+	}
+	return fmt.Sprintf("Agent session: %s - %s", project, first)
+}
+
+// cutAtPrivateKeyHeader returns text up to its first "-----BEGIN ... PRIVATE
+// KEY-----" header, with trailing whitespace removed.
+func cutAtPrivateKeyHeader(text string) string {
+	const begin = "-----BEGIN "
+	for i := 0; ; {
+		j := strings.Index(text[i:], begin)
+		if j < 0 {
+			return text
+		}
+		start := i + j
+		i = start + len(begin)
+		name, _, closed := strings.Cut(text[i:], "-----")
+		if closed && strings.HasSuffix(name, "PRIVATE KEY") && !strings.Contains(name, "\n") {
+			return strings.TrimRight(text[:start], " \t\r\n")
+		}
+	}
+}
+
 func (s *Server) humaPublishSession(
 	ctx context.Context,
 	in *publishSessionInput,
 ) (*jsonOutput[publishResponse], error) {
+	if err := requireLocalReveal(ctx, in.Reveal); err != nil {
+		return nil, err
+	}
 	token := s.githubToken(ctx)
 	if token == "" {
 		return nil, apiError(http.StatusUnauthorized, "GitHub token not configured")
 	}
-	session, msgs, err := s.sessionWithMessages(ctx, in.ID)
+	session, msgs, err := s.sessionWithMessages(ctx, in.ID, in.Reveal)
 	if err != nil {
 		return nil, err
 	}
 	htmlContent := generateExportHTML(session, msgs)
 	filename := session.Project + "-" + formatDateShort(session.StartedAt) + ".html"
-	first := ""
-	if session.FirstMessage != nil {
-		first = stringutil.TruncateRunes(*session.FirstMessage, 100, "...")
-	}
-	description := fmt.Sprintf("Agent session: %s - %s", session.Project, first)
+	description := gistDescription(session.Project, session.FirstMessage, in.Reveal)
 	gist, err := createGist(ctx, token, filename, description, htmlContent, !in.Secret)
 	if err != nil {
 		return nil, apiError(http.StatusBadGateway, err.Error())
@@ -1092,6 +1202,11 @@ func (s *Server) humaRestoreSession(ctx context.Context,
 	if n == 0 {
 		return nil, apiError(http.StatusNotFound, "session not found or not in trash")
 	}
+	if s.engine != nil {
+		// Restoring changes no source file, so fallback polling must reconcile
+		// to read a transcript that changed while the session was in the trash.
+		s.engine.ForgetPollScans()
+	}
 	if s.broadcaster != nil {
 		s.broadcaster.Emit("sessions")
 	}
@@ -1161,13 +1276,23 @@ type uploadSessionResponse struct {
 }
 
 type markdownInput struct {
-	ID    string        `path:"id" required:"true" doc:"Session ID"`
-	Depth markdownDepth `query:"depth" enum:"1,all" doc:"Child session depth"`
+	ID     string        `path:"id" required:"true" doc:"Session ID"`
+	Depth  markdownDepth `query:"depth" enum:"1,all" doc:"Child session depth"`
+	Reveal bool          `query:"reveal" doc:"Export unredacted secret values; localhost callers only"`
 }
 
+type exportSessionInput struct {
+	ID     string `path:"id" required:"true" doc:"Session ID"`
+	Reveal bool   `query:"reveal" doc:"Export unredacted secret values; localhost callers only"`
+}
+
+// sessionWithMessages loads a session for HTML export or publishing. Unless
+// reveal is set, it masks detected secrets in the messages. Callers check
+// requireLocalReveal first.
 func (s *Server) sessionWithMessages(
 	ctx context.Context,
 	id string,
+	reveal bool,
 ) (*db.Session, []db.Message, error) {
 	session, err := s.db.GetSession(ctx, id)
 	if err != nil {
@@ -1180,14 +1305,39 @@ func (s *Server) sessionWithMessages(
 	if err != nil {
 		return nil, nil, apiError(http.StatusInternalServerError, err.Error())
 	}
-	return session, msgs, nil
+	return session, exportMessages(msgs, reveal), nil
+}
+
+// requireLocalReveal rejects a request to reveal secrets from a caller that
+// is not on localhost, as secret listing and search do.
+func requireLocalReveal(ctx context.Context, reveal bool) error {
+	if reveal && !isLocalhostContext(ctx) {
+		return apiError(http.StatusForbidden, "reveal is only permitted from localhost")
+	}
+	return nil
+}
+
+// exportMessages masks detected secrets in messages that leave the archive
+// through a session export, unless the caller asked to reveal them.
+func exportMessages(msgs []db.Message, reveal bool) []db.Message {
+	if reveal {
+		return msgs
+	}
+	masked := make([]db.Message, len(msgs))
+	for i, m := range msgs {
+		masked[i] = service.RedactMessageSecrets(m)
+	}
+	return masked
 }
 
 func (s *Server) humaExportSession(
 	ctx context.Context,
-	in *idPathInput,
+	in *exportSessionInput,
 ) (*bytesOutput, error) {
-	session, msgs, err := s.sessionWithMessages(ctx, in.ID)
+	if err := requireLocalReveal(ctx, in.Reveal); err != nil {
+		return nil, err
+	}
+	session, msgs, err := s.sessionWithMessages(ctx, in.ID, in.Reveal)
 	if err != nil {
 		return nil, err
 	}
@@ -1204,8 +1354,11 @@ func (s *Server) humaMarkdownSession(
 	ctx context.Context,
 	in *markdownInput,
 ) (*bytesOutput, error) {
+	if err := requireLocalReveal(ctx, in.Reveal); err != nil {
+		return nil, err
+	}
 	depth := string(in.Depth)
-	tree, err := s.loadExportSessionTree(ctx, in.ID, depth, map[string]bool{}, 0)
+	tree, err := s.loadExportSessionTree(ctx, in.ID, depth, in.Reveal, map[string]bool{}, 0)
 	if err != nil {
 		return nil, serverError(err)
 	}
@@ -1248,11 +1401,7 @@ func (s *Server) humaWatchSession(
 			sessionwatch.PollInterval * sessionwatch.HeartbeatTicks,
 		)
 		defer heartbeat.Stop()
-		if t, err := s.db.GetSessionTiming(streamCtx, in.ID); err != nil {
-			log.Printf("session timing initial: %v", err)
-		} else if t != nil {
-			stream.SendJSON("session.timing", t)
-		}
+		s.sendSessionFrame(streamCtx, stream, in.ID, false)
 		for {
 			select {
 			case <-streamCtx.Done():
@@ -1261,22 +1410,8 @@ func (s *Server) humaWatchSession(
 				if !ok {
 					return
 				}
-				if identity, ok := s.db.(db.SessionWatchStateStore); ok {
-					state, e := identity.GetSessionWatchState(in.ID)
-					if e != nil {
-						return
-					}
-					if state.State != db.SessionWatchResolved {
-						stream.SendJSON("session.identity", state)
-						return
-					}
-					stream.SendJSON("session.identity", state)
-				}
-				stream.Send("session_updated", in.ID)
-				if t, err := s.db.GetSessionTiming(streamCtx, in.ID); err != nil {
-					log.Printf("session timing update: %v", err)
-				} else if t != nil {
-					stream.SendJSON("session.timing", t)
+				if !s.sendSessionFrame(streamCtx, stream, in.ID, true) {
+					return
 				}
 			case <-heartbeat.C:
 				stream.Send("heartbeat", time.Now().UTC().Format(time.RFC3339))
@@ -1285,15 +1420,70 @@ func (s *Server) humaWatchSession(
 	}}, nil
 }
 
-func (s *Server) humaEvents(
-	_ context.Context,
-	_ *emptyInput,
-) (*huma.StreamResponse, error) {
-	if s.broadcaster == nil {
+func (s *Server) sendSessionFrame(ctx context.Context, stream *SSEStream, id string, update bool) bool {
+	if update {
+		if identity, ok := s.db.(db.SessionWatchStateStore); ok {
+			state, err := identity.GetSessionWatchState(id)
+			if err != nil {
+				return false
+			}
+			stream.SendJSON("session.identity", state)
+			if state.State != db.SessionWatchResolved {
+				return false
+			}
+		}
+		if !stream.Send("session_updated", id) {
+			return false
+		}
+	}
+	if t, err := s.db.GetSessionTiming(ctx, id); err != nil {
+		log.Printf("session timing: %v", err)
+	} else if t != nil {
+		stream.SendJSON("session.timing", t)
+	}
+	return true
+}
+
+type eventsInput struct {
+	Sessions []string `query:"session,explode" doc:"Session IDs to watch; repeat for each session"`
+}
+
+func (s *Server) humaEvents(ctx context.Context, in *eventsInput) (*huma.StreamResponse, error) {
+	if s.broadcaster == nil && len(in.Sessions) == 0 {
 		return nil, huma.ErrorWithHeaders(
 			apiError(http.StatusServiceUnavailable, "events not available in this mode"),
 			http.Header{"Retry-After": []string{"300"}},
 		)
+	}
+	var found, missing []string
+	for _, id := range in.Sessions {
+		if identity, ok := s.db.(db.SessionWatchStateStore); ok {
+			state, err := identity.GetSessionWatchState(id)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, serverError(err)
+				}
+				log.Printf("session watch state %q: %v", id, err)
+			}
+			if err == nil && state.State != db.SessionWatchResolved {
+				missing = append(missing, id)
+				continue
+			}
+		}
+		sess, err := s.sessions.Get(ctx, id)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, serverError(err)
+			}
+			log.Printf("session watch %q: %v", id, err)
+			found = append(found, id)
+			continue
+		}
+		if sess == nil {
+			missing = append(missing, id)
+			continue
+		}
+		found = append(found, id)
 	}
 	return &huma.StreamResponse{Body: func(hctx huma.Context) {
 		stream, ok := newHumaSSEStream(hctx)
@@ -1302,8 +1492,49 @@ func (s *Server) humaEvents(
 				apiResponseError{Message: "streaming not supported"})
 			return
 		}
-		sub, unsub := s.broadcaster.Subscribe()
-		defer unsub()
+		ctx, cancel := context.WithCancel(hctx.Context())
+		defer cancel()
+		var sub <-chan Event
+		if s.broadcaster != nil {
+			var unsub func()
+			sub, unsub = s.broadcaster.Subscribe()
+			defer unsub()
+			defer s.holdSyncInterval(syncpkg.LiveInterval)()
+		}
+		type tick struct {
+			id     string
+			closed bool
+		}
+		ticks := make(chan tick)
+		for _, id := range missing {
+			if !stream.Send("session_missing", id) {
+				return
+			}
+		}
+		for _, id := range found {
+			updates := s.sessionMonitor(ctx, id)
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case _, ok := <-updates:
+						select {
+						case ticks <- tick{id, !ok}:
+						case <-ctx.Done():
+							return
+						}
+						if !ok {
+							return
+						}
+					}
+				}
+			}()
+			if !stream.Send("session_ready", id) {
+				return
+			}
+			s.sendSessionFrame(ctx, stream, id, false)
+		}
 		if !stream.SendJSON("events_ready", struct{}{}) {
 			return
 		}
@@ -1313,13 +1544,17 @@ func (s *Server) humaEvents(
 		defer heartbeat.Stop()
 		for {
 			select {
-			case <-hctx.Context().Done():
+			case <-ctx.Done():
 				return
 			case ev, ok := <-sub:
 				if !ok {
 					return
 				}
 				stream.SendJSON("data_changed", map[string]string{"scope": ev.Scope})
+			case t := <-ticks:
+				if t.closed || !s.sendSessionFrame(ctx, stream, t.id, true) {
+					return
+				}
 			case <-heartbeat.C:
 				stream.Send("heartbeat", time.Now().Format(time.RFC3339))
 			}
@@ -1381,7 +1616,7 @@ func (s *Server) humaUploadSession(
 			"claude provider does not support uploads")
 	}
 	results, err := uploader.ParseUploadedTranscript(
-		upload.tempPath, project, machine,
+		ctx, upload.tempPath, project, machine,
 	)
 	if err != nil {
 		return nil, apiError(http.StatusBadRequest,
@@ -1819,4 +2054,25 @@ func (s *Server) humaResumeWithOpener(ctx context.Context,
 			Cwd:      launchDir,
 		},
 	}, nil
+}
+
+func (s *Server) humaFileReferences(ctx context.Context, in *idPathInput) (*jsonOutput[service.FileReferencesResult], error) {
+	result, err := service.FileReferences(ctx, s.sessions, in.ID)
+	if err != nil {
+		return nil, fileReferencesError(err)
+	}
+	return &jsonOutput[service.FileReferencesResult]{Body: result}, nil
+}
+
+func fileReferencesError(err error) error {
+	switch {
+	case errors.Is(err, service.ErrSessionNotFound):
+		return apiError(http.StatusNotFound, "session not found")
+	case errors.Is(err, service.ErrRevisionBoundReadUnavailable):
+		return apiError(http.StatusNotImplemented, err.Error())
+	case errors.Is(err, service.ErrSourceChanged):
+		return apiErrorWithCode(http.StatusConflict, "source_changed", err.Error())
+	default:
+		return serverError(err)
+	}
 }

@@ -14,7 +14,6 @@ import { activity } from "../../stores/activity.svelte.js";
 import { sessions } from "../../stores/sessions.svelte.js";
 import { router } from "../../stores/router.svelte.js";
 import { yokedDates } from "../../stores/yokedDates.svelte.js";
-import source from "./ActivityPage.svelte?raw";
 // @ts-ignore
 import ActivityPage from "./ActivityPage.svelte";
 import type { Report } from "../../api/types.js";
@@ -105,7 +104,7 @@ function projectReport(): Report {
 }
 
 function calendarDay(label: string): HTMLButtonElement {
-  return screen.getByRole("button", { name: label }) as HTMLButtonElement;
+  return screen.getByRole("gridcell", { name: label }) as HTMLButtonElement;
 }
 
 async function selectFirstActivityRange() {
@@ -130,7 +129,7 @@ it("reports the analytics kind for a displayed report failure", async () => {
   const component = mount(ActivityPage, { target: document.body });
   try {
     await vi.waitFor(() =>
-      expect(document.querySelector(".status.error")?.textContent).toContain("Report failed"),
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain("Report failed"),
     );
     expect(reportErrorShown).toHaveBeenCalledExactlyOnceWith("analytics");
   } finally {
@@ -273,6 +272,38 @@ describe("ActivityPage refresh control", () => {
     activity.loading = false;
     activity.progress = null;
     activity.lastUpdatedAt = null;
+  });
+
+  it("holds the report layout with placeholders and an announced status on first load", async () => {
+    stubActivityPageCollaborators();
+    activity.report = null;
+    activity.loading = true;
+
+    const component = mount(ActivityPage, { target: document.body });
+    try {
+      await flushEffects();
+      const status = screen.getByRole("status");
+      expect(status.textContent).toContain("Loading activity report");
+      // Seven stat placeholders, a chart block and a table block, none
+      // of them exposed to assistive tech.
+      expect(status.querySelectorAll(".skeleton-stat")).toHaveLength(7);
+      expect(status.querySelector(".skeleton-plot")).not.toBeNull();
+      expect(status.querySelectorAll(".skeleton-table .skeleton-row")).toHaveLength(5);
+      for (const block of status.querySelectorAll(".skeleton-bar")) {
+        expect(block.closest("[aria-hidden='true']")).not.toBeNull();
+      }
+
+      activity.report = projectReport();
+      await flushEffects();
+      expect(document.body.querySelector(".activity-skeleton")).toBeNull();
+    } finally {
+      await unmount(component);
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+      document.body.innerHTML = "";
+      activity.report = null;
+      activity.loading = false;
+    }
   });
 
   it("shows the in-progress note in the toolbar only while the period is in progress", async () => {
@@ -600,40 +631,6 @@ describe("ActivityPage bucket drill-down", () => {
   });
 });
 
-describe("ActivityPage date yoke controls", () => {
-  it("updates shared yoke state from the unified range picker", () => {
-    expect(source).toContain("<RangePicker");
-    expect(source).toContain("seedActivityYoke");
-    expect(source).toContain("yokedDates.updateFromPanel");
-  });
-
-  it("yokes week and month selections using resolved period starts", () => {
-    expect(source).toContain("startOfIsoWeek(activity.date)");
-    expect(source).toContain("startOfMonth(activity.date)");
-    expect(source).not.toContain("panelDateState(activity.date, addDays(activity.date, 6)");
-    expect(source).not.toContain("panelDateState(activity.date, endOfMonth(activity.date)");
-  });
-
-  it("preserves relative range selections as rolling yoke state", () => {
-    const applyIndex = source.indexOf("function applyRange");
-    const helperIndex = source.indexOf("function yokeStateForSelection");
-    const applyBlock = source.slice(applyIndex, helperIndex);
-
-    expect(helperIndex).toBeGreaterThan(applyIndex);
-    expect(source).toContain('mode: "rolling"');
-    expect(source).toContain("windowDays: sel.days");
-    expect(applyBlock).toContain("yokeStateForSelection(sel, range)");
-    expect(applyBlock).toContain("lastActivityDateSignature = dateSignature");
-  });
-
-  it("preserves rolling window intent in activity URLs", () => {
-    expect(source).toContain("activity.rollingWindowDays");
-    expect(source).toContain("activity.setCustomRange");
-    expect(source).toContain("params.window_days");
-    expect(source).toContain('mode: "relative", days: activity.rollingWindowDays');
-  });
-});
-
 describe("ActivityPage date yoke integration", () => {
   let component: ReturnType<typeof mount> | undefined;
 
@@ -746,8 +743,8 @@ describe("ActivityPage calendar day rollover", () => {
     await flushEffects();
     await openCalendar("Jun 17, 2026");
 
-    const june18 = calendarDay("Jun 18, 2026");
-    expect(june18.disabled).toBe(false);
+    const june18 = calendarDay("Thursday, June 18, 2026");
+    expect(june18.getAttribute("aria-disabled")).toBeNull();
     await fireEvent.click(june18);
     expect(activity.date).toBe("2026-06-18");
   });
@@ -763,23 +760,25 @@ describe("ActivityPage calendar day rollover", () => {
     await flushEffects();
     await openCalendar("Jun 17, 2026");
 
-    const june18 = calendarDay("Jun 18, 2026");
-    const june19 = calendarDay("Jun 19, 2026");
-    expect(june18.disabled).toBe(true);
-    expect(june19.disabled).toBe(true);
+    const june18 = calendarDay("Thursday, June 18, 2026");
+    const june19 = calendarDay("Friday, June 19, 2026");
+    expect(june18.getAttribute("aria-disabled")).toBe("true");
+    expect(june19.getAttribute("aria-disabled")).toBe("true");
+    await fireEvent.click(june18);
+    expect(activity.date).toBe("2026-06-17");
 
     await vi.advanceTimersByTimeAsync(500);
     await flushEffects();
 
-    expect(june18.disabled).toBe(false);
+    expect(june18.getAttribute("aria-disabled")).toBeNull();
     await fireEvent.click(june18);
     expect(activity.date).toBe("2026-06-18");
-    expect(june19.disabled).toBe(true);
+    expect(june19.getAttribute("aria-disabled")).toBe("true");
 
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
     await flushEffects();
 
-    expect(june19.disabled).toBe(false);
+    expect(june19.getAttribute("aria-disabled")).toBeNull();
     await fireEvent.click(june19);
     expect(activity.date).toBe("2026-06-19");
 
@@ -801,14 +800,14 @@ describe("ActivityPage calendar day rollover", () => {
     await flushEffects();
     await openCalendar("May 30, 2026");
 
-    const june3 = calendarDay("Jun 3, 2026");
-    expect(june3.disabled).toBe(true);
+    const june3 = calendarDay("Wednesday, June 3, 2026");
+    expect(june3.getAttribute("aria-disabled")).toBe("true");
 
     vi.setSystemTime(new Date(2026, 5, 3, 12, 0, 0));
     await vi.advanceTimersByTimeAsync(500);
     await flushEffects();
 
-    expect(june3.disabled).toBe(false);
+    expect(june3.getAttribute("aria-disabled")).toBeNull();
     await fireEvent.click(june3);
     expect(activity.date).toBe("2026-06-03");
   });

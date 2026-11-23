@@ -38,15 +38,19 @@ func SupportsRecallQueries(svc SessionService) bool {
 // window vs. linear pagination) cannot both be requested. The HTTP handler
 // maps it to a 400 response.
 var ErrAroundMutuallyExclusive = errors.New(
-	"around is mutually exclusive with from/direction",
+	"around is mutually exclusive with from/direction/compact_boundary",
 )
 
 // ErrBeforeAfterRequireAround is returned by Messages when Before or After
 // is set without Around. The HTTP handler maps it to a 400 response.
 var ErrBeforeAfterRequireAround = errors.New("before/after require around")
 
+// CompactionAPIVersion is the first daemon version with flat session reads.
+const CompactionAPIVersion = 20
+
 // ErrSemanticUnavailable is returned by SearchContent for modes
-// "semantic"/"hybrid" when the backing store has no VectorSearcher wired in.
+// "semantic" and hybrid requests without keyword fallback when the backing
+// store has no VectorSearcher wired in.
 // It is the same sentinel as db.ErrSemanticUnavailable so direct callers can
 // errors.Is it without transport-specific handling; the HTTP backend maps a
 // 501 response back to it for daemon-backed callers.
@@ -72,10 +76,13 @@ type SessionService interface {
 	FindSessionIDsByPartial(ctx context.Context, partial string, limit int) ([]string, error)
 	// FindSessionIDsByRawSuffix matches an exact stored ID or a literal
 	// colon/tilde-delimited suffix before applying limit.
+	// An exact ID that names a trashed session matches nothing.
 	FindSessionIDsByRawSuffix(ctx context.Context, raw string, limit int) ([]string, error)
 	List(ctx context.Context, f ListFilter) (*SessionList, error)
 	Messages(ctx context.Context, id string, f MessageFilter) (*MessageList, error)
 	ToolCalls(ctx context.Context, id string) (*ToolCallList, error)
+	SessionCommits(ctx context.Context, id string) (*db.SessionCommitList, error)
+	CommitSessions(ctx context.Context, shas []string) (*db.CommitSessionList, error)
 	// ChildSessions lists the sub-agent and fork sessions whose parent is id.
 	ChildSessions(ctx context.Context, id string) ([]db.Session, error)
 	// RecentEdits pages edited files, newest edit first, with the sessions
@@ -87,6 +94,10 @@ type SessionService interface {
 	Search(ctx context.Context, req SearchRequest) (*SessionSearchResult, error)
 	SearchContent(ctx context.Context, req ContentSearchRequest) (*ContentSearchResult, error)
 	UsageSummary(ctx context.Context, req UsageRequest) (*UsageSummaryResult, error)
+	// SessionUsage returns one session's token usage and cost with its
+	// full breakdown, or nil when the session does not exist. It reads the
+	// archive as stored and never refreshes source transcripts.
+	SessionUsage(ctx context.Context, req SessionUsageRequest) (*SessionUsageReport, error)
 	UsagePairwiseComparison(
 		ctx context.Context, req UsagePairwiseComparisonRequest,
 	) (*UsagePairwiseComparisonResponse, error)
@@ -96,6 +107,8 @@ type SessionService interface {
 	ToolAnalytics(ctx context.Context, req AnalyticsRequest) (*db.ToolsAnalyticsResponse, error)
 	SignalAnalytics(ctx context.Context, req AnalyticsRequest) (*db.SignalsAnalyticsResponse, error)
 	SignalSessions(ctx context.Context, req SignalSessionsRequest) (*db.SignalSessionsResponse, error)
+	// TermTrends returns legacy term-frequency counts over time.
+	TermTrends(ctx context.Context, req TermTrendsRequest) (*db.TrendsTermsResponse, error)
 	ListRecallEntries(ctx context.Context, f RecallFilter) (*RecallList, error)
 	GetRecallEntry(ctx context.Context, id string) (*db.RecallEntry, error)
 	QueryRecallEntries(ctx context.Context, req RecallQuery) (*RecallQueryResult, error)
@@ -174,11 +187,15 @@ type SessionSearchResult struct {
 
 // ContentSearchRequest is the transport-neutral content-search input.
 type ContentSearchRequest struct {
-	Pattern       string   `json:"pattern"`
-	Mode          string   `json:"mode,omitempty"` // substring|regex|fts|terms|semantic|hybrid
-	Sources       []string `json:"sources,omitempty"`
-	ExcludeSystem bool     `json:"exclude_system,omitempty"`
-	Reveal        bool     `json:"reveal,omitempty"`
+	Pattern string `json:"pattern"`
+	// Concepts runs one semantic search per concept and keeps only sessions
+	// with evidence for every one. See NormalizeContentSearchRequest.
+	Concepts        []string `json:"concepts,omitempty"`
+	Mode            string   `json:"mode,omitempty"` // substring|regex|fts|terms|semantic|hybrid
+	KeywordFallback bool     `json:"allow_keyword_fallback,omitempty"`
+	Sources         []string `json:"sources,omitempty"`
+	ExcludeSystem   bool     `json:"exclude_system,omitempty"`
+	Reveal          bool     `json:"reveal,omitempty"`
 	// Context requests N messages of inline context before and after each
 	// match (0 = off, max 10). See directBackend.SearchContent.
 	Context int `json:"context,omitempty"`
@@ -192,9 +209,9 @@ type ContentSearchRequest struct {
 	// GitBranch is a branchListSep-joined list of opaque (project, branch) tokens (EncodeBranchFilterToken).
 	GitBranch string
 
-	// Scope governs semantic/hybrid unit visibility ("top", "all", or
-	// "subordinate"; "" means "all") and supersedes IncludeChildren in
-	// those modes. See db.ContentSearchFilter.Scope.
+	// Scope governs terms, semantic/hybrid, and explicit lexical visibility ("top", "all", or
+	// "subordinate") and supersedes IncludeChildren. Blank lexical scope keeps
+	// sidebar eligibility; blank terms/vector scope means "all". See db.ContentSearchFilter.Scope.
 	Scope string `json:"scope,omitempty"`
 
 	Limit  int `json:"limit,omitempty"`
@@ -203,15 +220,24 @@ type ContentSearchRequest struct {
 
 // ContentSearchResult mirrors db.ContentSearchPage for transport.
 type ContentSearchResult struct {
+	EffectiveMode       string            `json:"effective_mode,omitempty"`
+	Note                string            `json:"note,omitempty"`
 	ActiveFilterApplied bool              `json:"active_filter_applied"`
 	Matches             []db.ContentMatch `json:"matches"`
 	NextCursor          int               `json:"next_cursor,omitempty"`
 	RevisionBound       bool              `json:"revision_bound"`
 	Coverage            MemoryCoverage    `json:"coverage"`
+	// CandidateTruncated reports that a multi-concept search may have missed
+	// sessions: a concept's candidate window filled, or more sessions matched
+	// every concept than the limit allowed.
+	CandidateTruncated bool `json:"candidate_truncated,omitempty"`
 }
 
 // RecallFilter mirrors GET /api/v1/recall/entries query parameters.
 type RecallFilter struct {
+	UpdatedSince        string `json:"updated_since,omitempty"`
+	CreatedSince        string `json:"created_since,omitempty"`
+	Cursor              string `json:"cursor,omitempty"`
 	Query               string `json:"q,omitempty"`
 	Project             string `json:"project,omitempty"`
 	CWD                 string `json:"cwd,omitempty"`
@@ -232,6 +258,7 @@ type RecallFilter struct {
 
 // RecallList mirrors GET /api/v1/recall/entries.
 type RecallList struct {
+	NextCursor    string            `json:"next_cursor,omitempty"`
 	RecallEntries []db.RecallResult `json:"entries"`
 	TrustedOnly   bool              `json:"trusted_only"`
 }
@@ -402,20 +429,32 @@ func (d *SessionDetail) UnmarshalJSON(data []byte) error {
 
 // SessionList mirrors GET /api/v1/sessions.
 type SessionList struct {
-	Sessions   []db.Session `json:"sessions"`
-	NextCursor string       `json:"next_cursor,omitempty"`
-	Total      int          `json:"total"`
+	ExclusionCounts *db.SessionExclusionCounts `json:"exclusion_counts,omitempty"`
+	Sessions        []db.Session               `json:"sessions"`
+	NextCursor      string                     `json:"next_cursor,omitempty"`
+	Total           int                        `json:"total"`
 }
 
 // SessionAnnotationsAPIVersion is the first daemon API that applies label
 // and pull request filters; older daemons ignore them.
 const SessionAnnotationsAPIVersion = 11
 
+// RecallTimeBoundsAPIVersion is the first daemon API that filters Recall
+// lists by updated_since and created_since; older daemons ignore them.
+const RecallTimeBoundsAPIVersion = 21
+
+// RawSessionLookupAPIVersion is the first daemon API that protects trashed
+// exact IDs during raw-suffix lookup.
+const RawSessionLookupAPIVersion = 29
+
 // ListFilter mirrors the HTTP query parameters in handleListSessions.
 // Field names map to HTTP query param names via json tags.
 type ListFilter struct {
+	ExclusionCounts *bool `json:"exclusion_counts,omitempty"`
 	// IDs selects explicit sessions and their host copies; nil uses discovery defaults.
 	IDs []string `json:"ids,omitzero"`
+	// Flat matches child sessions individually when IncludeChildren is set.
+	Flat bool `json:"flat,omitempty"`
 
 	Project            string `json:"project,omitempty"`
 	ExcludeProject     string `json:"exclude_project,omitempty"`
@@ -490,6 +529,8 @@ type MessageFilter struct {
 	// read. It prevents a continuation cursor from being replayed against a
 	// different archive/server instance.
 	EvidenceSource string `json:"evidence_source,omitempty"`
+	// CompactBoundaryOnly limits linear reads to compact-boundary rows.
+	CompactBoundaryOnly bool `json:"compact_boundary,omitempty"`
 }
 
 // MessageList mirrors {messages, count}. FirstOrdinal/LastOrdinal report the
@@ -552,6 +593,9 @@ type SyncInput struct {
 	Subagents    bool   `json:"subagents,omitempty"`
 	UsageRefresh bool   `json:"usage_refresh,omitempty"`
 }
+
+// SessionRefreshNotStartedCode identifies a refresh refused before it acquired the parent lock.
+const SessionRefreshNotStartedCode = "session_refresh_not_started"
 
 // ErrInvalidUsageRefresh reports a usage refresh without both ID and Subagents.
 var ErrInvalidUsageRefresh = errors.New("sync: usage_refresh requires id and subagents")

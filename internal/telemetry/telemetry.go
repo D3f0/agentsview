@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"testing"
 	"time"
 
 	kittelemetry "go.kenn.io/kit/telemetry/posthog"
@@ -15,7 +14,6 @@ import (
 const (
 	EnabledEnv            = "AGENTSVIEW_TELEMETRY_ENABLED"
 	GenericEnabledEnv     = kittelemetry.GenericEnabledEnv
-	postHogAPIKey         = "phc_AzHd9YvuHR7M5poKzC6eW654d3SgKyBdoQPuwkWhimUf"
 	EventDaemonActive     = "daemon_active"
 	EventSetupFinished    = "setup_finished"
 	EventAppOpened        = "app_opened"
@@ -64,9 +62,6 @@ func NewReporter(opts Options) (*Reporter, error) {
 		}
 		return &Reporter{client: client}, nil
 	}
-	if runningUnderGoTest() {
-		return DisabledReporter(), nil
-	}
 	if strings.TrimSpace(opts.InstallationID) == "" {
 		return nil, errors.New("installation ID is required")
 	}
@@ -85,7 +80,6 @@ func DisabledReporter() *Reporter {
 func NewReporterOrDisabled(opts Options) *Reporter {
 	reporter, err := NewReporter(opts)
 	if err != nil {
-		slog.Warn("telemetry disabled", "err", err)
 		return DisabledReporter()
 	}
 	return reporter
@@ -96,7 +90,7 @@ func (r *Reporter) Enabled() bool {
 }
 
 func (r *Reporter) CaptureDaemonActive(ctx context.Context) error {
-	if runningUnderGoTest() || !r.Enabled() {
+	if !r.Enabled() {
 		return nil
 	}
 	select {
@@ -147,10 +141,6 @@ func (r *Reporter) SanitizeProperties(
 	return r.client.SanitizeProperties(event, properties)
 }
 
-func runningUnderGoTest() bool {
-	return testing.Testing()
-}
-
 func (r *Reporter) Close() error {
 	if r == nil || r.client == nil {
 		return nil
@@ -159,8 +149,15 @@ func (r *Reporter) Close() error {
 }
 
 func newKitReporter(opts Options) (*kittelemetry.Reporter, error) {
-	return kittelemetry.NewReporter(kittelemetry.Options{
-		APIKey:      postHogAPIKey,
+	return kittelemetry.NewReporter(kitOptions(opts), allowedEventOptions(opts)...)
+}
+
+// kitOptions leaves APIKey empty so kit uses the project key that release
+// builds set at link time, and discards SDK logs so reporting stays out of
+// the app's output.
+func kitOptions(opts Options) kittelemetry.Options {
+	return kittelemetry.Options{
+		Logger:      slog.New(slog.DiscardHandler),
 		Application: application,
 		EnvPrefix:   envPrefix,
 		DistinctID:  opts.InstallationID,
@@ -168,7 +165,7 @@ func newKitReporter(opts Options) (*kittelemetry.Reporter, error) {
 		Version:     opts.Version,
 		Commit:      opts.Commit,
 		Source:      "daemon",
-	}, allowedEventOptions(opts)...)
+	}
 }
 
 func allowedEventOptions(opts Options) []kittelemetry.Option {
@@ -184,11 +181,11 @@ func allowedEventOptions(opts Options) []kittelemetry.Option {
 			kittelemetry.AllowProperty("duration_bucket", kittelemetry.AllowStringValues("under_1m", "1_to_5m", "5_to_30m", "over_30m"))),
 		kittelemetry.WithDailyEvent(EventScreenViewed, "screen", kittelemetry.NewDailyClaims(opts.ScreenClaimsPath)),
 		kittelemetry.WithAllowedEvent(EventScreenViewed,
-			kittelemetry.AllowProperty("screen", kittelemetry.AllowStringValues("sessions", "usage", "activity", "trends", "recall", "quality", "pinned", "trash", "recent-edits", "data", "settings")),
+			kittelemetry.AllowProperty("screen", kittelemetry.AllowStringValues("sessions", "usage", "activity", "trends", "recall", "quality", "pinned", "trash", "recent-edits", "friction", "data", "settings")),
 			kittelemetry.AllowProperty("surface", kittelemetry.AllowStringValues("web"))),
 		oneOf(EventSearchRun, "query_type", "text", "semantic", "hybrid"),
 		oneOf(EventSessionViewed, "agent", opts.AgentTypes...),
-		oneOf(EventExportRun, "format", "html", "insight_html", "csv", "markdown_link", "gist", "insight_gist"),
+		oneOf(EventExportRun, "format", "html", "insight_html", "friction_markdown", "csv", "markdown_link", "gist", "insight_gist"),
 		oneOf(EventInsightGenerated, "kind", opts.InsightKinds...),
 		oneOf(EventAnalyticsViewed, "page", "usage", "activity", "trends", "quality"),
 	}

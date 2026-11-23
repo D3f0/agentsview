@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/kit/embedlocal"
 )
 
 // validVectorConfig returns a VectorConfig with every field enabled
@@ -101,9 +103,91 @@ func TestVectorConfigValidate(t *testing.T) {
 			wantErr: "model_context_tokens",
 		},
 		{
-			name:    "enabled with no servers",
-			mutate:  func(c *VectorConfig) { c.Embeddings.Servers = nil },
+			name:    "enabled with explicit empty servers",
+			mutate:  func(c *VectorConfig) { c.Embeddings.Servers = map[string]VectorEmbeddingsServerConfig{} },
 			wantErr: "at least one server",
+		},
+		{
+			name: "default Nomic rejects oversized dimensions",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Servers = nil
+				c.Embeddings.DefaultServer = ""
+				c.Embeddings.Dimension = 1024
+			},
+			wantErr: "dimension must be at most 768",
+		},
+		{
+			name: "default Nomic reduced dimensions require a request",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Servers = nil
+				c.Embeddings.DefaultServer = ""
+				c.Embeddings.Dimension = 256
+			},
+			wantErr: "request_dimensions must be true",
+		},
+		{
+			name: "default Nomic permits reduced dimensions",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Servers = nil
+				c.Embeddings.DefaultServer = ""
+				c.Embeddings.Dimension = 256
+				c.Embeddings.RequestDimensions = true
+			},
+		},
+		{
+			name:   "remote Nomic permits provider-specific dimensions",
+			mutate: func(c *VectorConfig) { c.Embeddings.Dimension = 1024 },
+		},
+		{
+			name: "local server rejects an endpoint",
+			mutate: func(c *VectorConfig) {
+				mutateServer(c, "local", func(s *VectorEmbeddingsServerConfig) { s.Local = true })
+			},
+			wantErr: "local cannot be combined with endpoint",
+		},
+		{
+			name: "local server rejects another model",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Model = "other-model"
+				mutateServer(c, "local", func(s *VectorEmbeddingsServerConfig) { s.Local, s.Endpoint = true, "" })
+			},
+			wantErr: "changing models requires rebuilding",
+		},
+		{
+			name: "local server preserves nomic-embed-text",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Model = "nomic-embed-text"
+				mutateServer(c, "local", func(s *VectorEmbeddingsServerConfig) { s.Local, s.Endpoint = true, "" })
+			},
+		},
+		{
+			name: "local server preserves nomic-embed-text:latest",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Model = "nomic-embed-text:latest"
+				mutateServer(c, "local", func(s *VectorEmbeddingsServerConfig) { s.Local, s.Endpoint = true, "" })
+			},
+		},
+		{
+			name: "local server preserves nomic-embed-text:v1.5",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Model = "nomic-embed-text:v1.5"
+				mutateServer(c, "local", func(s *VectorEmbeddingsServerConfig) { s.Local, s.Endpoint = true, "" })
+			},
+		},
+		{
+			name: "automatic default can be selected explicitly",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Servers = nil
+				c.Embeddings.DefaultServer = "automatic"
+			},
+		},
+		{
+			name: "automatic discovery rejects an unknown default",
+			mutate: func(c *VectorConfig) {
+				c.Embeddings.Servers = nil
+				c.Embeddings.DefaultServer = "missing"
+			},
+			wantErr: `default_server "missing" is not a defined server (have: automatic)`,
 		},
 		{
 			name: "multiple servers without default_server",
@@ -308,13 +392,13 @@ func TestVectorConfigDefaults(t *testing.T) {
 
 func TestVectorConfigAPIKeyEnv(t *testing.T) {
 	server := VectorEmbeddingsServerConfig{}
-	assert.Empty(t, server.APIKey(), "no env var configured")
+	assert.Empty(t, requireAPIKey(t, server), "no env var configured")
 
 	server.APIKeyEnv = "AGENTSVIEW_TEST_VECTOR_API_KEY"
-	assert.Empty(t, server.APIKey(), "configured env var not set in environment")
+	assert.Empty(t, requireAPIKey(t, server), "configured env var not set in environment")
 
 	t.Setenv("AGENTSVIEW_TEST_VECTOR_API_KEY", "secret-123")
-	assert.Equal(t, "secret-123", server.APIKey())
+	assert.Equal(t, "secret-123", requireAPIKey(t, server))
 }
 
 // minimalServers returns the smallest valid servers table for TOML load
@@ -332,6 +416,28 @@ func minimalServers() map[string]any {
 // isolation) is covered, including per-server defaults and the ability to
 // explicitly override a zero-value field like max_retries.
 func TestVectorConfigTOMLLoad(t *testing.T) {
+	t.Run("enabled only selects the Nomic recipe", func(t *testing.T) {
+		cfg := loadMinimalWithConfig(t, map[string]any{"vector": map[string]any{"enabled": true}})
+		c := cfg.Vector.Embeddings
+		assert.Equal(t, "nomic-embed-text", c.Model)
+		assert.Equal(t, 768, c.Dimension)
+		assert.Equal(t, 4000, c.MaxInputChars)
+		assert.Equal(t, 2048, c.ModelContextTokens)
+		assert.Equal(t, "search_query: ", c.QueryPrefix)
+		assert.Equal(t, "search_document: ", c.DocumentPrefix)
+	})
+	t.Run("default recipe preserves explicit overrides", func(t *testing.T) {
+		cfg := loadMinimalWithConfig(t, map[string]any{"vector": map[string]any{
+			"enabled": true, "embeddings": map[string]any{
+				"max_input_chars": 3000, "model_context_tokens": 0,
+				"query_prefix": "", "document_prefix": "custom: ",
+			},
+		}})
+		assert.Equal(t, 3000, cfg.Vector.Embeddings.MaxInputChars)
+		assert.Zero(t, cfg.Vector.Embeddings.ModelContextTokens)
+		assert.Empty(t, cfg.Vector.Embeddings.QueryPrefix)
+		assert.Equal(t, "custom: ", cfg.Vector.Embeddings.DocumentPrefix)
+	})
 	t.Run("unset server fields keep defaults, explicit zero overrides", func(t *testing.T) {
 		cfg := loadMinimalWithConfig(t, map[string]any{
 			"vector": map[string]any{
@@ -510,20 +616,98 @@ func TestVectorConfigTOMLLoad(t *testing.T) {
 		assert.True(t, cfg.Vector.Embed.Recall)
 	})
 
-	t.Run("enabled without servers fails to load", func(t *testing.T) {
-		err := loadMinimalErrWithConfig(t, map[string]any{
-			"vector": map[string]any{
-				"enabled": true,
-				"embeddings": map[string]any{
-					"model":     "nomic-embed-text",
-					"dimension": 768,
-				},
+	t.Run("built-in servers default to CPU-sized transport", func(t *testing.T) {
+		tests := []struct {
+			name            string
+			embeddings      map[string]any
+			server          string
+			wantBatchSize   int
+			wantConcurrency int
+			wantTimeout     string
+		}{
+			{
+				name:       "automatic discovery",
+				embeddings: map[string]any{"model": "nomic-embed-text", "dimension": 768},
+				server:     "automatic", wantBatchSize: 8, wantConcurrency: 1, wantTimeout: embedlocal.RequestTimeout.String(),
 			},
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "at least one server")
+			{
+				name: "local server",
+				embeddings: map[string]any{
+					"model": "nomic-embed-text", "dimension": 768,
+					"servers": map[string]any{"shared": map[string]any{"local": true}},
+				},
+				server: "shared", wantBatchSize: 8, wantConcurrency: 1, wantTimeout: embedlocal.RequestTimeout.String(),
+			},
+			{
+				name: "local server keeps explicit transport",
+				embeddings: map[string]any{
+					"model": "nomic-embed-text", "dimension": 768,
+					"servers": map[string]any{"shared": map[string]any{
+						"local": true, "batch_size": 2, "concurrency": 3, "timeout": "90s",
+					}},
+				},
+				server: "shared", wantBatchSize: 2, wantConcurrency: 3, wantTimeout: "90s",
+			},
+			{
+				name: "endpoint server",
+				embeddings: map[string]any{
+					"model": "nomic-embed-text", "dimension": 768,
+					"servers": map[string]any{"remote": map[string]any{"endpoint": "http://localhost:11434/v1"}},
+				},
+				server: "remote", wantBatchSize: 32, wantConcurrency: 4, wantTimeout: "30s",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cfg := loadMinimalWithConfig(t, map[string]any{"vector": map[string]any{
+					"enabled": true, "embeddings": tt.embeddings,
+				}})
+				name, server, err := cfg.Vector.Embeddings.Server("")
+				require.NoError(t, err)
+				assert.Equal(t, tt.server, name)
+				assert.Equal(t, tt.wantBatchSize, server.BatchSize)
+				assert.Equal(t, tt.wantConcurrency, server.Concurrency)
+				assert.Equal(t, tt.wantTimeout, server.Timeout)
+				assert.Equal(t, 3, server.MaxRetries)
+			})
+		}
 	})
 
+	t.Run("automatic untagged Nomic preserves its recipe", func(t *testing.T) {
+		cfg := loadMinimalWithConfig(t, map[string]any{"vector": map[string]any{
+			"enabled": true, "embeddings": map[string]any{"model": "nomic-embed-text", "dimension": 768},
+		}})
+		c := cfg.Vector.Embeddings
+		assert.Equal(t, "nomic-embed-text", c.Model)
+		assert.Nil(t, c.Servers)
+		assert.Equal(t, []string{"automatic"}, c.ServerNames())
+		name, server, err := c.Server("")
+		require.NoError(t, err)
+		assert.Equal(t, "automatic", name)
+		assert.Empty(t, server.Endpoint)
+		assert.False(t, server.Local)
+		assert.Equal(t, 8192, c.MaxInputChars)
+		assert.Zero(t, c.ModelContextTokens)
+		assert.Empty(t, c.QueryPrefix)
+		assert.Empty(t, c.DocumentPrefix)
+	})
+	for _, model := range []string{"other-model", "nomic-embed-text:latest"} {
+		t.Run(model+" requires a named server", func(t *testing.T) {
+			err := loadMinimalErrWithConfig(t, map[string]any{"vector": map[string]any{
+				"enabled": true, "embeddings": map[string]any{"model": model, "dimension": 768},
+			}})
+			require.ErrorContains(t, err, "at least one server is required")
+		})
+	}
+	t.Run("explicit empty server table stays empty", func(t *testing.T) {
+		cfg := loadMinimalWithConfig(t, map[string]any{"vector": map[string]any{
+			"embeddings": map[string]any{"model": "nomic-embed-text", "dimension": 768, "servers": map[string]any{}},
+		}})
+		require.NotNil(t, cfg.Vector.Embeddings.Servers)
+		assert.Empty(t, cfg.Vector.Embeddings.ServerNames())
+		_, _, err := cfg.Vector.Embeddings.Server("")
+		require.ErrorContains(t, err, "no server named")
+	})
 	t.Run("multiple servers without default_server fails to load", func(t *testing.T) {
 		servers := minimalServers()
 		servers["remote"] = map[string]any{"endpoint": "http://build-box:30000/v1"}
@@ -589,12 +773,11 @@ func TestVectorConfigTOMLLoad(t *testing.T) {
 				wantErr: "ollama_cpu_fallback requires an endpoint ending in /v1",
 			},
 			{
-				name: "Ollama CPU fallback with relative endpoint",
+				name: "relative endpoint",
 				server: map[string]any{
-					"endpoint":            "/v1",
-					"ollama_cpu_fallback": true,
+					"endpoint": "/v1",
 				},
-				wantErr: "ollama_cpu_fallback requires an absolute HTTP(S) endpoint",
+				wantErr: "[vector.embeddings.servers.local] embed endpoint must use http or https",
 			},
 			{
 				name:    "explicit zero backstop_interval",
@@ -779,4 +962,13 @@ func TestVectorConfigTOMLLoadUnknownKeys(t *testing.T) {
 		assert.Contains(t, err.Error(), "max_batch_tokens")
 		assert.Contains(t, err.Error(), "[vector.embeddings.servers.<name>]")
 	})
+}
+
+// requireAPIKey returns a server's API key, failing the test when it cannot
+// be read.
+func requireAPIKey(t *testing.T, server interface{ APIKey() (string, error) }) string {
+	t.Helper()
+	key, err := server.APIKey()
+	require.NoError(t, err)
+	return key
 }

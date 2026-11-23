@@ -9,6 +9,7 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/friction"
 	"go.kenn.io/agentsview/internal/ingest"
+	"go.kenn.io/agentsview/internal/parser"
 )
 
 const (
@@ -32,6 +33,59 @@ func rawGroupHasStaleFriction(
 		WHERE s.friction_rules_version NOT IN ($2, $3)
 	)`, group, friction.RulesVersion, friction.SkippedRulesVersion).Scan(&stale)
 	return stale, err
+}
+
+// syncSelectedRawPRLinks refreshes materialized revisions selected by active
+// branches, including longer retained captures whose source has departed.
+func syncSelectedRawPRLinks(ctx context.Context, tx *sql.Tx, group string, dialogueChanges []string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT b.session_id,s.data_version FROM raw_session_branches b JOIN sessions s ON s.id=b.session_id WHERE b.group_id=$1 AND b.active AND (s.data_version<$2 OR b.session_id=ANY($3::text[]))`, group, db.CurrentDataVersion(), dialogueChanges)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		var version int
+		if err := rows.Scan(&id, &version); err != nil {
+			return false, err
+		}
+		if version > db.CurrentDataVersion() {
+			return false, &db.DataVersionTooNewError{DatabaseVersion: version, BinaryVersion: db.CurrentDataVersion()}
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	for _, id := range ids {
+		payload, err := loadRawPayload(ctx, tx, id)
+		if err != nil {
+			return false, err
+		}
+		promptLinks, err := db.PromptPRLinksContext(ctx, payload.Messages)
+		if err != nil {
+			return false, err
+		}
+		links := db.EncodePRLinks(parser.CombinePRLinks(payload.Session.PRLinks, promptLinks))
+		var linksChanged bool
+		err = tx.QueryRowContext(ctx, `WITH prior AS (
+ SELECT pr_links FROM sessions WHERE id=$1 FOR UPDATE
+), updated AS (
+ UPDATE sessions SET pr_links=$2,data_version=GREATEST(data_version,$3)
+ FROM prior WHERE id=$1 AND (sessions.pr_links IS DISTINCT FROM $2 OR data_version<$3)
+ RETURNING prior.pr_links IS DISTINCT FROM $2 AS links_changed
+)
+SELECT COALESCE((SELECT links_changed FROM updated),false)`, id, links, db.CurrentDataVersion()).Scan(&linksChanged)
+		if err != nil {
+			return false, err
+		}
+		changed = changed || linksChanged
+	}
+	return changed, nil
 }
 
 // rawEmbeddingChange is a physical session whose embeddings must follow a
@@ -62,7 +116,7 @@ func publishRawRevision(ctx context.Context, tx *sql.Tx, identityChanged bool, c
 
 // materializeGroup requires the caller to hold the group's row lock. It
 // returns the embedding changes for the caller to pass to publishRawRevision.
-func (s *RawProjectionStore) materializeGroup(ctx context.Context, tx *sql.Tx, group string) ([]rawEmbeddingChange, error) {
+func (s *RawProjectionStore) materializeGroup(ctx context.Context, tx *sql.Tx, group string, fresh map[string][]byte) ([]rawEmbeddingChange, error) {
 	if err := reconcileRawPrefixes(ctx, tx, group); err != nil {
 		return nil, err
 	}
@@ -121,7 +175,11 @@ func (s *RawProjectionStore) materializeGroup(ctx context.Context, tx *sql.Tx, g
 			action = "remove"
 		} else {
 			if !exists {
-				payload, err := loadRawPayload(ctx, tx, c.id)
+				// Prefix reconciliation may select a retained revision instead of
+				// the new capture. Reuse only the selected, freshly inserted row.
+				encoded := fresh[c.id]
+				delete(fresh, c.id)
+				payload, err := loadRawPayloadBytes(ctx, tx, c.id, encoded)
 				if err != nil {
 					return nil, err
 				}
@@ -193,29 +251,41 @@ func (s *RawProjectionStore) refreshStaleRawFriction(
 func syncRawDialogue(ctx context.Context, tx *sql.Tx, id string, messages []db.Message) (bool, error) {
 	ordinals := make([]int, 0, len(messages))
 	dialogue := make([]string, 0, len(messages))
+	isContent := make([]bool, 0, len(messages))
 	for _, m := range messages {
-		if m.DialogueText != nil {
-			ordinals = append(ordinals, m.Ordinal)
-			dialogue = append(dialogue, sanitizePG(*m.DialogueText))
+		if m.DialogueText == nil {
+			continue
 		}
+		// A copy of content is stored as an empty marked row, which
+		// loadRawPayloadBytes restores from the payload's content.
+		stored, copied := db.StoredDialogue(m.Content, m.ThinkingText, m.DialogueText)
+		text := ""
+		if stored != nil {
+			text = sanitizePG(*stored)
+		}
+		ordinals = append(ordinals, m.Ordinal)
+		dialogue = append(dialogue, text)
+		isContent = append(isContent, copied)
 	}
 	var retained, materialized int
 	err := tx.QueryRowContext(ctx, `WITH input AS (
- SELECT * FROM unnest($2::int[],$3::text[]) AS u(ordinal,dialogue)
+ SELECT u.ordinal, u.dialogue, u.is_content,
+  CASE WHEN u.is_content THEN NULL ELSE u.dialogue END AS materialized
+ FROM unnest($2::int[],$3::text[],$5::bool[]) AS u(ordinal,dialogue,is_content)
 ), upserted AS (
- INSERT INTO raw_message_dialogue(session_id,ordinal,dialogue_text)
- SELECT $1,i.ordinal,i.dialogue FROM input i
+ INSERT INTO raw_message_dialogue(session_id,ordinal,dialogue_text,is_content)
+ SELECT $1,i.ordinal,i.dialogue,i.is_content FROM input i
  LEFT JOIN raw_message_dialogue r ON r.session_id=$1 AND r.ordinal=i.ordinal
- WHERE r.dialogue_text IS DISTINCT FROM i.dialogue
- ON CONFLICT(tenant_id,session_id,ordinal) DO UPDATE SET dialogue_text=EXCLUDED.dialogue_text
+ WHERE r.dialogue_text IS DISTINCT FROM i.dialogue OR r.is_content IS DISTINCT FROM i.is_content
+ ON CONFLICT(tenant_id,session_id,ordinal) DO UPDATE SET dialogue_text=EXCLUDED.dialogue_text, is_content=EXCLUDED.is_content
  RETURNING 1
 ), pruned AS (
  DELETE FROM raw_message_dialogue WHERE session_id=$1 AND ordinal <> ALL($2::int[]) RETURNING 1
 ), updated AS (
- UPDATE messages AS m SET dialogue_text=i.dialogue
+ UPDATE messages AS m SET dialogue_text=i.materialized
  FROM messages cur LEFT JOIN input i ON i.ordinal=cur.ordinal
  WHERE cur.session_id=$1 AND m.session_id=$1 AND m.ordinal=cur.ordinal
-  AND m.dialogue_text IS DISTINCT FROM i.dialogue
+  AND m.dialogue_text IS DISTINCT FROM i.materialized
  RETURNING 1
 ), versioned AS (
  UPDATE sessions SET data_version=$4
@@ -223,7 +293,7 @@ func syncRawDialogue(ctx context.Context, tx *sql.Tx, id string, messages []db.M
 )
 SELECT (SELECT count(*) FROM upserted)+(SELECT count(*) FROM pruned),
  (SELECT count(*) FROM updated)`,
-		id, ordinals, dialogue, db.CurrentDataVersion()).Scan(&retained, &materialized)
+		id, ordinals, dialogue, db.CurrentDataVersion(), isContent).Scan(&retained, &materialized)
 	if err != nil {
 		return false, err
 	}
@@ -251,6 +321,11 @@ func (s *RawProjectionStore) writePayload(ctx context.Context, tx *sql.Tx, id, g
 	for i := range p.Findings {
 		p.Findings[i].SessionID = id
 	}
+	promptLinks, err := db.PromptPRLinksContext(ctx, p.Messages)
+	if err != nil {
+		return err
+	}
+	p.Session.PRLinks = parser.CombinePRLinks(p.Session.PRLinks, promptLinks)
 	if err := writePGSession(ctx, tx, p.Session, "raw-projection:"+group, nil, pgSessionWriteOptions{Machine: "hosted", UsageOnly: s.options.Content.ArchiveContent.UsageOnly(), SkipAliases: true}); err != nil {
 		return err
 	}
@@ -273,6 +348,11 @@ func (s *RawProjectionStore) writePayload(ctx context.Context, tx *sql.Tx, id, g
 	// public ID through the usage_root link that writeRawLinks records.
 	if p.PlanUsage != nil {
 		if err := insertPlanUsage(ctx, tx, id, p.PlanUsage); err != nil {
+			return err
+		}
+	}
+	if p.SessionTotal != nil {
+		if err := insertSessionUsageTotal(ctx, tx, id, p.SessionTotal); err != nil {
 			return err
 		}
 	}

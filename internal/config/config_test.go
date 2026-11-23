@@ -23,6 +23,34 @@ import (
 
 const configFileName = "config.toml"
 
+func TestBobDefaultRootsAndOverrides(t *testing.T) {
+	home := canonicalTempDir(t)
+	setTestHome(t, home)
+	t.Setenv("BOB_DIR", "")
+	cfg, err := Default()
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		filepath.Join(home, ".bob"),
+		filepath.Join(home, "Library", "Application Support", "IBM Bob", "User", "globalStorage", "ibm.bob-code"),
+		filepath.Join(home, ".config", "IBM Bob", "User", "globalStorage", "ibm.bob-code"),
+		filepath.Join(home, "AppData", "Roaming", "IBM Bob", "User", "globalStorage", "ibm.bob-code"),
+	}, cfg.ResolveDirs(parser.AgentBob))
+	custom := canonicalTempDir(t)
+	t.Setenv("BOB_DIR", custom)
+	cfg.loadEnv()
+	assert.Equal(t, []string{custom}, cfg.ResolveDirs(parser.AgentBob))
+}
+
+func TestBobConfiguredRootsReplaceDefaults(t *testing.T) {
+	t.Setenv("BOB_DIR", "")
+	for _, text := range []string{`bob_dirs = ["/custom/bob"]`, "[agents.bob]\ndirs = [\"/custom/bob\"]"} {
+		cfg, err := Default()
+		require.NoError(t, err)
+		require.NoError(t, cfg.applyConfigTOML(text))
+		assert.Equal(t, []string{absoluteTestPath(t, "/custom/bob")}, cfg.ResolveDirs(parser.AgentBob))
+	}
+}
+
 func TestCodeBuddyDefaultAndOverride(t *testing.T) {
 	home := canonicalTempDir(t)
 	setTestHome(t, home)
@@ -103,6 +131,7 @@ func TestChartPaletteDefaultsAndLoads(t *testing.T) {
 		{name: "omitted", want: ChartPaletteAgentsview},
 		{name: "agentsview", toml: `chart_palette = "agentsview"`, want: ChartPaletteAgentsview},
 		{name: "matplotlib", toml: `chart_palette = "matplotlib"`, want: ChartPaletteMatplotlib},
+		{name: "colorblind", toml: `chart_palette = "colorblind"`, want: ChartPaletteColorblind},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,12 +152,12 @@ func TestChartPaletteRejectsInvalidValue(t *testing.T) {
 		{
 			name: "unknown",
 			toml: `chart_palette = "neon"`,
-			want: `chart_palette must be "agentsview" or "matplotlib" (got "neon")`,
+			want: `chart_palette must be "agentsview", "matplotlib", or "colorblind" (got "neon")`,
 		},
 		{
 			name: "explicit empty",
 			toml: `chart_palette = ""`,
-			want: `chart_palette must be "agentsview" or "matplotlib" (got "")`,
+			want: `chart_palette must be "agentsview", "matplotlib", or "colorblind" (got "")`,
 		},
 	}
 	for _, tt := range tests {
@@ -513,17 +542,6 @@ func TestDefault_IncludesHermesProfilesRoot(t *testing.T) {
 	assert.Contains(t, dirs, filepath.Join(home, "AppData", "Local", "hermes", "sessions"))
 }
 
-func TestDefault_HermesNoProfilesDirIsSafe(t *testing.T) {
-	home := canonicalTempDir(t)
-	setTestHome(t, home)
-	require.NoError(t, os.MkdirAll(filepath.Join(home, ".hermes", "sessions"), 0o755))
-	cfg, err := Default()
-	require.NoError(t, err)
-	dirs := cfg.ResolveDirs(parser.AgentHermes)
-	assert.Contains(t, dirs, filepath.Join(home, ".hermes", "sessions"))
-	assert.Contains(t, dirs, filepath.Join(home, ".hermes", "profiles"))
-}
-
 func TestDefault_HermesEnvReplacesDefaultAndProfilesRoots(t *testing.T) {
 	home := canonicalTempDir(t)
 	setTestHome(t, home)
@@ -716,26 +734,15 @@ func TestPortExplicitProvenance(t *testing.T) {
 		assert.False(t, cfg.PortExplicit)
 	})
 
-	t.Run("pg and duckdb loaders mark explicit ports", func(t *testing.T) {
-		for _, load := range []struct {
-			name string
-			fn   func(*pflag.FlagSet) (Config, error)
-		}{
-			{name: "pg", fn: LoadRemoteServePFlags},
-			{name: "duckdb", fn: LoadRemoteServePFlags},
-			{name: "clickhouse", fn: LoadRemoteServePFlags},
-		} {
-			t.Run(load.name, func(t *testing.T) {
-				setupTestEnv(t)
-				fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
-				RegisterServePFlags(fs)
-				require.NoError(t, fs.Parse([]string{"--port", "8080"}))
-				cfg, err := load.fn(fs)
-				require.NoError(t, err)
-				assert.Equal(t, 8080, cfg.Port)
-				assert.True(t, cfg.PortExplicit)
-			})
-		}
+	t.Run("remote serve loader marks explicit ports", func(t *testing.T) {
+		setupTestEnv(t)
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		RegisterServePFlags(fs)
+		require.NoError(t, fs.Parse([]string{"--port", "8080"}))
+		cfg, err := LoadRemoteServePFlags(fs)
+		require.NoError(t, err)
+		assert.Equal(t, 8080, cfg.Port)
+		assert.True(t, cfg.PortExplicit)
 	})
 }
 
@@ -1772,13 +1779,6 @@ func TestLoadFile_MalformedDirValueLogsWarning(t *testing.T) {
 	assert.Equal(t, []string{defaultDir}, dirs)
 }
 
-func TestDefault_ResultContentBlockedCategories(t *testing.T) {
-	cfg, err := Default()
-	require.NoError(t, err)
-
-	assert.Equal(t, []string{"Read", "Glob"}, cfg.ResultContentBlockedCategories)
-}
-
 func TestLoadFile_ResultContentBlockedCategories(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1857,6 +1857,23 @@ func TestLoadFile_EventsCoalesceInterval(t *testing.T) {
 	}
 }
 
+func TestLoadFile_SyncIdleAfter(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data map[string]any
+		want time.Duration
+	}{
+		{"default", map[string]any{}, 10 * time.Minute},
+		{"configured", map[string]any{"sync_idle_after": "4m"}, 4 * time.Minute},
+		{"disabled", map[string]any{"sync_idle_after": "0"}, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadMinimalWithConfig(t, tt.data)
+			assert.Equal(t, tt.want, cfg.SyncIdleAfter)
+		})
+	}
+}
+
 func TestLoadFile_DaemonIdleTimeout(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1871,6 +1888,62 @@ func TestLoadFile_DaemonIdleTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := loadMinimalWithConfig(t, tt.data)
 			assert.Equal(t, tt.want, cfg.DaemonIdleTimeout)
+		})
+	}
+}
+
+func TestLoadFile_SyncInterval(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data map[string]any
+		want time.Duration
+	}{
+		{name: "absent uses default", data: map[string]any{}, want: 5 * time.Second},
+		{name: "configured", data: map[string]any{"sync_interval": "60s"}, want: time.Minute},
+		{name: "explicit zero is kept", data: map[string]any{"sync_interval": "0s"}, want: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadMinimalWithConfig(t, tt.data)
+			assert.Equal(t, tt.want, cfg.SyncInterval)
+		})
+	}
+}
+
+func TestLoadFile_BackgroundSyncInterval(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		data      map[string]any
+		want      time.Duration
+		wantFloor time.Duration
+	}{
+		{
+			name: "absent uses default", data: map[string]any{},
+			want: 10 * time.Minute, wantFloor: 10 * time.Minute,
+		},
+		{
+			name: "configured", data: map[string]any{"background_sync_interval": "30m"},
+			want: 30 * time.Minute, wantFloor: 30 * time.Minute,
+		},
+		{
+			name: "zero syncs at the live interval",
+			data: map[string]any{"background_sync_interval": "0s"},
+			want: 0, wantFloor: 5 * time.Second,
+		},
+		{
+			name: "a longer live interval is never shortened in the background",
+			data: map[string]any{"background_sync_interval": "1m", "sync_interval": "20m"},
+			want: time.Minute, wantFloor: 20 * time.Minute,
+		},
+		{
+			name: "no live minimum keeps the background interval",
+			data: map[string]any{"sync_interval": "0s"},
+			want: 10 * time.Minute, wantFloor: 10 * time.Minute,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadMinimalWithConfig(t, tt.data)
+			assert.Equal(t, tt.want, cfg.BackgroundSyncInterval)
+			assert.Equal(t, tt.wantFloor, cfg.BackgroundSyncFloor())
 		})
 	}
 }
@@ -2219,9 +2292,6 @@ func TestInstallationIDSurvivesHostnameChanges(t *testing.T) {
 		pg, err := cfg.ResolvePG()
 		require.NoError(t, err)
 		assert.Equal(t, id, pg.MachineName)
-		duck, err := cfg.ResolveDuckDB()
-		require.NoError(t, err)
-		assert.Equal(t, id, duck.MachineName)
 	}
 	before, err := os.ReadFile(filepath.Join(dir, configFileName))
 	require.NoError(t, err)
@@ -2385,78 +2455,6 @@ func TestResolvePG_AllowsBothFilterLists(t *testing.T) {
 	require.NoError(t, err, "ResolvePG should not reject filter conflicts")
 }
 
-func TestDuckDBConfig_LoadsFileAndEnv(t *testing.T) {
-	f := newConfigFixture(t)
-	f.WriteTOML(t, map[string]any{
-		"duckdb": map[string]any{
-			"path":             "/from/config/sessions.duckdb",
-			"url":              "quack:config-host",
-			"token":            "config-token",
-			"machine_name":     "config-machine",
-			"allow_insecure":   true,
-			"projects":         []string{"alpha", "beta"},
-			"exclude_projects": []string{"gamma"},
-		},
-	})
-	t.Setenv("AGENTSVIEW_DUCKDB_PATH", "/from/env/sessions.duckdb")
-	t.Setenv("AGENTSVIEW_DUCKDB_URL", "quack:env-host")
-	t.Setenv("AGENTSVIEW_DUCKDB_TOKEN", "env-token")
-	t.Setenv("AGENTSVIEW_DUCKDB_MACHINE", "env-machine")
-
-	cfg := f.LoadMinimal(t)
-
-	assert.Equal(t, "/from/env/sessions.duckdb", cfg.DuckDB.Path)
-	assert.Equal(t, "quack:env-host", cfg.DuckDB.URL)
-	assert.Equal(t, "env-token", cfg.DuckDB.Token)
-	assert.Equal(t, "env-machine", cfg.DuckDB.MachineName)
-	assert.True(t, cfg.DuckDB.AllowInsecure)
-	assert.Equal(t, []string{"alpha", "beta"}, cfg.DuckDB.Projects)
-	assert.Equal(t, []string{"gamma"}, cfg.DuckDB.ExcludeProjects)
-}
-
-func TestResolveDuckDB_Defaults(t *testing.T) {
-	dir := canonicalTempDir(t)
-	cfg := Config{DataDir: dir, InstallationID: "installation-a"}
-
-	resolved, err := cfg.ResolveDuckDB()
-	require.NoError(t, err, "ResolveDuckDB")
-
-	assert.Equal(t, filepath.Join(dir, "sessions.duckdb"), resolved.Path)
-	assert.Equal(t, "installation-a", resolved.MachineName)
-}
-
-func TestResolveDuckDB_ExpandsEnvVars(t *testing.T) {
-	t.Setenv("DUCKDB_URL", "quack:localhost")
-	t.Setenv("DUCKDB_TOKEN", "secret-token")
-	t.Setenv("DUCKDB_PATH", filepath.Join(canonicalTempDir(t), "remote.duckdb"))
-
-	cfg := Config{
-		DuckDB: DuckDBConfig{
-			Path:  "$DUCKDB_PATH",
-			URL:   "${DUCKDB_URL}",
-			Token: "${DUCKDB_TOKEN}",
-		},
-	}
-
-	resolved, err := cfg.ResolveDuckDB()
-	require.NoError(t, err, "ResolveDuckDB")
-
-	assert.Equal(t, os.Getenv("DUCKDB_PATH"), resolved.Path)
-	assert.Equal(t, "quack:localhost", resolved.URL)
-	assert.Equal(t, "secret-token", resolved.Token)
-}
-
-func TestResolveDuckDB_ErrorsOnMissingEnvVar(t *testing.T) {
-	cfg := Config{
-		DuckDB: DuckDBConfig{
-			URL: "${MISSING_DUCKDB_URL}",
-		},
-	}
-
-	_, err := cfg.ResolveDuckDB()
-	requireErrorContains(t, err, "MISSING_DUCKDB_URL")
-}
-
 func TestAutomatedConfigRoundTrip(t *testing.T) {
 	cfg := loadPFlagsWithConfig(t, map[string]any{
 		"automated": map[string]any{
@@ -2497,15 +2495,6 @@ func TestAutomatedConfigRoundTrip(t *testing.T) {
 	assert.Equal(t, wantPrefixes, cfg.Automated.Prefixes)
 	assert.Equal(t, wantSubstrings, cfg.Automated.Substrings)
 	assert.Equal(t, wantExactMatches, cfg.Automated.ExactMatches)
-}
-
-func TestAutomatedConfigAbsentIsNil(t *testing.T) {
-	cfg := loadPFlagsWithConfig(t, map[string]any{
-		"public_url": "http://example.com",
-	})
-	assert.Nil(t, cfg.Automated.Prefixes)
-	assert.Nil(t, cfg.Automated.Substrings)
-	assert.Nil(t, cfg.Automated.ExactMatches)
 }
 
 func TestLoadFile_CustomModelPricing(t *testing.T) {
@@ -2620,6 +2609,54 @@ output = 15.0
 	assert.Contains(t, err.Error(), "input_microdollars_per_mtok")
 }
 
+func TestLoadFile_CustomModelPricingPriceAs(t *testing.T) {
+	f := newConfigFixture(t)
+	f.WriteConfigText(t, `[custom_model_pricing.empty]
+
+[custom_model_pricing.fetched-alias]
+price_as = "new-catalog-model"
+
+[custom_model_pricing.qualified-deployment]
+price_as = "provider/gpt-6-sol"
+[custom_model_pricing."gpt-6-sol"]
+price_as = "gpt-5.6-luna"
+
+[custom_model_pricing.self]
+price_as = "self"
+`)
+
+	cfg := f.LoadMinimal(t)
+	assert.Equal(t, map[string]string{
+		"fetched-alias":        "new-catalog-model",
+		"qualified-deployment": "provider/gpt-6-sol",
+		"gpt-6-sol":            "gpt-5.6-luna",
+		"self":                 "self",
+	}, PricingAliases(cfg.CustomModelPricing))
+}
+
+func TestLoadFileRejectsInvalidCustomModelPricingPriceAs(t *testing.T) {
+	tests := []struct {
+		name, config, want string
+	}{
+		{"both", `[custom_model_pricing.alias]
+price_as = "gpt-6-sol"
+input_microdollars_per_mtok = 0
+`, `custom_model_pricing."alias": price_as cannot be combined with rate fields`},
+		{"empty target", `[custom_model_pricing.alias]
+price_as = ""
+`, `price_as must not be empty`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newConfigFixture(t)
+			f.WriteConfigText(t, tt.config)
+			err := f.LoadMinimalErr(t)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestLoadFile_RemoteHosts(t *testing.T) {
 	f := newConfigFixture(t)
 	f.WriteConfigText(t, `[[remote_hosts]]
@@ -2708,13 +2745,6 @@ transport = "http"
 	assert.Equal(t, "devbox1", cfg.RemoteHosts[0].Host)
 }
 
-func TestLoadFile_RemoteHostsAbsentIsNil(t *testing.T) {
-	cfg := loadMinimalWithConfig(t,
-		map[string]any{"public_url": "http://example.com"})
-
-	assert.Nil(t, cfg.RemoteHosts)
-}
-
 func TestValidateRemoteHosts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2777,25 +2807,12 @@ func TestLoadFile_SyncIncludeCwdPrefixes(t *testing.T) {
 	)
 }
 
-func TestLoadFile_SyncIncludeCwdPrefixesDefaultsEmpty(t *testing.T) {
-	f := newConfigFixture(t)
-	f.WriteConfigText(t, `host = "127.0.0.1"
-`)
-
-	cfg := f.LoadMinimal(t)
-
-	assert.Empty(t, cfg.SyncIncludeCwdPrefixes)
-}
-
 func TestLoadMinimal_ExpandsUserSuppliedLocalPaths(t *testing.T) {
 	home := canonicalTempDir(t)
 	setTestHome(t, home)
 	f := newConfigFixture(t)
 	f.WriteConfigText(t, `sync_include_cwd_prefixes = ["~/work"]
 codex_sessions_dirs = ["~/codex-sessions"]
-
-[duckdb]
-path = "~/sessions.duckdb"
 
 [vector]
 db_path = "~/vectors.db"
@@ -2818,7 +2835,6 @@ sandbox = "~/bin/sandbox"
 		cfg.SyncIncludeCwdPrefixes)
 	assert.Equal(t, []string{filepath.Join(home, "codex-sessions")},
 		cfg.ResolveDirs(parser.AgentCodex))
-	assert.Equal(t, filepath.Join(home, "sessions.duckdb"), cfg.DuckDB.Path)
 	assert.Equal(t, filepath.Join(home, "vectors.db"), cfg.Vector.DBPath)
 	assert.Equal(t, filepath.Join(home, "recall-prompts"),
 		cfg.Recall.Extract.Prompts.Dir)
@@ -2925,19 +2941,6 @@ func TestPGConfig_LoadsFromTOML(t *testing.T) {
 	cfg := f.LoadMinimal(t)
 
 	assert.False(t, cfg.PG.PushVectorsEnabled())
-}
-
-func TestPGConfig_PushVectorsDefaultsTrue(t *testing.T) {
-	f := newConfigFixture(t)
-	f.WriteTOML(t, map[string]any{
-		"pg": map[string]any{
-			"url": "postgres://localhost/test",
-		},
-	})
-
-	cfg := f.LoadMinimal(t)
-
-	assert.True(t, cfg.PG.PushVectorsEnabled())
 }
 
 func TestValidateArtifactOriginID(t *testing.T) {
@@ -3212,6 +3215,103 @@ func TestLoadFile_ModelAliases(t *testing.T) {
 			}
 			cfg := f.LoadMinimal(t)
 			assert.Equal(t, tt.want, cfg.ModelAliases)
+		})
+	}
+}
+
+func TestSaveVectorSetupPreservesSettings(t *testing.T) {
+	for _, raw := range []string{
+		"port = 12345\n[vector]\nenabled = false\ninclude_automated = true\n",
+		"[vector]\nenabled = false\n[vector.embeddings]\nmodel = 'test-model'\ndimension = 3\nmodel_context_tokens = 0\nquery_prefix = ''\ndocument_prefix = ''\ninput_suffix = '!'\nrequest_dimensions = false\n[vector.embeddings.servers.local]\nendpoint = 'https://example.com/v1'\nmax_retries = 0\n",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			dir := setupTestEnv(t)
+			path := filepath.Join(dir, configFileName)
+			cfg, err := LoadReadOnly()
+			require.NoError(t, err)
+			// Setup reads edits made after the daemon loaded its config.
+			require.NoError(t, os.WriteFile(path, []byte(raw), 0o600))
+			var expected map[string]any
+			_, err = toml.Decode(raw, &expected)
+			require.NoError(t, err)
+			expected["vector"].(map[string]any)["enabled"] = true
+			require.NoError(t, cfg.SaveVectorSetup())
+			var saved map[string]any
+			_, err = toml.DecodeFile(path, &saved)
+			require.NoError(t, err)
+			assert.Equal(t, expected, saved)
+		})
+	}
+}
+
+func TestSaveVectorSetupRejectsInvalidCurrentSettings(t *testing.T) {
+	for _, tc := range []struct{ name, raw, wantError string }{
+		{name: "invalid token budget", raw: "[vector]\nenabled = false\n[vector.embeddings]\nmodel = 'test-model'\ndimension = 3\nmodel_context_tokens = 512\n[vector.embeddings.servers.local]\nendpoint = 'https://example.com/v1'\nmax_batch_tokens = 256\n"},
+		{name: "array of vector tables", raw: "[[vector]]\nenabled = false\n[vector.embeddings]\nmodel = 'test-model'\ndimension = 3\n[vector.embeddings.servers.local]\nendpoint = 'https://example.com/v1'\n", wantError: "vector must be a table"},
+		{name: "scalar vector", raw: "vector = 'preserve this value'\n", wantError: "vector must be a table"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupTestEnv(t)
+			cfg, err := LoadReadOnly()
+			require.NoError(t, err)
+			path := filepath.Join(dir, configFileName)
+			require.NoError(t, os.WriteFile(path, []byte(tc.raw), 0o600))
+			_, setupErr := cfg.VectorSetupEmbeddings()
+			saveErr := cfg.SaveVectorSetup()
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.raw, string(data))
+			require.ErrorIs(t, setupErr, ErrInvalidVectorSetup)
+			require.ErrorIs(t, saveErr, ErrInvalidVectorSetup)
+			if tc.wantError != "" {
+				require.ErrorContains(t, setupErr, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestAuthFlagRetiredOnlyBySuccessfulAuthSave(t *testing.T) {
+	cfg, err := loadConfigFromPFlags(t, "--require-auth=false")
+	require.NoError(t, err)
+	require.False(t, cfg.AuthSettingsSaved)
+	require.NoError(t, cfg.SaveSettings(map[string]any{"tool_result_images": ToolResultImages("drop")}))
+	assert.False(t, cfg.AuthSettingsSaved)
+	configPath := cfg.configPath()
+	saved, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, []byte("[invalid"), 0o600))
+	require.Error(t, cfg.SaveSettings(map[string]any{"require_auth": false}))
+	assert.False(t, cfg.AuthSettingsSaved)
+	require.NoError(t, os.WriteFile(configPath, saved, 0o600))
+	require.NoError(t, cfg.SaveSettings(map[string]any{"require_auth": false}))
+	assert.True(t, cfg.AuthSettingsSaved)
+}
+
+func TestMusePersonalRootResolution(t *testing.T) {
+	for _, mode := range []string{"default", "env", "config"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := setupTestEnv(t)
+			home := canonicalTempDir(t)
+			setTestHome(t, home)
+			t.Setenv("MUSE_PERSONAL_AGENTS_DIR", "")
+			t.Setenv("CODEX_HOME", "")
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			t.Setenv("PI_CODING_AGENT_DIR", "")
+			writeConfig(t, dir, map[string]any{})
+			want := filepath.Join(home, "agents")
+			if mode == "env" {
+				want = filepath.Join(home, "explicit-root")
+				t.Setenv("MUSE_PERSONAL_AGENTS_DIR", want)
+			}
+			cfg, err := LoadMinimal()
+			require.NoError(t, err)
+			if mode == "config" {
+				want = filepath.Join(home, "configured-root")
+				require.NoError(t, cfg.applyConfigTOML(
+					"[agents.muse-personal]\ndirs = ["+strconv.Quote(want)+"]\n"))
+			}
+			assert.Equal(t, []string{want}, cfg.ResolveDirs(parser.AgentMusePersonal))
+			assert.Equal(t, mode != "default", cfg.IsUserConfigured(parser.AgentMusePersonal))
 		})
 	}
 }

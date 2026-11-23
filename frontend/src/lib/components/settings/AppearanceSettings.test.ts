@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import AppearanceSettings from "./AppearanceSettings.svelte";
 import { SettingsService } from "../../api/generated/index";
+import { messageColors } from "../../stores/messageColors.svelte.js";
 import { settings } from "../../stores/settings.svelte.js";
 import { sync } from "../../stores/sync.svelte.js";
 import { ui } from "../../stores/ui.svelte.js";
@@ -21,6 +22,7 @@ const settingsService = SettingsService as unknown as {
   putApiV1Settings: ReturnType<typeof vi.fn>;
 };
 const originalIsDesktop = sync.isDesktop;
+const originalMatchMedia = window.matchMedia.bind(window);
 
 describe("AppearanceSettings", () => {
   beforeEach(() => {
@@ -47,8 +49,10 @@ describe("AppearanceSettings", () => {
   });
 
   afterEach(() => {
+    messageColors.applyPreset("default");
     ui.setZoomLevel(100);
     ui.renderUnknownXmlBlocksAsPreformatted = false;
+    ui.alwaysShowYear = false;
     if (ui.highContrast) ui.toggleHighContrast();
     settings.chartPalette = "agentsview";
     settings.readOnly = false;
@@ -59,6 +63,47 @@ describe("AppearanceSettings", () => {
       configurable: true,
     });
     cleanup();
+  });
+
+  it("returns a pinned theme to following the device appearance", async () => {
+    // A controllable prefers-color-scheme query, starting dark.
+    const listeners = new Set<(e: MediaQueryListEvent) => void>();
+    const query = {
+      matches: true,
+      media: "(prefers-color-scheme: dark)",
+      addEventListener: (_: string, fn: (e: MediaQueryListEvent) => void) => listeners.add(fn),
+      removeEventListener: (_: string, fn: (e: MediaQueryListEvent) => void) =>
+        listeners.delete(fn),
+    };
+    const matchMedia = vi
+      .spyOn(window, "matchMedia")
+      .mockImplementation((q) =>
+        q === query.media ? (query as unknown as MediaQueryList) : originalMatchMedia(q),
+      );
+    const root = document.documentElement;
+    try {
+      ui.theme = "light";
+      const { getByRole } = render(AppearanceSettings);
+      const group = getByRole("radiogroup", { name: "Theme" });
+      expect(root.classList.contains("dark")).toBe(false);
+
+      await fireEvent.click(within(group).getByRole("radio", { name: "Match device" }));
+      expect(localStorage.getItem("theme")).toBe("system");
+      expect(root.classList.contains("dark")).toBe(true);
+
+      // The OS switches to light; the page follows without a reload.
+      query.matches = false;
+      for (const fn of listeners) fn({ matches: false } as MediaQueryListEvent);
+      expect(root.classList.contains("dark")).toBe(false);
+
+      await fireEvent.click(within(group).getByRole("radio", { name: "Dark" }));
+      expect(localStorage.getItem("theme")).toBe("dark");
+      expect(listeners.size).toBe(0);
+      expect(root.classList.contains("dark")).toBe(true);
+    } finally {
+      ui.theme = "light";
+      matchMedia.mockRestore();
+    }
   });
 
   it.each([false, true])("shares one Zoom selector with desktop=%s", async (isDesktop) => {
@@ -156,9 +201,18 @@ describe("AppearanceSettings", () => {
     expect(ui.zoomLevel).toBe(100);
   });
 
+  it("toggles the year display", async () => {
+    const { getByRole } = render(AppearanceSettings);
+    const toggle = getByRole("switch", { name: "Always show year" });
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    await fireEvent.click(toggle);
+    expect(ui.alwaysShowYear).toBe(true);
+    expect((toggle as HTMLInputElement).checked).toBe(true);
+  });
+
   it("toggles rendering unknown XML blocks as preformatted text", async () => {
     const { getByRole } = render(AppearanceSettings);
-    const checkbox = getByRole("checkbox", {
+    const checkbox = getByRole("switch", {
       name: "Render unknown XML blocks as preformatted text",
     });
 
@@ -171,8 +225,11 @@ describe("AppearanceSettings", () => {
   it("toggles high contrast", async () => {
     const { getByRole } = render(AppearanceSettings);
     expect(ui.highContrast).toBe(false);
-    await fireEvent.click(getByRole("button", { name: "Off" }));
+    const toggle = getByRole("switch", { name: "High contrast" });
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    await fireEvent.click(toggle);
     expect(ui.highContrast).toBe(true);
+    expect((toggle as HTMLInputElement).checked).toBe(true);
   });
 
   it("saves and confirms the selected chart palette", async () => {
@@ -218,5 +275,66 @@ describe("AppearanceSettings", () => {
     await waitFor(() =>
       expect(getByRole("radio", { name: "Matplotlib" }).getAttribute("aria-checked")).toBe("true"),
     );
+  });
+
+  describe("message colors", () => {
+    it("applies the color-blind preset to every role and turns on patterns", async () => {
+      const { getByRole, getAllByRole } = render(AppearanceSettings);
+      const reset = getByRole("button", { name: "Reset to defaults" }) as HTMLButtonElement;
+      expect(reset.disabled).toBe(true);
+      // Chart colors has a "Color-blind safe" option too.
+      const preset = within(getByRole("radiogroup", { name: "Message color preset" }));
+
+      await fireEvent.click(preset.getByRole("radio", { name: "Color-blind safe" }));
+
+      const userField = within(getByRole("group", { name: "Color for User messages" }));
+      expect(userField.getByRole("textbox", { name: "Hex color" })).toHaveProperty(
+        "value",
+        "#0072b2",
+      );
+      expect(
+        getByRole("switch", { name: "Mark message types with line patterns as well as color" }),
+      ).toHaveProperty("checked", true);
+      expect(
+        preset.getByRole("radio", { name: "Color-blind safe" }).getAttribute("aria-checked"),
+      ).toBe("true");
+      expect(getAllByRole("button", { name: /^Reset color for / })).toHaveLength(5);
+      expect(reset.disabled).toBe(false);
+    });
+
+    it("warns which modes a hard-to-read color fails in", async () => {
+      const { getByRole, queryByText } = render(AppearanceSettings);
+      const group = within(getByRole("group", { name: "Color for User messages" }));
+      const hex = group.getByRole("textbox", { name: "Hex color" });
+
+      await fireEvent.input(hex, { target: { value: "#f0e442" } });
+      await fireEvent.change(hex, { target: { value: "#f0e442" } });
+
+      const warning = await waitFor(() => {
+        const node = queryByText(/color marker may be hard to see/);
+        expect(node).not.toBeNull();
+        return node!;
+      });
+      expect(warning.textContent).toContain("light mode and high-contrast light mode");
+      expect(warning.textContent).toContain("needs 3:1");
+      expect(hex.getAttribute("aria-invalid")).toBe("true");
+      expect(document.getElementById(hex.getAttribute("aria-describedby")!)?.textContent).toContain(
+        "hard to see",
+      );
+      expect(getByRole("radio", { name: "Custom" }).getAttribute("aria-checked")).toBe("true");
+    });
+
+    it("resets one role back to the theme color", async () => {
+      messageColors.setColor("tool", "#f0e442");
+      const { getByRole, queryByText } = render(AppearanceSettings);
+
+      await fireEvent.click(getByRole("button", { name: "Reset color for Tool calls" }));
+
+      const group = within(getByRole("group", { name: "Color for Tool calls" }));
+      // --accent-amber in the light theme.
+      expect(group.getByRole("textbox", { name: "Hex color" })).toHaveProperty("value", "#d97706");
+      expect(queryByText(/hard to see|hard to read/)).toBeNull();
+      expect(messageColors.isDefault).toBe(true);
+    });
   });
 });

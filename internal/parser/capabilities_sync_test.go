@@ -12,6 +12,16 @@ import (
 // carry the zero-value ProviderSyncSemantics.
 func TestProviderSyncSemanticsDeclarations(t *testing.T) {
 	wantSync := map[AgentType]ProviderSyncSemantics{
+		// The summary store's workspace and parent are in the fingerprint and
+		// change without touching a conversation's own files.
+		AgentAntigravity: {
+			FingerprintHashInCacheKey:           true,
+			FingerprintHashRequiredForFreshness: true,
+		},
+		AgentAntigravityCLI: {
+			FingerprintHashInCacheKey:           true,
+			FingerprintHashRequiredForFreshness: true,
+		},
 		AgentClaude: {
 			FingerprintHashInCacheKey:           true,
 			FingerprintHashRequiredForFreshness: true,
@@ -25,6 +35,13 @@ func TestProviderSyncSemanticsDeclarations(t *testing.T) {
 		// Augure Code shares the Codex provider, so it must share its
 		// semantics.
 		AgentAugureCode: {
+			FingerprintHashInCacheKey:           true,
+			FingerprintHashRequiredForFreshness: true,
+			SkipCacheFreshWithoutStoredRow:      true,
+		},
+		// Open Interpreter shares the Codex provider, so it must share its
+		// semantics.
+		AgentInterpreter: {
 			FingerprintHashInCacheKey:           true,
 			FingerprintHashRequiredForFreshness: true,
 			SkipCacheFreshWithoutStoredRow:      true,
@@ -135,10 +152,19 @@ func TestProviderSyncSemanticsDeclarations(t *testing.T) {
 			FingerprintHashRequiredForFreshness: true,
 			UnchangedResults:                    UnchangedResultMTimeAndHash,
 		},
+		AgentMusePersonal: {
+			FingerprintHashRequiredForFreshness: true,
+		},
 		AgentEvener: {
 			FingerprintHashRequiredForFreshness: true,
 		},
 		AgentFx: {
+			FingerprintHashRequiredForFreshness: true,
+		},
+		// A Factory settings sidecar rewrite can keep the combined size and
+		// mtime, so freshness depends on the content fingerprint. Behavior is
+		// covered by TestSyncFactorySameSizeSettingsRewriteResyncs.
+		AgentFactory: {
 			FingerprintHashRequiredForFreshness: true,
 		},
 		// Codebuff requires the per-component stat-hash digest (persisted in

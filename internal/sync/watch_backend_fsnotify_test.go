@@ -1,3 +1,5 @@
+//go:build !darwin
+
 package sync
 
 import (
@@ -22,6 +24,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kit/stacktest"
 )
 
 func testFSNotifyBackend(t *testing.T) *fsnotifyBackend {
@@ -534,16 +537,6 @@ func TestFSNotifyBackendRuntimeRetryTimerReleasesPolling(t *testing.T) {
 	})
 }
 
-func TestBufferedFSNotifyWatchOpsPreservesErrors(t *testing.T) {
-	watcher, err := fsnotify.NewWatcher()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = watcher.Close() })
-	ops := bufferedFSNotifyWatchOps{Watcher: watcher}
-	require.ErrorIs(t, ops.Add(filepath.Join(t.TempDir(), "absent")), os.ErrNotExist)
-	require.NoError(t, watcher.Close())
-	require.ErrorIs(t, ops.Add(t.TempDir()), fsnotify.ErrClosed)
-}
-
 func TestFSNotifyBackendOverflowRequestsLostEventRecovery(t *testing.T) {
 	backend := testFSNotifyBackend(t)
 	errorInput := make(chan error, 1)
@@ -942,6 +935,7 @@ func waitForBackendEvent(
 				return event
 			}
 		case <-deadline.C:
+			stacktest.Dump(t)
 			require.FailNowf(t, "test failed", "backend event %v for %s was not observed", wantOp, path)
 		}
 	}
@@ -1105,7 +1099,7 @@ func TestFSNotifyBackendConcurrentAddWaitsForRemoveOwnershipDecision(t *testing.
 	select {
 	case <-barrier.addCalled:
 		addReachedWhileRemoveBlocked = true
-	case <-time.After(50 * time.Millisecond): //nolint:kennlint // absence check; the held Remove barrier keeps the native Add waiting
+	case <-time.After(50 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check; the held Remove barrier keeps the native Add waiting
 	}
 	close(barrier.allowRemove)
 	require.NoError(t, <-removeErr)

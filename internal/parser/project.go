@@ -3,6 +3,7 @@ package parser
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,8 +54,8 @@ func statGitEntry(gitPath string) (os.FileInfo, error) {
 	return osStat(gitPath)
 }
 
-// allowProtectedPathProbes lets project extraction probe recorded working
-// directories inside macOS TCC-protected locations. It is package-level
+// allowProtectedPathProbes lets metadata discovery read recorded paths
+// inside macOS TCC-protected locations. It is package-level
 // because parsers extract project names deep inside per-format code with no
 // engine context to consult. The zero value refuses those probes, so a
 // process that never opts in cannot raise a consent prompt from parsing.
@@ -74,8 +75,8 @@ func filesystemProjectDiscoveryDisabled(ctx context.Context) bool {
 	return disabled
 }
 
-// SetAllowProtectedPathProbes sets whether project extraction may probe
-// macOS TCC-protected working directories for git roots. Wired from the
+// SetAllowProtectedPathProbes sets whether metadata discovery may read
+// macOS TCC-protected locations for Git roots and skill names. Wired from the
 // scan_protected_paths config option by the sync engine.
 func SetAllowProtectedPathProbes(allow bool) {
 	allowProtectedPathProbes.Store(allow)
@@ -86,7 +87,7 @@ func SetAllowProtectedPathProbes(allow bool) {
 // home layout.
 var (
 	probeGitRootForCwd = defaultProbeGitRootForCwd
-	probeGitfileTarget = defaultProbeGitfileTarget
+	probeGitfileTarget = defaultProbeMetadataPath
 )
 
 // classifyProbePath classifies cleaned for the local process: real GOOS,
@@ -134,12 +135,11 @@ func automountCwdProbeAllowed(cleaned string) bool {
 	return true
 }
 
-// defaultProbeGitfileTarget reports whether a path taken from gitfile
-// contents — a gitdir, a common directory, or the .git entry itself when it
-// is a symlink — may be read. Unlike the cwd guard, automount namespaces are
-// refused outright: targets never pass isForeignOSPath's resolved-autofs
-// probe, so reading one would wake automountd unvetted.
-func defaultProbeGitfileTarget(cleaned string) bool {
+// defaultProbeMetadataPath reports whether a recorded skill path or Git
+// metadata target may be read. Unlike the cwd guard, automount namespaces
+// are refused outright: these paths never pass isForeignOSPath's
+// resolved-autofs probe, so reading one would wake automountd unvetted.
+func defaultProbeMetadataPath(cleaned string) bool {
 	switch classifyProbePath(cleaned) {
 	case export.LocalPathProbeAutomountNamespace:
 		return false
@@ -790,8 +790,8 @@ func scanSiblingRepoCandidates(dir string) siblingScanResult {
 		result.selfIsRepo = true
 		return result
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	entries, ok := readSiblingScanEntries(dir)
+	if !ok {
 		return result
 	}
 	worktreeMarker := string(filepath.Separator) + ".git" +
@@ -887,6 +887,29 @@ func scanSiblingRepoCandidates(dir string) siblingScanResult {
 	}
 	result.agreedRoot = found
 	return result
+}
+
+// maxSiblingScanEntries bounds the directories a deleted cwd's sibling scan
+// will read. Worktree containers hold a few hundred checkouts at most. A
+// deleted cwd whose nearest existing ancestor is a temp directory with tens of
+// thousands of entries would otherwise vet and stat every entry, which took
+// seconds on each pass that resolved the stale path.
+const maxSiblingScanEntries = 1024
+
+// readSiblingScanEntries lists dir for the sibling scan. It reports false when
+// dir cannot be read or holds more than maxSiblingScanEntries entries, which
+// rules dir out as a worktree container.
+func readSiblingScanEntries(dir string) ([]os.DirEntry, bool) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(maxSiblingScanEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	return entries, len(entries) <= maxSiblingScanEntries
 }
 
 // deletedChildIsWorktree checks whether the first missing
@@ -1091,14 +1114,15 @@ func trimBranchSuffix(name, gitBranch string) string {
 		return name
 	}
 
-	for _, sep := range []string{"-", "_"} {
+	// "." covers worktrunk's default sibling layout, "<repo>.<branch>".
+	for _, sep := range []string{"-", "_", "."} {
 		suffix := sep + branchToken
 		if strings.HasSuffix(
 			strings.ToLower(name),
 			strings.ToLower(suffix),
 		) {
 			base := strings.TrimRight(
-				name[:len(name)-len(suffix)], "-_",
+				name[:len(name)-len(suffix)], "-_.",
 			)
 			if base != "" {
 				return base

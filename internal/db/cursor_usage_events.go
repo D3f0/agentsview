@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,10 +15,12 @@ import (
 	"go.kenn.io/agentsview/internal/money"
 )
 
-// CursorUsageEvent stores authoritative Cursor admin usage data.
-// The table is append-only, deduped by a stable event fingerprint.
+// CursorUsageEvent stores authoritative account billing data. Agent defaults
+// to cursor for Cursor admin API imports; xAI CSV imports identify each product.
+// Events are deduped by a stable fingerprint; account attribution can update existing rows.
 type CursorUsageEvent struct {
 	ID               int64
+	Agent            string
 	OccurredAt       string
 	Model            string
 	Kind             string
@@ -32,10 +36,23 @@ type CursorUsageEvent struct {
 	DedupKey         string
 }
 
+const cursorAccountPollsSchemaSQL = `
+CREATE TABLE IF NOT EXISTS cursor_account_polls (
+    account_user_id TEXT NOT NULL,
+    hour_start INTEGER NOT NULL,
+    polled_at TEXT NOT NULL,
+    PRIMARY KEY (account_user_id, hour_start)
+);`
+
+// Created after column migrations so older archives can open without a rebuild.
+const cursorAccountEventIndexSQL = `CREATE INDEX IF NOT EXISTS idx_cursor_usage_events_account_time
+ON cursor_usage_events(agent, account_user_id, occurred_at, account_polled_at)`
+
 func (db *DB) ensureCursorUsageEventsSchemaLocked(ctx context.Context, w *writerHandle) error {
 	if _, err := w.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS cursor_usage_events (
 			id INTEGER PRIMARY KEY,
+			agent TEXT NOT NULL DEFAULT 'cursor',
 			occurred_at TEXT NOT NULL,
 			model TEXT NOT NULL,
 			kind TEXT NOT NULL DEFAULT '',
@@ -47,6 +64,8 @@ func (db *DB) ensureCursorUsageEventsSchemaLocked(ctx context.Context, w *writer
 			cursor_token_fee_microdollars INTEGER NOT NULL DEFAULT 0,
 			user_id TEXT NOT NULL DEFAULT '',
 			user_email TEXT NOT NULL DEFAULT '',
+			account_user_id TEXT NOT NULL DEFAULT '',
+			account_polled_at TEXT NOT NULL DEFAULT '',
 			is_headless INTEGER NOT NULL DEFAULT 0,
 			dedup_key TEXT NOT NULL DEFAULT ''
 		);
@@ -60,11 +79,73 @@ func (db *DB) ensureCursorUsageEventsSchemaLocked(ctx context.Context, w *writer
 	`); err != nil {
 		return fmt.Errorf("creating cursor_usage_events: %w", err)
 	}
+	if _, err := w.Exec(ctx, cursorAccountEventIndexSQL); err != nil {
+		return fmt.Errorf("indexing Cursor account usage: %w", err)
+	}
 	return nil
 }
 
-// InsertCursorUsageEvents appends new Cursor usage rows and ignores
-// duplicates with the same stable fingerprint.
+type CursorAccountHour struct {
+	UserID string
+	Start  time.Time
+}
+
+const cursorAccountHoursQuery = `SELECT account_user_id, hour_start FROM cursor_account_polls WHERE hour_start >= ? AND hour_start < ?`
+
+// CursorAccountHours returns account-hours with a recorded poll within a range.
+func (db *DB) CursorAccountHours(ctx context.Context, start, end time.Time) ([]CursorAccountHour, error) {
+	rows, err := db.getReader().Query(ctx, cursorAccountHoursQuery, start.Unix(), end.Unix()+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var hours []CursorAccountHour
+	for rows.Next() {
+		var id string
+		var seconds int64
+		if err := rows.Scan(&id, &seconds); err != nil {
+			return nil, err
+		}
+		hour := CursorAccountHour{UserID: id, Start: time.Unix(seconds, 0).UTC()}
+		if !hour.Start.Before(start) && !hour.Start.Add(time.Hour).After(end) {
+			hours = append(hours, hour)
+		}
+	}
+	return hours, rows.Err()
+}
+
+const (
+	cursorAccountPreviousPollQuery = `INSERT INTO cursor_account_polls(account_user_id,hour_start,polled_at) SELECT account_user_id, ` + reportingCursorHour + `, ? FROM cursor_usage_events WHERE account_user_id != '' AND account_user_id != ? AND dedup_key != '' AND dedup_key IN (SELECT value FROM json_each(?)) AND account_polled_at < ? ON CONFLICT(account_user_id,hour_start) DO UPDATE SET polled_at = max(polled_at,excluded.polled_at)`
+	cursorAccountAssignQuery       = `UPDATE cursor_usage_events SET account_user_id = ?, account_polled_at = ? WHERE dedup_key != '' AND dedup_key IN (SELECT value FROM json_each(?)) AND account_polled_at < ?`
+)
+
+// RecordCursorAccountPoll commits matched events and completed prior hours together.
+func (db *DB) RecordCursorAccountPoll(ctx context.Context, assignments map[string][]string, polledAt time.Time, hours []CursorAccountHour) error {
+	stamp := polledAt.UTC().Format("2006-01-02T15:04:05.000000Z")
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		for id, keys := range assignments {
+			encoded, err := json.Marshal(keys)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, cursorAccountPreviousPollQuery, stamp, id, string(encoded), stamp); err != nil {
+				return fmt.Errorf("recording previous Cursor account poll: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, cursorAccountAssignQuery, id, stamp, string(encoded), stamp); err != nil {
+				return fmt.Errorf("assigning Cursor usage account: %w", err)
+			}
+		}
+		for _, hour := range hours {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO cursor_account_polls(account_user_id,hour_start,polled_at) VALUES (?,?,?) ON CONFLICT(account_user_id,hour_start) DO UPDATE SET polled_at = max(polled_at,excluded.polled_at)`, hour.UserID, hour.Start.Unix(), stamp); err != nil {
+				return fmt.Errorf("recording Cursor account poll: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// InsertCursorUsageEvents appends account usage rows and ignores duplicates
+// with the same billing identity or stable fingerprint.
 func (db *DB) InsertCursorUsageEvents(ctx context.Context,
 	events []CursorUsageEvent,
 ) error {
@@ -82,8 +163,8 @@ func (db *DB) InsertCursorUsageEvents(ctx context.Context,
 	defer func() { _ = tx.Rollback() }()
 
 	for _, ev := range events {
-		if ev.Model == "" {
-			return errors.New("cursor usage event model is required")
+		if ev.Agent == "" {
+			ev.Agent = "cursor"
 		}
 		if ev.OccurredAt == "" {
 			return errors.New("cursor usage event timestamp is required")
@@ -102,13 +183,13 @@ func (db *DB) InsertCursorUsageEvents(ctx context.Context,
 
 		if _, err := tx.ExecContext(ctx, `
 			INSERT OR IGNORE INTO cursor_usage_events (
-				occurred_at, model, kind,
+				agent, occurred_at, model, kind,
 				input_tokens, output_tokens,
 				cache_write_tokens, cache_read_tokens,
 				charged_microdollars, cursor_token_fee_microdollars,
 				user_id, user_email, is_headless, dedup_key
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			ev.OccurredAt, SanitizeUTF8(ev.Model), SanitizeUTF8(ev.Kind),
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			SanitizeUTF8(ev.Agent), ev.OccurredAt, SanitizeUTF8(ev.Model), SanitizeUTF8(ev.Kind),
 			ev.InputTokens, ev.OutputTokens,
 			ev.CacheWriteTokens, ev.CacheReadTokens,
 			ev.Charged.Microdollars, ev.CursorTokenFee.Microdollars,
@@ -131,6 +212,9 @@ func (db *DB) InsertCursorUsageEvents(ctx context.Context,
 func CursorUsageEventDedupKey(ev CursorUsageEvent) string {
 	var b strings.Builder
 	b.Grow(256)
+	if ev.Agent != "" && ev.Agent != "cursor" {
+		fmt.Fprintf(&b, "%s|", ev.Agent)
+	}
 	fmt.Fprintf(&b, "%s|%s|%s|%d|%d|%d|%d|%s|%s|%t|%s|%s",
 		cursorUsageEventFingerprintTimestamp(ev.OccurredAt),
 		SanitizeUTF8(ev.Model),
@@ -180,11 +264,25 @@ func formatMicrodollarsAsLegacyCents(microdollars int64) string {
 	return formatted
 }
 
-// GetCursorUsageEvents returns cursor usage rows with id greater than
-// sinceID, in (occurred_at, id) order. The table is append-only (no
-// updates or deletes), so its integer primary key grows monotonically and
-// sinceID acts as a high-water mark: pass 0 for the full history, or the
-// largest previously consumed ID to load only appended rows.
+// MaxCursorUsageEventID returns the largest account usage row id, or 0
+// when there are no rows. Mirrors compare it with their high-water id
+// before asking their target for it.
+func (db *DB) MaxCursorUsageEventID(ctx context.Context) (int64, error) {
+	if !db.hasCursorUsageTable(ctx) {
+		return 0, nil
+	}
+	var id int64
+	if err := db.getReader().QueryRow(ctx,
+		`SELECT COALESCE(MAX(id), 0) FROM cursor_usage_events`).Scan(&id); err != nil {
+		return 0, fmt.Errorf("querying max cursor usage event id: %w", err)
+	}
+	return id, nil
+}
+
+// GetCursorUsageEvents returns account usage rows with id greater than
+// sinceID, in (occurred_at, id) order. Account stamps can update existing rows;
+// their IDs stay unchanged. Pass 0 for the full history, or the largest
+// previously consumed ID to load only appended rows.
 func (db *DB) GetCursorUsageEvents(
 	ctx context.Context, sinceID int64,
 ) ([]CursorUsageEvent, error) {
@@ -192,7 +290,7 @@ func (db *DB) GetCursorUsageEvents(
 		return nil, nil
 	}
 	rows, err := db.getReader().QueryContext(ctx, `
-		SELECT id, occurred_at, model, kind,
+		SELECT id, agent, occurred_at, model, kind,
 			input_tokens, output_tokens,
 			cache_write_tokens, cache_read_tokens,
 			charged_microdollars, cursor_token_fee_microdollars,
@@ -210,7 +308,7 @@ func (db *DB) GetCursorUsageEvents(
 		var ev CursorUsageEvent
 		var isHeadless int
 		if err := rows.Scan(
-			&ev.ID, &ev.OccurredAt, &ev.Model, &ev.Kind,
+			&ev.ID, &ev.Agent, &ev.OccurredAt, &ev.Model, &ev.Kind,
 			&ev.InputTokens, &ev.OutputTokens,
 			&ev.CacheWriteTokens, &ev.CacheReadTokens,
 			&ev.Charged, &ev.CursorTokenFee,
@@ -232,7 +330,7 @@ func (db *DB) CursorUsageEventFingerprint(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	rows, err := db.getReader().Query(ctx, `
-		SELECT occurred_at, model, kind,
+		SELECT agent, occurred_at, model, kind,
 			input_tokens, output_tokens,
 			cache_write_tokens, cache_read_tokens,
 			charged_microdollars, cursor_token_fee_microdollars,
@@ -249,7 +347,7 @@ func (db *DB) CursorUsageEventFingerprint(ctx context.Context) (string, error) {
 		var ev CursorUsageEvent
 		var isHeadless int
 		if err := rows.Scan(
-			&ev.OccurredAt, &ev.Model, &ev.Kind,
+			&ev.Agent, &ev.OccurredAt, &ev.Model, &ev.Kind,
 			&ev.InputTokens, &ev.OutputTokens,
 			&ev.CacheWriteTokens, &ev.CacheReadTokens,
 			&ev.Charged, &ev.CursorTokenFee,
@@ -262,6 +360,9 @@ func (db *DB) CursorUsageEventFingerprint(ctx context.Context) (string, error) {
 		ev.UserID = SanitizeUTF8(ev.UserID)
 		ev.UserEmail = SanitizeUTF8(ev.UserEmail)
 		ev.DedupKey = SanitizeUTF8(ev.DedupKey)
+		if ev.Agent != "cursor" {
+			fmt.Fprintf(&b, "%d:%s|", len(ev.Agent), ev.Agent)
+		}
 		fmt.Fprintf(&b, "%d:%s|%d:%s|%d:%s|%d|%d|%d|%d|%d|%d|%d:%s|%d:%s|%t|%d:%s;",
 			len(ev.OccurredAt), ev.OccurredAt,
 			len(ev.Model), ev.Model,

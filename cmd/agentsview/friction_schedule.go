@@ -60,10 +60,16 @@ func newFrictionRunner(cfg config.Config, store frictionRunnerStore, now func() 
 	if err != nil {
 		return nil, err
 	}
-	return &review.Runner{
+	runner := &review.Runner{
 		Store: store, Loc: loc, Now: now,
 		BackfillDays: cfg.Friction.BackfillDays, SeatPatterns: patterns,
-	}, nil
+	}
+	if source, ok := store.(review.DiagnosticSource); ok {
+		if capable, ok := store.(interface{ FrictionDiagnosticsAvailable() bool }); !ok || capable.FrictionDiagnosticsAvailable() {
+			runner.Diagnostics = source
+		}
+	}
+	return runner, nil
 }
 
 // frictionExclusive keeps a detached daemon alive and serializes digest work
@@ -122,6 +128,6 @@ func startLocalFrictionReview(
 		return srv.SerializeArchiveWrite(ctx, work)
 	})
 	runner, wait := startFrictionReview(ctx, cfg, store, exclusive)
-	server.WithFriction(runner)(srv)
+	server.WithFriction(runner, exclusive)(srv)
 	return wait
 }

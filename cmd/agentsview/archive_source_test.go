@@ -1,0 +1,583 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json/v2"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	stdsync "sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/archivesource"
+	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/dbtest"
+	"go.kenn.io/agentsview/internal/parser"
+	"go.kenn.io/agentsview/internal/rawarchive"
+	"go.kenn.io/agentsview/internal/rawcapture"
+	"go.kenn.io/agentsview/internal/rawcheckpoint"
+	"go.kenn.io/agentsview/internal/rawwatch"
+	"go.kenn.io/agentsview/internal/server"
+	"go.kenn.io/agentsview/internal/service"
+	"go.kenn.io/agentsview/internal/sync"
+	"go.kenn.io/agentsview/internal/testjsonl"
+)
+
+func TestArchiveSourceDaemonRemoteSyncIncludesAttachedHistory(t *testing.T) {
+	source := archiveSourceCommandFixture(t)
+	remoteDB := dbtest.OpenTestDB(t)
+	remote := httptest.NewServer(server.New(config.Config{
+		Host: "127.0.0.1", DataDir: t.TempDir(), AuthToken: "remote-token",
+	}, remoteDB, nil).Handler())
+	t.Cleanup(remote.Close)
+	for _, tc := range []struct {
+		name         string
+		includeLocal bool
+		full         bool
+		offline      bool
+	}{
+		{name: "incremental", includeLocal: true},
+		{name: "full", includeLocal: true, full: true},
+		{name: "partial archive failure", includeLocal: true, offline: true},
+		{name: "remote only", offline: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfigWithClaudeFixture(t)
+			cfg.Host = "127.0.0.1"
+			cfg.ArchiveSources = []config.ArchiveSource{source}
+			if tc.offline {
+				cfg.ArchiveSources = append(cfg.ArchiveSources, config.ArchiveSource{
+					Name: "offline", Repository: filepath.Join(t.TempDir(), "missing"), Snapshot: source.Snapshot,
+				})
+			}
+			cfg.RemoteHosts = []config.RemoteHost{{
+				Host: "remote", Transport: config.RemoteTransportHTTP,
+				URL: remote.URL, Token: "remote-token",
+			}}
+			database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+			engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+			t.Cleanup(engine.Close)
+			attached, err := archivesource.NewManager(t.Context(), cfg, database, engine, nil)
+			require.NoError(t, err)
+			t.Cleanup(attached.Close)
+			srv := server.New(cfg, database, engine,
+				server.WithArchiveSources(attached),
+				server.WithLocalSyncRunner(withAttachedSources(attached,
+					newForegroundSyncRunner(t.Context(), cfg, engine, database, nil))),
+			)
+			body, err := json.Marshal(remoteSyncRequest{
+				Full: tc.full, IncludeLocal: tc.includeLocal, Hosts: cfg.RemoteHosts,
+			})
+			require.NoError(t, err)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost,
+				"/api/v1/sync/remotes", bytes.NewReader(body))
+			req.Host = "127.0.0.1:0"
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "http://127.0.0.1:0")
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, req)
+			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			var result struct {
+				LocalStats *sync.SyncStats `json:"local_stats"`
+				Failures   []any           `json:"failures"`
+				Error      string          `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+			require.Empty(t, result.Failures)
+			messages, err := database.GetAllMessages(t.Context(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved")
+			require.NoError(t, err)
+			if !tc.includeLocal {
+				assert.Empty(t, result.Error)
+				assert.Nil(t, result.LocalStats)
+				assert.Empty(t, messages)
+				return
+			}
+			if tc.offline {
+				assert.Equal(t, "local sync failed", result.Error)
+			} else {
+				assert.Empty(t, result.Error)
+			}
+			require.NotNil(t, result.LocalStats)
+			assert.Equal(t, 4, result.LocalStats.Synced)
+			require.Len(t, messages, 1)
+			assert.Equal(t, "archived message", messages[0].Content)
+		})
+	}
+}
+
+func TestDaemonIngestionWakeIncludesAttachedHistory(t *testing.T) {
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.ArchiveSources = []config.ArchiveSource{archiveSourceCommandFixture(t)}
+	database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+	engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+	t.Cleanup(engine.Close)
+	engine.SyncAll(t.Context(), nil)
+	ingestion := newDaemonIngestion(t.Context(), cfg, engine, database, server.NewIdleTracker(0, func() {}), nil)
+	attached, err := archivesource.NewManager(t.Context(), cfg, database, engine, nil)
+	require.NoError(t, err)
+	t.Cleanup(attached.Close)
+	t.Cleanup(ingestion.Stop)
+	ingestion.attached = attached
+	ingestion.Suspend()
+	ingestion.applying.Wait()
+	require.True(t, ingestion.EnsureFresh(t.Context()))
+	messages, err := database.GetAllMessages(t.Context(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved")
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "archived message", messages[0].Content)
+}
+
+func TestForegroundSyncAfterIdlePauseImportsAttachedHistory(t *testing.T) {
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.ArchiveSources = []config.ArchiveSource{archiveSourceCommandFixture(t)}
+	database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+	engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+	t.Cleanup(engine.Close)
+	engine.SyncAll(t.Context(), nil)
+	ingestion := newDaemonIngestion(t.Context(), cfg, engine, database, server.NewIdleTracker(0, func() {}), nil)
+	// As in the daemon, an attached import first flushes the file watcher.
+	attached, err := archivesource.NewManager(t.Context(), cfg, database, engine, ingestion.FlushPending)
+	require.NoError(t, err)
+	t.Cleanup(attached.Close)
+	t.Cleanup(ingestion.Stop)
+	ingestion.attached = attached
+	pauseAfterStartup(t, ingestion)
+
+	runner := ingestion.foregroundSync(withAttachedSources(attached,
+		func(ctx context.Context, progress func(sync.Progress)) (sync.SyncStats, error) {
+			// Changes collected during the pause would contend for the sync
+			// lock with this pass, which a manual sync reports as busy.
+			assert.False(t, ingestion.Active(), "the pause holds through the full pass")
+			return engine.SyncAll(ctx, progress), nil
+		}))
+	_, err = runner(t.Context(), nil)
+
+	require.NoError(t, err, "a manual sync after an idle pause imports attached archives")
+	messages, err := database.GetAllMessages(t.Context(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved")
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "archived message", messages[0].Content)
+	assert.True(t, ingestion.Active(), "the manual sync ends the pause")
+	assert.False(t, ingestion.Pending())
+}
+
+// A manual sync that applies only collected changes still imports attached
+// archives, as the full pass it replaces does. It retries an import at once,
+// even one an idle daemon's scheduled passes have put on hold.
+const attachedSessionID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
+
+type attachedDaemon struct {
+	cfg       config.Config
+	database  *db.DB
+	ingestion *daemonIngestion
+	attached  *archivesource.Manager
+	tr        transport
+}
+
+// newAttachedDaemon serves a started daemon with an attached archive whose
+// import fails while another session holds the archived ID.
+func newAttachedDaemon(t *testing.T, remoteHosts ...config.RemoteHost) attachedDaemon {
+	t.Helper()
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.Host = "127.0.0.1"
+	cfg.ArchiveSources = []config.ArchiveSource{archiveSourceCommandFixture(t)}
+	cfg.RemoteHosts = remoteHosts
+	database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+	engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+	t.Cleanup(engine.Close)
+	engine.SyncAll(t.Context(), nil)
+	ingestion := newDaemonIngestion(t.Context(), cfg, engine, database, server.NewIdleTracker(0, func() {}), nil)
+	attached, err := archivesource.NewManager(t.Context(), cfg, database, engine, ingestion.FlushPending)
+	require.NoError(t, err)
+	t.Cleanup(attached.Close)
+	t.Cleanup(ingestion.Stop)
+	ingestion.attached = attached
+	ingestion.OpenWatcherDispatch()
+	dbtest.SeedSession(t, database, attachedSessionID, "project")
+	ts := serveIngestionArchive(t, cfg, database, engine, ingestion, server.WithArchiveSources(attached))
+	return attachedDaemon{cfg, database, ingestion, attached, transport{URL: ts.URL}}
+}
+
+func TestChangesOnlySyncRetriesAttachedHistory(t *testing.T) {
+	const id = attachedSessionID
+	d := newAttachedDaemon(t)
+	database, ingestion, attached, tr, cfg := d.database, d.ingestion, d.attached, d.tr, d.cfg
+	// Repeated scheduled failures put the source on hold.
+	var err error
+	for range 2 {
+		_, err = attached.DrainScheduled(t.Context())
+		require.Error(t, err)
+	}
+	_, err = attached.DrainScheduled(t.Context())
+	require.ErrorContains(t, err, "retrying after")
+	// DeleteSession would exclude the ID from later imports.
+	require.NoError(t, database.Update(t.Context(), func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(t.Context(), `DELETE FROM sessions WHERE id = ?`, id)
+		return err
+	}))
+	pauseAfterStartup(t, ingestion)
+
+	stats, err := runDaemonSync(t.Context(), tr, cfg.AuthToken, false, true, nil)
+
+	require.NoError(t, err)
+	assert.True(t, stats.ChangesOnly)
+	messages, err := database.GetAllMessages(t.Context(), id)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "archived message", messages[0].Content)
+}
+
+// A failed attached import must not keep reachable hosts from syncing: as
+// after a full local pass, the hosts sync first and the failure follows.
+func TestChangesOnlyRemoteSyncReachesHostsBeforeAttachedFailure(t *testing.T) {
+	remote := httptest.NewServer(server.New(config.Config{
+		Host: "127.0.0.1", DataDir: t.TempDir(), AuthToken: "remote-token", RequireAuth: true,
+	}, dbtest.OpenTestDB(t), nil).Handler())
+	t.Cleanup(remote.Close)
+	d := newAttachedDaemon(t, config.RemoteHost{
+		Host: "remote", Transport: config.RemoteTransportHTTP, URL: remote.URL, Token: "wrong-token",
+	})
+
+	failures, err := runDaemonRemoteSync(t.Context(), d.tr, d.cfg.AuthToken, d.cfg.RemoteHosts, false, true, true, nil)
+
+	require.Error(t, err, "the attached import still fails the sync")
+	require.Len(t, failures, 1, "the host was tried before the attached failure")
+	assert.Equal(t, "remote", failures[0].Host.Host)
+}
+
+func TestSessionUsageWaitFindsLateAttachedHistory(t *testing.T) {
+	shortenSessionUsagePoll(t)
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.Host = "127.0.0.1"
+	cfg.ArchiveSources = []config.ArchiveSource{archiveSourceCommandFixture(t)}
+	database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+	engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+	t.Cleanup(engine.Close)
+	engine.SyncAll(t.Context(), nil)
+	require.True(t, engine.StartupReconciled())
+	attached, err := archivesource.NewManager(t.Context(), cfg, database, engine, nil)
+	require.NoError(t, err)
+	t.Cleanup(attached.Close)
+	release := make(chan struct{})
+	var releaseOnce stdsync.Once
+	drained := make(chan error, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }); <-done })
+	go func() {
+		defer close(done)
+		select {
+		case <-release:
+			_, err := attached.Drain(t.Context(), nil)
+			drained <- err
+		case <-t.Context().Done():
+			drained <- t.Context().Err()
+		}
+	}()
+	const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	cfg.Port = ln.Addr().(*net.TCPAddr).Port
+	srv := server.New(cfg, database, engine, server.WithArchiveSources(attached))
+	lookups := 0
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv.Handler().ServeHTTP(w, r)
+		if r.URL.Path == "/api/v1/sessions/"+id {
+			lookups++
+			if lookups == 2 {
+				releaseOnce.Do(func() { close(release) })
+			}
+		}
+	}))
+	ts.Listener = ln
+	ts.Start()
+	t.Cleanup(ts.Close)
+	out, _, err := httpSessionUsageData(t.Context(), ts.URL, "", sessionUsageQuery{SessionID: id, Wait: true, NoSync: true})
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	assert.Equal(t, id, out.SessionID)
+	require.NoError(t, <-drained)
+}
+
+func TestAttachedSourcesDrainAfterRebuildWithDeferredFork(t *testing.T) {
+	source := archiveSourceCommandFixture(t)
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.ArchiveSources = []config.ArchiveSource{source}
+	database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+	engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+	t.Cleanup(engine.Close)
+	attached, err := archivesource.NewManager(t.Context(), cfg, database, engine, nil)
+	require.NoError(t, err)
+	t.Cleanup(attached.Close)
+	runner := withAttachedSources(attached, func(context.Context, func(sync.Progress)) (sync.SyncStats, error) {
+		return sync.SyncStats{ArchiveRebuilt: true, Deferred: 1}, nil
+	})
+	_, err = runner(t.Context(), nil)
+	require.NoError(t, err)
+	messages, err := database.GetAllMessages(t.Context(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved")
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+}
+
+func TestDirectResyncDrainsAttachedHistoryWithDeferredFork(t *testing.T) {
+	const parent = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	const child = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	const timestamp = "2026-09-01T10:00:00Z"
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.ArchiveSources = []config.ArchiveSource{archiveSourceCommandFixture(t)}
+	root := t.TempDir()
+	cfg.AgentDirs[parser.AgentCodex] = []string{root}
+	path := filepath.Join(root, "rollout-2026-09-01T11-00-00-"+child+".jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(testjsonl.JoinJSONL(
+		testjsonl.CodexForkedSessionMetaJSON(child, parent, "/work/project", "user", timestamp),
+		testjsonl.CodexTurnContextWithIDJSON("gpt-5", "child-turn", timestamp),
+		testjsonl.CodexMsgJSON("assistant", "child answer", timestamp),
+	)), 0o600))
+	database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+	_, stats, err := runLocalSyncResult(t.Context(), cfg, database, true)
+	require.NoError(t, err)
+	assert.True(t, stats.ArchiveRebuilt)
+	assert.Equal(t, 1, stats.Deferred)
+	messages, err := database.GetAllMessages(t.Context(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved")
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "archived message", messages[0].Content)
+	_, pending, err := runLocalSyncResult(t.Context(), cfg, database, false)
+	require.ErrorContains(t, err, "local sync processing incomplete")
+	assert.False(t, pending.ArchiveRebuilt)
+	assert.Equal(t, 1, pending.Deferred)
+}
+
+func TestArchiveSourceNoSyncDaemonManualSync(t *testing.T) {
+	source := archiveSourceCommandFixture(t)
+	remoteDB := dbtest.OpenTestDB(t)
+	remote := httptest.NewServer(server.New(config.Config{
+		Host: "127.0.0.1", DataDir: t.TempDir(), AuthToken: "remote-token",
+	}, remoteDB, nil).Handler())
+	t.Cleanup(remote.Close)
+	for _, tc := range []struct {
+		name        string
+		remote      bool
+		full        bool
+		onlyRemote  bool
+		changesOnly bool
+	}{
+		{name: "local"},
+		// A --no-sync daemon has no watchers, so it runs the full pass.
+		{name: "local changes only", changesOnly: true},
+		{name: "local full", full: true},
+		{name: "remote and local", remote: true},
+		{name: "remote and local changes only", remote: true, changesOnly: true},
+		{name: "remote and local full", remote: true, full: true},
+		{name: "remote only", remote: true, onlyRemote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfigWithClaudeFixture(t)
+			cfg.Host = "127.0.0.1"
+			cfg.AuthToken = "receiver-token"
+			cfg.RequireAuth = true
+			cfg.NoSync = true
+			cfg.ArchiveSources = []config.ArchiveSource{source}
+			cfg.RemoteHosts = []config.RemoteHost{{
+				Host: "remote", Transport: config.RemoteTransportHTTP,
+				URL: remote.URL, Token: "remote-token",
+			}}
+			database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+			const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
+			if tc.full {
+				_, _, err := runLocalSyncResult(t.Context(), cfg, database, false)
+				require.NoError(t, err)
+				require.NoError(t, database.Update(t.Context(), func(tx *sql.Tx) error {
+					_, err := tx.ExecContext(t.Context(), `UPDATE messages SET content = 'stale parser output' WHERE session_id = ?`, id)
+					return err
+				}))
+			}
+			require.NoError(t, database.UpsertSession(t.Context(), db.Session{
+				ID: "retained", Agent: "claude", Machine: cfg.InstallationID,
+				FilePath: new(filepath.Join(t.TempDir(), "missing.jsonl")),
+			}))
+			httpServer := httptest.NewUnstartedServer(nil)
+			cfg.PublicURL = "http://" + httpServer.Listener.Addr().String()
+			srv := server.New(cfg, database, nil, server.WithBaseContext(t.Context()))
+			t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.WithoutCancel(t.Context()))) })
+			httpServer.Config.Handler = srv.Handler()
+			httpServer.Start()
+			t.Cleanup(httpServer.Close)
+			tr := transport{URL: httpServer.URL}
+			if !tc.full {
+				// CLI startup reconciliation must not scan a --no-sync daemon.
+				req := httptest.NewRequestWithContext(t.Context(), http.MethodPost,
+					"/api/v1/sync?startup_only=true", nil)
+				req.Host = "127.0.0.1:0"
+				req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
+				response := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(response, req)
+				require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+				var sessions int
+				require.NoError(t, database.Reader().QueryRow(t.Context(), `SELECT count(*) FROM sessions`).Scan(&sessions))
+				assert.Equal(t, 1, sessions, "startup-only requests must leave local and attached sources unread")
+			}
+			if tc.remote {
+				failures, err := runDaemonRemoteSync(t.Context(), tr, cfg.AuthToken, cfg.RemoteHosts, tc.full, !tc.onlyRemote, tc.changesOnly, nil)
+				require.NoError(t, err)
+				assert.Empty(t, failures)
+			} else {
+				stats, err := runDaemonSync(t.Context(), tr, cfg.AuthToken, tc.full, tc.changesOnly, nil)
+				require.NoError(t, err)
+				assert.Equal(t, 4, stats.Synced)
+			}
+			messages, err := database.GetAllMessages(t.Context(), id)
+			require.NoError(t, err)
+			if tc.onlyRemote {
+				assert.Empty(t, messages, "remote-only sync must not drain attached archives")
+				return
+			}
+			require.Len(t, messages, 1)
+			assert.Equal(t, "archived message", messages[0].Content)
+			retained, err := database.GetSessionFull(t.Context(), "retained")
+			require.NoError(t, err)
+			assert.NotNil(t, retained, "full sync must keep sessions whose source files are gone")
+		})
+	}
+}
+
+func TestArchiveSourceWorkerRebuildAfterStartupSchemaUpgrade(t *testing.T) {
+	cfg := testConfigWithClaudeFixture(t)
+	database, err := db.Open(t.Context(), cfg.DBPath)
+	require.NoError(t, err)
+	engine := sync.NewEngine(t.Context(), database, workerEngineConfig(cfg))
+	require.Equal(t, 3, engine.SyncAll(t.Context(), nil).Synced)
+	engine.Close()
+	require.NoError(t, database.Update(t.Context(), func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(t.Context(), `DROP TABLE archive_session_provenance; DROP TABLE archive_attachment_sources; DROP TABLE archive_source_bindings; DROP TABLE archive_attachments`)
+		return err
+	}))
+	require.NoError(t, database.Close())
+	// The daemon upgrades schema before handing a read-only archive to its worker.
+	database, lock, err := openWriteDB(t.Context(), cfg)
+	require.NoError(t, err)
+	closeWriteDB(database, lock)
+	var output bytes.Buffer
+	require.NoError(t, runSyncWorkerContext(t.Context(), cfg, syncWorkerRequest{Mode: "resync-build"}, &output))
+	assert.Equal(t, 3, decodeSingleResult(t, &output).Synced)
+}
+
+func archiveSourceCommandFixture(t *testing.T) config.ArchiveSource {
+	t.Helper()
+	inputs := t.TempDir()
+	data := filepath.Join(inputs, "source")
+	dbtest.WriteTestFile(t, filepath.Join(data, "telemetry-install-id"), []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+	database, err := db.OpenIsolatedContext(t.Context(), filepath.Join(data, "sessions.db"))
+	require.NoError(t, err)
+	require.NoError(t, database.Close())
+	root := filepath.Join(inputs, "claude")
+	dbtest.WriteTestFile(t, filepath.Join(root, "project", "saved.jsonl"), []byte(testjsonl.NewSessionBuilder().AddClaudeUserWithSessionID("2026-01-01T00:00:00Z", "archived message", "saved").String()))
+	capture := filepath.Join(inputs, "capture")
+	settings := rawarchive.RecoverySettings{LocalMachineName: "retired-desktop"}
+	_, err = rawarchive.Capture(t.Context(), rawarchive.CaptureOptions{DataDir: data, Destination: capture, Settings: settings, Roots: []rawarchive.RootSpec{{Provider: "claude", Path: root}}})
+	require.NoError(t, err)
+	seed := filepath.Join(inputs, "seed")
+	_, err = rawarchive.Seed(t.Context(), filepath.Join(capture, "capture.json"), seed, nil)
+	require.NoError(t, err)
+	database, err = db.OpenIsolatedContext(t.Context(), filepath.Join(seed, "sessions.db"))
+	require.NoError(t, err)
+	archive, err := rawarchive.Open(t.Context(), database, seed, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	repo := filepath.Join(t.TempDir(), "repository")
+	report, err := archive.Backup(t.Context(), repo, settings, "test")
+	require.NoError(t, err)
+	require.NoError(t, archive.Close())
+	require.NoError(t, database.Close())
+	require.NoError(t, os.RemoveAll(inputs))
+	return config.ArchiveSource{Name: "history", Repository: repo, Snapshot: report.SnapshotID}
+}
+
+func TestArchiveSourceDirectSyncAndWorkerRebuild(t *testing.T) {
+	source := archiveSourceCommandFixture(t)
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.ArchiveSources = []config.ArchiveSource{source}
+	database, err := db.OpenIsolatedContext(t.Context(), cfg.DBPath)
+	require.NoError(t, err)
+	_, err = database.EnsureInstallationIdentity(t.Context(), cfg.InstallationID)
+	require.NoError(t, err)
+	_, stats, err := runLocalSyncResult(t.Context(), cfg, database, false)
+	require.NoError(t, err)
+	assert.Equal(t, 4, stats.Synced, "the command result includes attached history")
+	// The actual raw capture audit queues only the three local sources.
+	providers, _, err := rawSyncProvidersAndRoots(t.Context(), cfg)
+	require.NoError(t, err)
+	checkpoint, err := rawcheckpoint.Open(t.Context(), filepath.Join(t.TempDir(), "checkpoint.db"))
+	require.NoError(t, err)
+	defer checkpoint.Close()
+	require.NoError(t, checkpoint.EnsureDevice(t.Context(), "receiver-device"))
+	capturer := rawcapture.New(checkpoint)
+	auditor := rawwatch.NewAuditor(checkpoint, capturer, 128)
+	defer auditor.Close()
+	captured := 0
+	for _, provider := range providers {
+		result, err := auditor.AuditProviderFull(t.Context(), provider)
+		require.NoError(t, err)
+		require.Zero(t, result.Degraded)
+		captured += result.Captured
+	}
+	assert.Equal(t, 3, captured)
+	queued, err := checkpoint.ClientStatus(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 3, queued.PendingGenerations)
+
+	const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
+	before, err := database.GetAllMessages(t.Context(), id)
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+	require.NoError(t, database.Close())
+	var output bytes.Buffer
+	require.NoError(t, runSyncWorkerContext(t.Context(), cfg, syncWorkerRequest{Mode: "resync-build"}, &output))
+	result := decodeSingleResult(t, &output)
+	assert.Equal(t, 4, result.Synced, "both local and attached sources are rebuilt")
+	replacement, err := db.OpenReadOnly(t.Context(), cfg.DBPath+"-resync")
+	require.NoError(t, err)
+	defer replacement.Close()
+	messages, err := replacement.GetAllMessages(t.Context(), id)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "archived message", messages[0].Content)
+	identity, err := replacement.GetSessionFull(t.Context(), id)
+	require.NoError(t, err)
+	require.NotNil(t, identity)
+	assert.Equal(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", identity.Machine)
+}
+
+func TestArchiveSourceSessionRefreshReportsRequiredCommand(t *testing.T) {
+	source := archiveSourceCommandFixture(t)
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.ArchiveSources = []config.ArchiveSource{source}
+	database, err := db.OpenIsolatedContext(t.Context(), cfg.DBPath)
+	require.NoError(t, err)
+	defer database.Close()
+	_, _, err = runLocalSyncResult(t.Context(), cfg, database, false)
+	require.NoError(t, err)
+	engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+	defer engine.Close()
+	backend := service.NewDirectBackend(database, engine)
+	const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
+	before, err := backend.Get(t.Context(), id)
+	require.NoError(t, err)
+	for _, subagents := range []bool{false, true} {
+		_, err := backend.Sync(t.Context(), service.SyncInput{ID: id, Subagents: subagents})
+		require.ErrorContains(t, err, "sync --full")
+	}
+	after, err := backend.Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+}

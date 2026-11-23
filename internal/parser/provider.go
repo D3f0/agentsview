@@ -17,6 +17,7 @@ const (
 	ProviderFeatureWatchRoots           = "watch roots"
 	ProviderFeatureActivityHints        = "activity hints"
 	ProviderFeatureChangedPathRelevance = "changed path relevance"
+	ProviderFeatureScopedDiscovery      = "scoped discovery"
 )
 
 // ErrUnsupportedProviderFeature identifies optional provider behavior that is
@@ -1141,6 +1142,8 @@ type IncrementalRequest struct {
 	// the appended assistant head continues exactly this message id.
 	// nil keeps the conservative fallback.
 	StoredLastClaudeMessageID *string
+	// StoredTailTimestamp is the last stored row's timestamp for hook ordering.
+	StoredTailTimestamp time.Time
 	// StoredSessionName is the session_name already persisted for this
 	// session ("" when the row carries none), or nil when the call site
 	// cannot supply it. Claude adopts a generated ai-title only when no
@@ -1250,6 +1253,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newTraeXProviderFactory(def)
 	case AgentAugureCode:
 		return newAugureCodeProviderFactory(def)
+	case AgentInterpreter:
+		return newOpenInterpreterProviderFactory(def)
 	case AgentCopilot:
 		return newCopilotProviderFactory(def)
 	case AgentCowork:
@@ -1278,6 +1283,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newAugureDesktopProviderFactory(def)
 	case AgentGrok:
 		return newGrokProviderFactory(def)
+	case AgentFactory:
+		return newFactoryProviderFactory(def)
 	case AgentGoose:
 		return newGooseProviderFactory(def)
 	case AgentIflow:
@@ -1286,7 +1293,7 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newGptmeProviderFactory(def)
 	case AgentGemini:
 		return newGeminiProviderFactory(def)
-	case AgentGeminiApps:
+	case AgentGeminiApps, AgentGrokWeb:
 		return newImportOnlyProviderFactory(def)
 	case AgentKimi:
 		return newKimiProviderFactory(def)
@@ -1310,7 +1317,7 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newOpenCodeProviderFactory(def)
 	case AgentOpenCodeReview:
 		return newOpenCodeReviewProviderFactory(def)
-	case AgentOMP, AgentOMO, AgentStepCode:
+	case AgentOMP, AgentOMO, AgentStepCode, AgentDirectAPI:
 		return newPiProviderFactory(def)
 	case AgentOpenClaw:
 		return newOpenClawProviderFactory(def)
@@ -1324,6 +1331,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newFxProviderFactory(def)
 	case AgentTau:
 		return newTauProviderFactory(def)
+	case AgentMusePersonal:
+		return newMusePersonalProviderFactory(def)
 	case AgentMuse:
 		return newMuseProviderFactory(def)
 	case AgentPrimeAgent:
@@ -1370,6 +1379,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newZencoderProviderFactory(def)
 	case AgentZed:
 		return newZedProviderFactory(def)
+	case AgentBob:
+		return newBobProviderFactory(def)
 	case AgentRooCode:
 		return newRooCodeProviderFactory(def)
 	case AgentCline:

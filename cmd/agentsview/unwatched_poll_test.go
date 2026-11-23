@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kit/stacktest"
 
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/dbtest"
@@ -74,8 +76,8 @@ func (s *cancelBlockingUnwatchedPollSyncer) ReconcileProviderRoots(
 	return ctx.Err()
 }
 
-func (s *cancelBlockingUnwatchedPollSyncer) ReconcileProviderRootsGrouped(
-	ctx context.Context, groups []agentsync.ProviderRootsGroup,
+func (s *cancelBlockingUnwatchedPollSyncer) PollProviderRootsGrouped(
+	ctx context.Context, groups []agentsync.ProviderRootsGroup, _ bool,
 ) error {
 	return reconcileGroupsSequentially(ctx, groups, s.ReconcileProviderRoots)
 }
@@ -103,8 +105,8 @@ func (s *blockingUnwatchedPollSyncer) ReconcileProviderRoots(
 	return nil
 }
 
-func (s *blockingUnwatchedPollSyncer) ReconcileProviderRootsGrouped(
-	ctx context.Context, groups []agentsync.ProviderRootsGroup,
+func (s *blockingUnwatchedPollSyncer) PollProviderRootsGrouped(
+	ctx context.Context, groups []agentsync.ProviderRootsGroup, _ bool,
 ) error {
 	return reconcileGroupsSequentially(ctx, groups, s.ReconcileProviderRoots)
 }
@@ -132,8 +134,8 @@ func (s *recordingUnwatchedPollSyncer) ReconcileProviderRoots(
 	return nil
 }
 
-func (s *recordingUnwatchedPollSyncer) ReconcileProviderRootsGrouped(
-	ctx context.Context, groups []agentsync.ProviderRootsGroup,
+func (s *recordingUnwatchedPollSyncer) PollProviderRootsGrouped(
+	ctx context.Context, groups []agentsync.ProviderRootsGroup, _ bool,
 ) error {
 	return reconcileGroupsSequentially(ctx, groups, s.ReconcileProviderRoots)
 }
@@ -565,7 +567,7 @@ func TestUnwatchedPollPreservesSessionsUnderBlockedOverlappingScope(t *testing.T
 		},
 	}
 	groups, _ := availableUnwatchedPollScopes(obligations)
-	if err := pollUnwatchedScopesOnce(t.Context(), engine, groups); err != nil {
+	if err := pollUnwatchedScopesOnce(t.Context(), engine, groups, false); err != nil {
 		t.Logf("pollUnwatchedScopesOnce: %v", err)
 	}
 	roots := availableUnwatchedPollRootsFlat(obligations)
@@ -1010,6 +1012,7 @@ func requireReceivePollRoots(
 	case roots := <-results:
 		return roots
 	case <-time.After(timeout):
+		stacktest.Dump(t)
 		require.FailNow(t, "poll coordinator ownership did not arrive before timeout")
 		return nil
 	}
@@ -1032,6 +1035,7 @@ func requireReceivePollResult(
 	case err := <-results:
 		return err
 	case <-time.After(timeout):
+		stacktest.Dump(t)
 		require.FailNow(t, "poll coordinator result did not arrive before timeout")
 		return nil
 	}
@@ -1042,6 +1046,51 @@ func requirePollWithin(t *testing.T, ch <-chan struct{}, timeout time.Duration) 
 	select {
 	case <-ch:
 	case <-time.After(timeout):
+		stacktest.Dump(t)
 		require.FailNow(t, "poll did not run before timeout")
 	}
+}
+
+func TestUnwatchedPollTicksFollowOwnerGap(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ticks := make(chan time.Time)
+		syncer := &recordingUnwatchedPollSyncer{wake: make(chan struct{}, 8)}
+		coordinator := newUnwatchedPollCoordinatorWithTicks(
+			t.Context(), syncer, ticks, func() {}, func(run func()) { run() }, nil, time.Now, time.After,
+		)
+		defer coordinator.Stop()
+		var gap atomic.Int64
+		gap.Store(int64(collectionPaused))
+		coordinator.pollMu.Lock()
+		coordinator.gap = func() time.Duration { return time.Duration(gap.Load()) }
+		coordinator.pollMu.Unlock()
+		root := requireExistingPollRoot(t, t.TempDir(), "root")
+		require.NoError(t, coordinator.AddObligation(pollingObligation{
+			Key: "root", Scopes: []pollingScope{{Root: root}},
+		}))
+		tick := func() {
+			ticks <- time.Now()
+			synctest.Wait()
+		}
+
+		tick()
+		assert.Empty(t, syncer.snapshot(), "a paused owner's tick starts no pass")
+
+		gap.Store(int64(10 * time.Minute))
+		tick()
+		require.Len(t, syncer.snapshot(), 1, "the first tick after a pause polls")
+
+		time.Sleep(5 * time.Minute)
+		tick()
+		assert.Len(t, syncer.snapshot(), 1, "a tick inside the background gap starts no pass")
+
+		time.Sleep(5 * time.Minute)
+		tick()
+		assert.Len(t, syncer.snapshot(), 2, "a tick after the gap polls")
+
+		gap.Store(0)
+		time.Sleep(unwatchedPollInterval)
+		tick()
+		assert.Len(t, syncer.snapshot(), 3, "a live owner polls on every tick")
+	})
 }

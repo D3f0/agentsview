@@ -22,9 +22,9 @@
   import { router } from "../../stores/router.svelte.js";
   import type { Route } from "../../stores/router.svelte.js";
   import { sessions } from "../../stores/sessions.svelte.js";
+  import { sync } from "../../stores/sync.svelte.js";
   import {
     ActivityIcon,
-    ChartColumnIcon,
     DatabaseIcon,
     Grid2x2Icon,
     LayoutGridIcon,
@@ -33,6 +33,7 @@
     PencilIcon,
     PinIcon,
     TrashIcon,
+    TriangleAlertIcon,
   } from "../../icons.js";
 
   interface Props {
@@ -249,14 +250,6 @@
       </button>
       <button
         class="mobile-nav-btn"
-        class:active={router.route === "trends"}
-        onclick={() => mobileNav("trends")}
-      >
-        <ChartColumnIcon size="12" strokeWidth="2" aria-hidden="true" />
-        {m.nav_trends()}
-      </button>
-      <button
-        class="mobile-nav-btn"
         class:active={router.route === "recall"}
         onclick={() => mobileNav("recall")}
       >
@@ -279,6 +272,16 @@
         <LogsIcon size="12" strokeWidth="2" aria-hidden="true" />
         {m.nav_quality()}
       </button>
+      {#if sync.serverVersion?.friction_readable === true}
+        <button
+          class="mobile-nav-btn"
+          class:active={router.route === "friction"}
+          onclick={() => mobileNav("friction")}
+        >
+          <TriangleAlertIcon size="12" strokeWidth="2" aria-hidden="true" />
+          {m.nav_friction()}
+        </button>
+      {/if}
       <button
         class="mobile-nav-btn"
         class:active={router.route === "trash"}

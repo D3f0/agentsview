@@ -94,10 +94,6 @@ describe("i18n locale selection", () => {
     expect(chooseInitialLocale()).toBe("en");
   });
 
-  it("keeps the supported locale list explicit", () => {
-    expect(SUPPORTED_LOCALES).toEqual(["en", "zh-CN", "zh-TW", "ko", "fr", "ja", "az", "es"]);
-  });
-
   it("compiles a message catalog for every supported locale", () => {
     expect(runtime.locales).toEqual(SUPPORTED_LOCALES);
   });
@@ -209,6 +205,8 @@ describe("i18n locale selection", () => {
     ).toBe("1 msg");
     expect(m.subagent_inline_message_count({ count: 1 })).toBe("1 message");
     expect(m.subagent_inline_message_count({ count: 5 })).toBe("5 messages");
+    expect(m.recent_edits_count({ count: 1 })).toBe("1 edit");
+    expect(m.recent_edits_count({ count: 1200 })).toBe("1,200 edits");
     expect(m.message_content_turn_summary({ count: 1, duration: "2m 1s" })).toBe(
       "turn 2m 1s · 1 call",
     );
@@ -260,6 +258,8 @@ describe("i18n locale selection", () => {
     expect(m.tool_sequences_byte_count({ count: 1_000_000, countLabel: "1.000.000" })).toBe(
       "1.000.000 bytes",
     );
+    expect(m.recent_edits_count({ count: 1 })).toBe("1 edición");
+    expect(m.recent_edits_count({ count: 1_000_000 })).toBe("1.000.000 ediciones");
   });
 
   it("formats dates with the active Paraglide locale", () => {

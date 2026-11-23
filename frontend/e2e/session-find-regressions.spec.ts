@@ -35,6 +35,16 @@ async function installMessages(
 ) {
   const control = { failTail: options.failTail ?? false };
   const hidden = options.hidden ?? ["thinking", "code", "system"];
+  if (options.failTail) {
+    // This fixture owns history recovery. A late live-stream readiness event
+    // can start a background reload that removes the manual retry button.
+    // Keep stream requests in the page where Playwright can intercept them.
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "SharedWorker", { value: undefined });
+    });
+    // HTTP 204 ends an event stream without reconnecting.
+    await page.route("**/api/v1/events*", (route) => route.fulfill({ status: 204 }));
+  }
   await page.addInitScript(
     ({ filters }) => {
       localStorage.setItem("agentsview-block-filters", filters);
@@ -48,13 +58,18 @@ async function installMessages(
     const session = await response.json();
     await route.fulfill({ response, json: { ...session, message_count: all.length } });
   });
+  let initialTailFailure = true;
   await page.route(`**/api/v1/sessions/${SESSION_ID}/messages*`, async (route) => {
     const url = new URL(route.request().url());
     const descending = url.searchParams.get("direction") === "desc";
     const from = Number(url.searchParams.get("from") ?? (descending ? all.length - 1 : 0));
     const limit = Number(url.searchParams.get("limit") ?? 1000);
     if (!descending && from >= 1000 && control.failTail) {
-      await route.fulfill({ status: 503, json: { error: "injected history failure" } });
+      // Keep startup recovery out of this manual-retry scenario. Search's
+      // own history load still gets a transient server failure.
+      const status = initialTailFailure ? 400 : 503;
+      initialTailFailure = false;
+      await route.fulfill({ status, json: { error: "injected history failure" } });
       return;
     }
     const messages = descending
@@ -77,15 +92,13 @@ async function find(page: Page) {
 }
 
 async function toggleBlockFilter(page: Page, label: string) {
-  const toggle = page.getByRole("button", { name: "Filter block types" });
-  await toggle.click();
-  await expect(page.locator(".block-filter-dropdown")).toHaveCount(1);
-  await page
-    .locator(".block-filter-item")
-    .filter({ has: page.locator(".block-filter-label", { hasText: label }) })
-    .click();
-  if (await page.locator(".block-filter-dropdown").count()) await toggle.click();
-  await expect(page.locator(".block-filter-dropdown")).toHaveCount(0);
+  const view = page.locator(".view-trigger");
+  await view.click();
+  const menu = page.getByRole("menu", { name: "Transcript view" });
+  await expect(menu).toBeVisible();
+  await menu.getByRole("menuitemcheckbox", { name: label, exact: true }).click();
+  await view.click();
+  await expect(menu).toHaveCount(0);
 }
 
 test.describe("session find audit regressions", () => {
@@ -102,7 +115,7 @@ test.describe("session find audit regressions", () => {
             has_tool_use: true,
             has_thinking: true,
             tool_calls: structured
-              ? [{ tool_name: "Bash", category: "Bash", result_content: "ordinary" }]
+              ? [{ call_index: 0, tool_name: "Bash", category: "Bash", result_content: "ordinary" }]
               : undefined,
           }),
         ],
@@ -132,7 +145,9 @@ test.describe("session find audit regressions", () => {
       [
         message(0, "", {
           has_tool_use: true,
-          tool_calls: [{ tool_name: "Bash", category: "Bash", result_content: "needle output" }],
+          tool_calls: [
+            { call_index: 0, tool_name: "Bash", category: "Bash", result_content: "needle output" },
+          ],
         }),
         message(1, "needle prose"),
       ],
@@ -223,7 +238,9 @@ test("searches the displayed image placeholder rather than serialized result met
   await installMessages(page, [
     message(0, "", {
       has_tool_use: true,
-      tool_calls: [{ tool_name: "view_image", category: "", result_content: result }],
+      tool_calls: [
+        { call_index: 0, tool_name: "view_image", category: "", result_content: result },
+      ],
     }),
   ]);
   const input = await find(page);

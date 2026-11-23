@@ -68,7 +68,7 @@ func newReplicaPushCommand(backend storage.Replica) *cobra.Command {
 				return fmt.Errorf("%s push: --no-start-daemon requires --watch", name)
 			}
 			if cfg.Watch {
-				if err := runReplicaPushWatch(backend, cfg, targetName); err != nil {
+				if err := runReplicaPushWatch(cmd.Context(), backend, cfg, targetName); err != nil {
 					return fmt.Errorf("%s push --watch: %w", name, err)
 				}
 				return nil
@@ -77,7 +77,7 @@ func newReplicaPushCommand(backend storage.Replica) *cobra.Command {
 				fmt.Fprintln(os.Stderr,
 					"warning: --debounce and --interval have no effect without --watch")
 			}
-			if err := runReplicaPush(backend, cfg, targetName); err != nil {
+			if err := runReplicaPush(cmd.Context(), backend, cfg, targetName); err != nil {
 				return fmt.Errorf("%s push: %w", name, err)
 			}
 			return nil
@@ -128,21 +128,28 @@ func newReplicaStatusCommand(backend storage.Replica) *cobra.Command {
 	cmd.Flags().StringVar(&cfg.ProjectsFlag, "projects", "", "Comma-separated list of projects whose push status to show")
 	cmd.Flags().StringVar(&cfg.ExcludeProjects, "exclude-projects", "", "Comma-separated list of excluded projects whose push status to show")
 	cmd.Flags().BoolVar(&cfg.AllProjects, "all-projects", false, "Ignore configured project filters for this status")
+	cmd.Flags().DurationVar(&cfg.MaxStale, "max-stale", 0, "Exit non-zero when the push watcher has stalled for longer than this (for example 10m)")
 	return cmd
 }
 
 func newReplicaServeCommand(backend storage.Replica) *cobra.Command {
+	var pprofEnabled bool
 	cmd := &cobra.Command{
 		Use:          "serve",
 		Short:        "Serve from " + backend.DisplayName() + " (read-only)",
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
+		PreRunE:      func(cmd *cobra.Command, args []string) error { return validateReplicaServeWatchFlags(cmd) },
 		Run: func(cmd *cobra.Command, args []string) {
 			appCfg, basePath, err := loadReplicaServeConfig(cmd)
 			if err != nil {
 				fatal("%v", err)
 			}
-			runReplicaServe(backend, appCfg, basePath)
+			watch, err := loadReplicaServeWatch(cmd, appCfg)
+			if err != nil {
+				fatal("%v", err)
+			}
+			runReplicaServe(cmd.Context(), backend, appCfg, basePath, watch, pprofEnabled)
 		},
 	}
 	cmd.Flags().String(
@@ -150,6 +157,14 @@ func newReplicaServeCommand(backend storage.Replica) *cobra.Command {
 		"",
 		"URL prefix for reverse-proxy subpath (e.g. /agentsview)",
 	)
+	addPprofFlag(cmd, &pprofEnabled)
+	if backend.Name() == "pg" {
+		cmd.Short = "Serve from PostgreSQL (read-only API; --push-watch also ingests)"
+		cmd.Flags().Bool("push-watch", false, "Ingest and continuously push a local archive in this process")
+		cmd.Flags().Bool("embed", false, "Build embeddings in the local push watcher")
+		cmd.Flags().Duration("debounce", defaultWatchDebounce, "Coalesce window before pushing (--push-watch only)")
+		cmd.Flags().Duration("interval", defaultWatchInterval, "Periodic floor push interval (--push-watch only)")
+	}
 	config.RegisterServePFlags(cmd.Flags())
 	return cmd
 }

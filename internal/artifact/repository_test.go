@@ -39,9 +39,9 @@ func TestOpenRepositorySupportsDocbankSQLiteDrivers(t *testing.T) {
 			t.Parallel()
 			repository, err := openRepository(t.Context(), t.TempDir(), driver)
 			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, repository.Close()) })
 			result := createCheckpointBody(t, repository.Content(), 1, []byte("driver parity"))
 			assert.True(t, result.Created)
-			require.NoError(t, repository.Close())
 		})
 	}
 }
@@ -136,7 +136,7 @@ func TestRepositoryCloseWaitsForReaderAndIsIdempotent(t *testing.T) {
 	select {
 	case err := <-closeResult:
 		require.Fail(t, "repository close returned before reader close", "error: %v", err)
-	case <-time.After(100 * time.Millisecond): //nolint:kennlint // absence check; the open reader keeps Close waiting
+	case <-time.After(100 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check; the open reader keeps Close waiting
 	}
 
 	_, err = io.Copy(io.Discard, reader)

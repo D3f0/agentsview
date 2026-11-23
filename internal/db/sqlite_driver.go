@@ -1,10 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mattn/go-sqlite3"
 )
@@ -20,6 +22,8 @@ const (
 // does not read that state; it tokenizes documents directly by code point.
 var simpleFTSJiebaMu sync.Mutex
 
+var archiveSQLiteDriver *sqlite3.SQLiteDriver
+
 func init() {
 	sql.Register(sqliteUsageDriverName, &sqlite3.SQLiteDriver{
 		ConnectHook: configureSQLiteConnection,
@@ -29,9 +33,51 @@ func init() {
 		drv.Extensions = []string{simpleFTSRuntimeConfig.libraryPath}
 	}
 	sql.Register(sqliteArchiveDriverName, drv)
+	archiveSQLiteDriver = drv
+}
+
+// Each pool uses the configured archive driver and the DB's shared registry,
+// so reads from retired pools remain visible after Reopen.
+type archiveReaderConnector struct {
+	dsn   string
+	reads *readRegistry
+}
+
+func (c *archiveReaderConnector) Driver() driver.Driver { return archiveSQLiteDriver }
+
+func (c *archiveReaderConnector) Connect(context.Context) (driver.Conn, error) {
+	conn, err := archiveSQLiteDriver.Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &diagnosticReaderConn{SQLiteConn: conn.(*sqlite3.SQLiteConn), reads: c.reads}, nil
+}
+
+func (db *DB) openReader(path string) *sql.DB {
+	// Serving readers repeatedly execute the same session and transcript SQL.
+	dsn := makeDSN(path, true) + "&_stmt_cache_size=64"
+	reader := sql.OpenDB(&archiveReaderConnector{dsn: dsn, reads: &db.reads})
+	configureReaderPool(reader)
+	return reader
 }
 
 func configureSQLiteConnection(conn *sqlite3.SQLiteConn) error {
+	if err := conn.RegisterFunc("agentsview_local_date", func(message, session, zone string) string {
+		_, date, _ := (AnalyticsFilter{Timezone: zone}).ResolveSkillRowTime(message, session)
+		return date
+	}, true); err != nil {
+		return err
+	}
+	if err := conn.RegisterFunc("agentsview_trend_timestamp", func(message, started, created string) string {
+		for _, value := range []string{message, started, created} {
+			if _, err := time.Parse(time.RFC3339Nano, value); err == nil {
+				return value
+			}
+		}
+		return ""
+	}, true); err != nil {
+		return err
+	}
 	if err := conn.RegisterFunc(
 		"agentsview_timestamp_unix_micro",
 		sqliteTimestampUnixMicro,
@@ -51,6 +97,17 @@ func configureSQLiteConnection(conn *sqlite3.SQLiteConn) error {
 		parseUsageWebSearchRequests,
 		true,
 	); err != nil {
+		return err
+	}
+	if err := conn.RegisterFunc("agentsview_phrase_match", phraseMatch, true); err != nil {
+		return err
+	}
+	if err := conn.RegisterFunc("agentsview_top_session_started_order", func(raw string) string {
+		// Match GroupTopSessions, including nanoseconds, offsets, and invalid dates.
+		started, _ := time.Parse(time.RFC3339Nano, raw)
+		// Flip the sign bit so lexicographic order matches signed seconds.
+		return fmt.Sprintf("%016x%08x", uint64(started.Unix())^(1<<63), started.Nanosecond())
+	}, true); err != nil {
 		return err
 	}
 	return nil

@@ -21,9 +21,11 @@ var providerMigrationModes = map[AgentType]ProviderMigrationMode{
 	AgentCodex:          ProviderMigrationProviderAuthoritative,
 	AgentTraeX:          ProviderMigrationProviderAuthoritative,
 	AgentAugureCode:     ProviderMigrationProviderAuthoritative,
+	AgentInterpreter:    ProviderMigrationProviderAuthoritative,
 	AgentCopilot:        ProviderMigrationProviderAuthoritative,
 	AgentGemini:         ProviderMigrationProviderAuthoritative,
 	AgentGeminiApps:     ProviderMigrationImportOnly,
+	AgentGrokWeb:        ProviderMigrationImportOnly,
 	AgentOpenHands:      ProviderMigrationProviderAuthoritative,
 	AgentCursor:         ProviderMigrationProviderAuthoritative,
 	AgentCursorIDE:      ProviderMigrationProviderAuthoritative,
@@ -61,6 +63,7 @@ var providerMigrationModes = map[AgentType]ProviderMigrationMode{
 	AgentHermes:         ProviderMigrationProviderAuthoritative,
 	AgentAugureDesktop:  ProviderMigrationProviderAuthoritative,
 	AgentGrok:           ProviderMigrationProviderAuthoritative,
+	AgentFactory:        ProviderMigrationProviderAuthoritative,
 	AgentGoose:          ProviderMigrationProviderAuthoritative,
 	AgentWorkBuddy:      ProviderMigrationProviderAuthoritative,
 	AgentCodeBuddy:      ProviderMigrationProviderAuthoritative,
@@ -82,8 +85,11 @@ var providerMigrationModes = map[AgentType]ProviderMigrationMode{
 	AgentAider:          ProviderMigrationProviderAuthoritative,
 	AgentOMP:            ProviderMigrationProviderAuthoritative,
 	AgentStepCode:       ProviderMigrationProviderAuthoritative,
+	AgentDirectAPI:      ProviderMigrationProviderAuthoritative,
 	AgentEvener:         ProviderMigrationProviderAuthoritative,
+	AgentMusePersonal:   ProviderMigrationProviderAuthoritative,
 	AgentReasonix:       ProviderMigrationProviderAuthoritative,
+	AgentBob:            ProviderMigrationProviderAuthoritative,
 	AgentRooCode:        ProviderMigrationProviderAuthoritative,
 	AgentCline:          ProviderMigrationProviderAuthoritative,
 	AgentPoolside:       ProviderMigrationProviderAuthoritative,
@@ -209,7 +215,7 @@ func validateProviderMigrationMode(
 
 func isImportOnlyAgentType(agent AgentType) bool {
 	switch agent {
-	case AgentClaudeAI, AgentChatGPT, AgentGeminiApps:
+	case AgentClaudeAI, AgentChatGPT, AgentGeminiApps, AgentGrokWeb:
 		return true
 	default:
 		return false

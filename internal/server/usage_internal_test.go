@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,7 +55,7 @@ type usageComparisonProjectKeySpy struct {
 }
 
 func TestUsageSummaryStreamUsesResolvedMachine(t *testing.T) {
-	s := testServer(t, 30)
+	s := testServer(t, 30*time.Second)
 	require.NoError(t, s.db.(*db.DB).SetSyncState(t.Context(), db.MachineLabelKeyPrefix+"id-a", "Workstation"))
 	spy := &usageSummaryCountsSpy{Store: s.db}
 	s.db = spy
@@ -95,7 +96,7 @@ func TestUsageStreamMapsCatalogFailures(t *testing.T) {
 		{"deadline", context.DeadlineExceeded, http.StatusGatewayTimeout, "gateway timeout", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			s := testServer(t, 30)
+			s := testServer(t, 30*time.Second)
 			query := "&project_key=pl1:sha256:known"
 			if tt.machine {
 				s.db = usageMachineCatalogFailureStore{Store: s.db}
@@ -258,6 +259,8 @@ func TestUsageComparisonScansPriorPeriodOnly(t *testing.T) {
 	assertRecorderStatus(t, w, http.StatusOK)
 
 	assertUsageQueryCalls(t, spy, 1, 0, 0)
+	require.Len(t, spy.filters, 1)
+	assert.True(t, spy.filters[0].SkipSessionCounts, "prior-period comparison only consumes total cost")
 
 	var out Comparison
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
@@ -505,7 +508,7 @@ func TestUsagePairwiseComparisonScansTwoDailyFilters(t *testing.T) {
 }
 
 func TestUsagePairwiseComparisonOpenAPIOptionalSideParams(t *testing.T) {
-	s := testServer(t, 30)
+	s := testServer(t, 30*time.Second)
 	spec := readOpenAPISpec(t, s.Handler())
 	op := requireOpenAPIOperation(t, spec, "get", "/api/v1/usage/pairwise-comparison")
 

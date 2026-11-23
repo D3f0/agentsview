@@ -13,13 +13,15 @@
     isRemoteConnection,
   } from "../../api/runtime.js";
   import { MetadataService } from "../../api/generated/index.js";
+  import { LIVE_SESSION_API_VERSION, supportsLiveSessionUpdates } from "../../api/remoteVersion.js";
   import { LatestRead } from "../../utils/latest-read.js";
+  import RestartAction from "./RestartAction.svelte";
 
   let serverUrl: string = $state(getServerUrl());
   let tokenInput: string = $state(getAuthToken());
   let testing: boolean = $state(false);
-  let testResult: { ok: boolean; message: string } | null = $state(null);
   let saving: boolean = $state(false);
+  let testResults: { tone: "success" | "warning" | "error"; message: string }[] = $state([]);
   let saveMsg: string | null = $state(null);
   let remoteToggling: boolean = $state(false);
   let pendingRequireAuth: boolean = $state(settings.requireAuth);
@@ -36,7 +38,7 @@
     if (!serverUrl.trim()) return;
     testing = true;
     const signal = versionRead.begin();
-    testResult = null;
+    testResults = [];
     try {
       const base = serverUrl.replace(/\/+$/, "");
       const headers: Record<string, string> = {};
@@ -45,18 +47,27 @@
       }
       const data = await MetadataService.getApiV1Version({ baseUrl: base, headers, signal });
       if (!versionRead.isCurrent(signal)) return;
-      testResult = {
-        ok: true,
+      testResults = [{
+        tone: "success",
         message: m.settings_remote_connected_version({ version: data.version || m.settings_remote_unknown() }),
-      };
+      }];
+      if (!supportsLiveSessionUpdates(data.api_version)) {
+        testResults.push({
+          tone: "warning",
+          message: m.settings_remote_live_updates_unavailable({
+            apiVersion: String(data.api_version ?? m.settings_remote_unknown()),
+            requiredVersion: String(LIVE_SESSION_API_VERSION),
+          }),
+        });
+      }
     } catch (e) {
       if (signal.aborted || !versionRead.isCurrent(signal)) return;
-      testResult = {
-        ok: false,
+      testResults = [{
+        tone: "error",
         message: e instanceof ApiError
           ? m.settings_remote_server_returned({ status: e.status })
           : e instanceof Error ? e.message : m.settings_remote_connection_failed(),
-      };
+      }];
     } finally {
       if (versionRead.finish(signal)) testing = false;
     }
@@ -107,8 +118,8 @@
 <div class="remote-settings">
   {#if !isRemote}
     <div class="subsection">
-      <div class="toggle-row">
-        <span class="toggle-label">{m.settings_remote_require_auth()}</span>
+      <div class="setting-row">
+        <span class="setting-label">{m.settings_remote_require_auth()}</span>
         <Toggle
           checked={pendingRequireAuth}
           disabled={remoteToggling || settings.saving || settings.readOnly}
@@ -119,27 +130,29 @@
         </Toggle>
       </div>
 
-      <p class="restart-note">
-        {m.settings_remote_restart_note()}
-      </p>
+      <div class="control-offset">
+        <!-- Auth applies on save, so a server that can't restart itself
+             needs no restart steps here. -->
+        <RestartAction notice={m.settings_remote_restart_note()} manual={false} />
+      </div>
 
       {#if settings.requireAuth && settings.authToken}
         <div class="security-warning">
           {m.settings_remote_security_warning()}
         </div>
 
-        <div class="token-display">
-          <span class="field-label">{m.settings_remote_auth_token()}</span>
+        <div class="setting-row">
+          <span class="setting-label">{m.settings_remote_auth_token()}</span>
           <div class="token-row">
             <code class="token-value">{settings.authToken}</code>
-            <Button size="sm" onclick={handleCopyToken}>
+            <Button onclick={handleCopyToken}>
               {copied ? m.settings_remote_copied() : m.settings_remote_copy()}
             </Button>
           </div>
         </div>
 
-        <div class="server-info">
-          <span class="field-label">{m.settings_remote_server()}</span>
+        <div class="setting-row">
+          <span class="setting-label">{m.settings_remote_server()}</span>
           {#if settings.host === "0.0.0.0" || settings.host === "::"}
             <span class="info-value">
               {m.settings_remote_listening_all({ port: settings.port })}
@@ -162,16 +175,18 @@
     </span>
 
     {#if isRemote}
-      <div class="connected-info">
-        <span class="field-label">{m.settings_remote_connected_to()}</span>
+      <div class="setting-row">
+        <span class="setting-label">{m.settings_remote_connected_to()}</span>
         <code class="info-value">{getServerUrl()}</code>
       </div>
-      <button class="disconnect-btn" onclick={handleDisconnect}>
-        {m.settings_remote_disconnect()}
-      </button>
+      <div class="actions control-offset">
+        <Button tone="danger" surface="solid" onclick={handleDisconnect}>
+          {m.settings_remote_disconnect()}
+        </Button>
+      </div>
     {:else}
-      <div class="field">
-        <label class="field-label" for="remote-url">{m.settings_remote_server_url()}</label>
+      <div class="setting-row">
+        <label class="setting-label" for="remote-url">{m.settings_remote_server_url()}</label>
         <TextInput
           id="remote-url"
           class="setting-input"
@@ -183,8 +198,8 @@
         />
       </div>
 
-      <div class="field">
-        <label class="field-label" for="remote-token">{m.settings_remote_auth_token()}</label>
+      <div class="setting-row">
+        <label class="setting-label" for="remote-token">{m.settings_remote_auth_token()}</label>
         <TextInput
           id="remote-token"
           class="setting-input"
@@ -196,31 +211,31 @@
         />
       </div>
 
-      <div class="actions">
-        <button
-          class="test-btn"
+      <div class="actions control-offset">
+        <Button
           disabled={testing || !serverUrl.trim()}
           onclick={handleTestConnection}
         >
           {testing ? m.settings_remote_testing() : m.settings_remote_test_connection()}
-        </button>
-        <button
-          class="connect-btn"
+        </Button>
+        <Button
+          tone="info"
+          surface="solid"
           disabled={saving || !serverUrl.trim()}
           onclick={handleConnect}
         >
           {m.settings_remote_connect()}
-        </button>
+        </Button>
       </div>
 
-      {#if testResult}
-        <p class="msg" class:success={testResult.ok} class:error={!testResult.ok}>
-          {testResult.message}
+      {#each testResults as result (result.tone)}
+        <p class="msg control-offset {result.tone}">
+          {result.message}
         </p>
-      {/if}
+      {/each}
 
       {#if saveMsg}
-        <p class="msg success">{saveMsg}</p>
+        <p class="msg success control-offset">{saveMsg}</p>
       {/if}
     {/if}
   </div>
@@ -239,10 +254,11 @@
     gap: var(--space-5);
   }
 
+  /* Same heading style as the subsections in Appearance. */
   .subsection-title {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-primary);
   }
 
   .divider {
@@ -250,36 +266,25 @@
     margin: 2px 0;
   }
 
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .toggle-label {
+  /* Rows use the shared settings grid from SettingsPage: label column,
+     then the control. */
+  .setting-label {
     font-size: 12px;
-    color: var(--text-primary);
-  }
-
-  .token-display,
-  .server-info,
-  .connected-info {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .field-label {
-    font-size: 11px;
     font-weight: 500;
-    color: var(--text-muted);
+    color: var(--text-secondary);
+  }
+
+  /* Notes, actions, and messages start on the control column's edge. */
+  .control-offset {
+    padding-left: calc(var(--setting-label-width, 222px) + 12px);
   }
 
   .token-row {
     display: flex;
     align-items: center;
     gap: 8px;
+    width: 100%;
+    min-width: 0;
   }
 
   .token-value {
@@ -300,63 +305,17 @@
     font-size: 12px;
     font-family: var(--font-mono, monospace);
     color: var(--text-primary);
+    overflow-wrap: anywhere;
   }
 
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  :global(.setting-input.kit-text-input) {
+  .setting-row :global(.setting-input.kit-text-input) {
     font-family: var(--font-mono, monospace);
   }
 
   .actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
-  }
-
-  .test-btn,
-  .connect-btn,
-  .disconnect-btn {
-    height: 30px;
-    padding: 0 14px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    font-weight: 500;
-    border: none;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: opacity 0.12s;
-  }
-
-  .test-btn {
-    color: var(--text-primary);
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-  }
-
-  .connect-btn {
-    color: var(--accent-blue-foreground);
-    background: var(--accent-blue);
-  }
-
-  .disconnect-btn {
-    color: var(--accent-red-foreground);
-    background: var(--accent-red, #ef4444);
-  }
-
-  .test-btn:hover:not(:disabled),
-  .connect-btn:hover:not(:disabled),
-  .disconnect-btn:hover:not(:disabled) {
-    opacity: 0.9;
-  }
-
-  .test-btn:disabled,
-  .connect-btn:disabled {
-    opacity: var(--opacity-disabled);
-    cursor: default;
   }
 
   .msg {
@@ -372,11 +331,8 @@
     color: var(--accent-green, #22c55e);
   }
 
-  .restart-note {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin: 0;
-    font-style: italic;
+  .msg.warning {
+    color: var(--accent-amber, #f59e0b);
   }
 
   .security-warning {
@@ -387,5 +343,11 @@
     border-radius: var(--radius-sm);
     padding: 8px 10px;
     line-height: 1.5;
+  }
+
+  @media (max-width: 640px) {
+    .control-offset {
+      padding-left: 0;
+    }
   }
 </style>

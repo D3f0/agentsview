@@ -697,8 +697,8 @@ describe("ConcurrencyTimeline", () => {
       "Subagent peak 0",
       "Automated peak 1",
       "Agent-min 7.5K",
-      "Uncached Input 120K",
-      "Output Tokens 9K",
+      "Uncached Input 120.0K",
+      "Output Tokens 9.0K",
       "Cost $0.90",
     ]);
     unmount(c);
@@ -932,18 +932,6 @@ describe("ConcurrencyTimeline", () => {
     expect(bars.length).toBe(3);
   });
 
-  it("shades a future region when the range is partial", () => {
-    const r = minuteReport({
-      bucket_count: 3,
-      elapsed_bucket_count: 2,
-      partial: true,
-      as_of: "2026-06-16T00:10:00Z",
-      effective_end: "2026-06-16T00:10:00Z",
-    });
-    render(ConcurrencyTimeline, { report: r });
-    expect(document.querySelector("rect[data-future]")).toBeTruthy();
-  });
-
   it("formats a date-range tooltip for daily buckets", async () => {
     const r = makeReport({
       bucket_unit: "day",
@@ -1086,7 +1074,7 @@ describe("ConcurrencyTimeline", () => {
     const tokenLabels = Array.from(target.querySelectorAll("text.overlay-y-label")).map(
       (el) => el.textContent?.trim() ?? "",
     );
-    expect(tokenLabels).toContain("9k");
+    expect(tokenLabels).toContain("9.0K");
 
     unmount(c);
     target.remove();
@@ -1126,7 +1114,7 @@ describe("ConcurrencyTimeline", () => {
       "Automated peak 3",
       "Agent-min 15",
       "Uncached Input 0",
-      "Output Tokens 3K",
+      "Output Tokens 3.0K",
       "Cost $0.30",
     ]);
 

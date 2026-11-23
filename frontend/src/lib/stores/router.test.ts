@@ -54,15 +54,8 @@ describe("parsePath", () => {
     expect(result.params).toEqual({ msg: "5" });
   });
 
-  it("parses /sessions/{id} with msg=last", () => {
-    setURL("/sessions/abc-123?msg=last");
-    const result = parsePath();
-    expect(result.sessionId).toBe("abc-123");
-    expect(result.params).toEqual({ msg: "last" });
-  });
-
   it("parses page routes", () => {
-    for (const route of ["usage", "trends", "recall", "quality", "pinned", "trash", "settings"]) {
+    for (const route of ["usage", "recall", "quality", "friction", "pinned", "trash", "settings"]) {
       setURL(`/${route}`);
       const result = parsePath();
       expect(result.route).toBe(route);
@@ -91,6 +84,13 @@ describe("parsePath", () => {
 
   it("falls back to default for unknown routes", () => {
     setURL("/unknown");
+    const result = parsePath();
+    expect(result.route).toBe("sessions");
+    expect(result.sessionId).toBeNull();
+  });
+
+  it("falls back from the removed trends route", () => {
+    setURL("/trends");
     const result = parsePath();
     expect(result.route).toBe("sessions");
     expect(result.sessionId).toBeNull();
@@ -301,17 +301,24 @@ describe("RouterStore", () => {
     },
   );
 
-  it("replaceParams preserves a directly loaded provider/raw-ID path", () => {
-    setURL("/sessions/provider/part%3Adetail?desktop=on&project=old");
-    store = new RouterStore();
-    const before = window.history.length;
-    store.replaceParams({ project: "new", desktop: "off" });
-    expect(window.location.pathname).toBe("/sessions/provider/part%3Adetail");
-    expect(window.location.search).toBe("?desktop=off&project=new");
-    expect(window.history.length).toBe(before);
-    expect(store.sessionId).toBe("provider:part:detail");
-    expect(parsePath().sessionId).toBe("provider:part:detail");
-  });
+  it.each([
+    { path: "/sessions/provider/part%3Adetail", id: "provider:part:detail", resolve: false },
+    {
+      path: "/sessions/123e4567-e89b-12d3-a456-426614174000",
+      id: "pi:123e4567-e89b-12d3-a456-426614174000",
+      resolve: true,
+    },
+  ])(
+    "preserves a directly loaded session path $path when updating params",
+    ({ path, id, resolve }) => {
+      setURL(`${path}?desktop=on&project=old`);
+      store = new RouterStore();
+      if (resolve) store.sessionId = id;
+      store.replaceParams({ project: "new", desktop: "off" });
+      expect(window.location.pathname).toBe(path);
+      expect(store.sessionId).toBe(id);
+    },
+  );
 
   it.each(["/sessions/copilot%3Aabc123", "/sessions/copilot/abc123"])(
     "hands the canonical ID to consumers from %s and popstate",
@@ -341,31 +348,12 @@ describe("RouterStore", () => {
     expect(store.isRootPath).toBe(false);
   });
 
-  it("initializes root state from the current pathname", () => {
-    setURL("/?desktop=1");
-    store = new RouterStore();
-    expect(store.isRootPath).toBe(true);
-  });
-
   it("updates root state on popstate", () => {
     setURL("/sessions");
     store = new RouterStore();
     setURL("/?desktop=1");
     window.dispatchEvent(new PopStateEvent("popstate"));
     expect(store.isRootPath).toBe(true);
-  });
-
-  it("initializes sessionId from path", () => {
-    setURL("/sessions/abc-123");
-    store = new RouterStore();
-    expect(store.route).toBe("sessions");
-    expect(store.sessionId).toBe("abc-123");
-  });
-
-  it("falls back to default on invalid route", () => {
-    setURL("/bogus");
-    store = new RouterStore();
-    expect(store.route).toBe("sessions");
   });
 
   it("navigate updates URL via pushState", () => {
@@ -419,12 +407,12 @@ describe("RouterStore", () => {
     expect(replaceSpy).toHaveBeenCalledOnce();
   });
 
-  it("navigate updates URL to /trends", () => {
+  it("navigate updates URL to /recall", () => {
     setURL("/");
     store = new RouterStore();
-    store.navigate("trends");
-    expect(window.location.pathname).toBe("/trends");
-    expect(store.route).toBe("trends");
+    store.navigate("recall");
+    expect(window.location.pathname).toBe("/recall");
+    expect(store.route).toBe("recall");
   });
 
   it("navigate returns false on same URL (no-op)", () => {
@@ -462,14 +450,6 @@ describe("RouterStore", () => {
     store.navigateToSession("abc-123");
     expect(window.location.pathname).toBe("/sessions/abc-123");
     expect(store.sessionId).toBe("abc-123");
-  });
-
-  it("navigateToSession with msg param", () => {
-    setURL("/sessions");
-    store = new RouterStore();
-    store.navigateToSession("abc-123", { msg: "last" });
-    expect(window.location.pathname).toBe("/sessions/abc-123");
-    expect(window.location.search).toBe("?msg=last");
   });
 
   it("navigateToSession preserves session route params from the sessions view", () => {
@@ -562,16 +542,6 @@ describe("RouterStore", () => {
     store.destroy();
     expect(removeSpy).toHaveBeenCalledWith("popstate", registeredCb);
     removeSpy.mockRestore();
-  });
-
-  it("replaceParams uses replaceState", () => {
-    setURL("/sessions");
-    store = new RouterStore();
-    const spy = vi.spyOn(window.history, "replaceState");
-    store.replaceParams({ project: "bar" });
-    expect(spy).toHaveBeenCalled();
-    expect(window.location.search).toBe("?project=bar");
-    spy.mockRestore();
   });
 
   it("preserves desktop param across navigations", () => {

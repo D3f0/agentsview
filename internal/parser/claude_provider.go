@@ -147,7 +147,7 @@ func (p *claudeProvider) RawCaptureSourcesForChangedPath(
 	ctx context.Context,
 	req ChangedPathRequest,
 ) ([]SourceRef, error) {
-	return p.SourcesForChangedPath(ctx, req)
+	return p.sources.RawCaptureSourcesForChangedPath(ctx, req)
 }
 
 func (p *claudeProvider) WatchPlan(ctx context.Context) (WatchPlan, error) {
@@ -306,12 +306,11 @@ func (p *claudeProvider) Parse(
 		}
 	}
 	opts := claudeParseOptions{
-		ctx:                         ctx,
 		siblingLineage:              claudeSourceIsProjectLevel(req.Source, path),
 		persistedOutputPathResolver: persistedOutputPathResolver,
 		aiTitleFallback:             true,
 	}
-	results, excludedIDs, err := claudeParseFile(path, project, machine, opts)
+	results, excludedIDs, err := claudeParseFile(ctx, path, project, machine, opts)
 	if err != nil {
 		return ParseOutcome{}, err
 	}
@@ -362,14 +361,14 @@ type ClaudeUploadParser interface {
 	// the discovered-session Parse path, it is not overridden by any cwd
 	// recorded in the transcript, because an upload is filed under a
 	// user-chosen project rather than a workspace path on this machine.
-	ParseUploadedTranscript(path, project, machine string) ([]ParseResult, error)
+	ParseUploadedTranscript(ctx context.Context, path, project, machine string) ([]ParseResult, error)
 }
 
 func (p *claudeProvider) ParseUploadedTranscript(
-	path, project, machine string,
+	ctx context.Context, path, project, machine string,
 ) ([]ParseResult, error) {
 	machine = firstNonEmptyJSONLString(machine, p.Config.Machine)
-	results, _, err := claudeParseFile(path, project, machine, claudeParseOptions{
+	results, _, err := claudeParseFile(ctx, path, project, machine, claudeParseOptions{
 		uploadIdentity: true,
 	})
 	if err != nil {
@@ -413,6 +412,7 @@ func (p *claudeProvider) ParseIncremental(
 			IncrementalNeedsFullParse, nil
 	}
 	newMsgs, links, endedAt, consumed, err := claudeParseSessionFrom(
+		ctx,
 		path,
 		req.Offset,
 		claudeIncrementalScan{
@@ -425,6 +425,7 @@ func (p *claudeProvider) ParseIncremental(
 			},
 			storedLinearParse:         req.StoredClaudeLinearParse,
 			storedTailClaudeMessageID: req.StoredLastClaudeMessageID,
+			storedTailTimestamp:       req.StoredTailTimestamp,
 			storedSessionName:         req.StoredSessionName,
 			storedPRLinks:             req.StoredPRLinks,
 		},
@@ -520,11 +521,15 @@ type claudeLayoutSpec struct {
 	debounceScope string
 	watchGlobs    []string
 	listFiles     func(string) []DiscoveredFile
-	// sidecarSources includes persisted tool-result companions in watch
-	// coverage, changed-path mapping, and source fingerprints. The Claude
-	// provider keeps this off: its stored fingerprints hash only the
-	// transcript, and switching to composite hashes would invalidate every
-	// archived Claude fingerprint and force a full reparse.
+	// sidecarSources includes persisted tool-result companions in source
+	// fingerprints and, for sync, maps a root session's companion to its
+	// subagent transcripts too. The Claude provider keeps this off: its
+	// stored fingerprints hash only the transcript, and switching to
+	// composite hashes would invalidate every archived Claude fingerprint and
+	// force a full reparse. Every spec maps a companion to its owning
+	// transcript, because a remote mirror journal lists companions and the
+	// local watcher delivers every file under the root. Raw capture always
+	// maps a root companion to the subagents, whose capture plans upload it.
 	sidecarSources bool
 }
 
@@ -710,6 +715,24 @@ func (s claudeSourceSet) SourcesForChangedPath(
 	ctx context.Context,
 	req ChangedPathRequest,
 ) ([]SourceRef, error) {
+	return s.sourcesForChangedPath(ctx, req, s.spec.sidecarSources)
+}
+
+// RawCaptureSourcesForChangedPath also maps a root session's tool result to
+// its subagent transcripts, because a subagent's raw capture plan uploads the
+// parent session's tool results.
+func (s claudeSourceSet) RawCaptureSourcesForChangedPath(
+	ctx context.Context,
+	req ChangedPathRequest,
+) ([]SourceRef, error) {
+	return s.sourcesForChangedPath(ctx, req, true)
+}
+
+func (s claudeSourceSet) sourcesForChangedPath(
+	ctx context.Context,
+	req ChangedPathRequest,
+	subagentResults bool,
+) ([]SourceRef, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -727,10 +750,10 @@ func (s claudeSourceSet) SourcesForChangedPath(
 		if !s.hasRoot(root) {
 			return nil, nil
 		}
-		if s.spec.sidecarSources {
-			if sources, err := s.sourcesForToolResultPath(root, req.Path); err != nil || len(sources) > 0 {
-				return sources, err
-			}
+		if sources, err := s.sourcesForToolResultPath(
+			root, req.Path, subagentResults,
+		); err != nil || len(sources) > 0 {
+			return sources, err
 		}
 		source, ok := s.sourceForChangedPath(root, req.Path, allowMissing)
 		if !ok {
@@ -739,10 +762,10 @@ func (s claudeSourceSet) SourcesForChangedPath(
 		return []SourceRef{source}, nil
 	}
 	for _, root := range s.roots {
-		if s.spec.sidecarSources {
-			if sources, err := s.sourcesForToolResultPath(root, req.Path); err != nil || len(sources) > 0 {
-				return sources, err
-			}
+		if sources, err := s.sourcesForToolResultPath(
+			root, req.Path, subagentResults,
+		); err != nil || len(sources) > 0 {
+			return sources, err
 		}
 		source, ok := s.sourceForChangedPath(root, req.Path, allowMissing)
 		if ok {
@@ -1012,6 +1035,7 @@ func claudeProviderCapabilities() Capabilities {
 			VerifiedLocalStat:    CapabilitySupported,
 			MultiFileStatHash:    CapabilitySupported,
 			S3Discovery:          CapabilitySupported,
+			PollMetadataScan:     CapabilitySupported,
 		},
 		Content: ContentCapabilities{
 			FirstMessage:         CapabilitySupported,

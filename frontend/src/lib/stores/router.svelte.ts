@@ -9,9 +9,9 @@ export type Route =
   | "usage"
   | "token-usage"
   | "activity"
-  | "trends"
   | "recall"
   | "quality"
+  | "friction"
   | "pinned"
   | "trash"
   | "recent-edits"
@@ -23,9 +23,9 @@ const VALID_ROUTES: ReadonlySet<string> = new Set<Route>([
   "usage",
   "token-usage",
   "activity",
-  "trends",
   "recall",
   "quality",
+  "friction",
   "pinned",
   "trash",
   "recent-edits",
@@ -245,7 +245,9 @@ export class RouterStore {
 
   /** Update query params without creating a history entry. */
   replaceParams(params: Record<string, string>) {
-    const path = this.sessionId ? sessionPath(this.sessionId) : `/${this.route}`;
+    const path = this.sessionId
+      ? window.location.pathname.slice(getBasePath().length)
+      : `/${this.route}`;
     const url = this.#buildUrl(path, params);
     this.#updateSticky(params);
     this.params = { ...this.#stickyParams, ...params };

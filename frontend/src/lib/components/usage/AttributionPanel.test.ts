@@ -28,7 +28,8 @@ import AttributionPanel from "./AttributionPanel.svelte";
 import { sessions } from "../../stores/sessions.svelte.js";
 import { settings } from "../../stores/settings.svelte.js";
 import { usage } from "../../stores/usage.svelte.js";
-import { usageChartColorMaps } from "../../utils/usageChartColors.js";
+import type { SeriesStyle } from "@kenn-io/kit-ui/utils/palette";
+import { usageChartStyleMaps } from "../../utils/usageChartStyles.js";
 
 function summaryWithAgents(agents: string[]): UsageSummaryResponse {
   return {
@@ -114,13 +115,17 @@ function summaryWithModels(): UsageSummaryResponse {
   return summary;
 }
 
-function mountPanel(colorMap?: ReadonlyMap<string, string>) {
+function solid(color: string): SeriesStyle {
+  return { color, fill: "solid", dash: "solid", marker: "circle" };
+}
+
+function mountPanel(styleMap?: ReadonlyMap<string, SeriesStyle>) {
   const groupBy = usage.toggles.attribution.groupBy;
   usage.mergeKnownProjects((usage.attributionSummary ?? usage.summary)?.projectTotals ?? [], {});
   return mount(AttributionPanel, {
     target: document.body,
     props: {
-      colorMap: colorMap ?? usageChartColorMaps(usage.summary, settings.chartPalette)[groupBy],
+      styleMap: styleMap ?? usageChartStyleMaps(usage.summary, settings.chartPalette)[groupBy],
     },
   });
 }
@@ -403,8 +408,42 @@ describe("AttributionPanel colors", () => {
     await tick();
 
     const value = document.querySelector(".tile-value")?.textContent?.trim();
-    expect(value).toBe("1M");
+    expect(value).toBe("1.0M");
     expect(value).not.toContain("$");
+    unmount(component);
+  });
+
+  it("offers the label scale only in treemap view and applies the choice", async () => {
+    usage.summary = summaryWithAgents(["claude", "codex"]);
+    usage.mode = "cost";
+    usage.toggles.attribution.groupBy = "agent";
+    usage.toggles.attribution.view = "treemap";
+    usage.setAttributionLabelScale("linear");
+
+    const component = mountPanel();
+    await tick();
+    const scaleGroup = () =>
+      document.querySelector<HTMLElement>('[role="group"][aria-label="Label size scale"]');
+    const labelSizes = () =>
+      [...document.querySelectorAll<SVGTextElement>(".tile-label")].map(
+        (label) => label.style.fontSize,
+      );
+    const linearSizes = labelSizes();
+
+    const log = [...scaleGroup()!.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Log",
+    )!;
+    log.click();
+    await tick();
+
+    expect(usage.toggles.attribution.labelScale).toBe("log");
+    expect(log.getAttribute("aria-pressed")).toBe("true");
+    expect(labelSizes()).not.toEqual(linearSizes);
+
+    usage.setAttributionView("list");
+    await tick();
+    expect(scaleGroup()).toBeNull();
+    usage.setAttributionLabelScale("sqrt");
     unmount(component);
   });
 
@@ -423,7 +462,7 @@ describe("AttributionPanel colors", () => {
     const component = mountPanel();
     await tick();
 
-    expect(document.querySelector(".tile-value")?.textContent?.trim()).toBe("250k");
+    expect(document.querySelector(".tile-value")?.textContent?.trim()).toBe("250.0K");
     unmount(component);
   });
 
@@ -432,8 +471,8 @@ describe("AttributionPanel colors", () => {
     usage.toggles.attribution.groupBy = "model";
     usage.toggles.attribution.view = "list";
     const supplied = new Map([
-      ["gpt-5.6-sol", "#123456"],
-      ["claude-opus-5", "#abcdef"],
+      ["gpt-5.6-sol", solid("#123456")],
+      ["claude-opus-5", solid("#abcdef")],
     ]);
 
     const component = mountPanel(supplied);
@@ -457,6 +496,34 @@ describe("AttributionPanel colors", () => {
     unmount(component);
   });
 
+  it("fills a patterned series with its pattern and shows it in the swatches", async () => {
+    usage.summary = summaryWithModels();
+    usage.toggles.attribution.groupBy = "model";
+    usage.toggles.attribution.view = "treemap";
+    const supplied = new Map<string, SeriesStyle>([
+      ["gpt-5.6-sol", solid("#123456")],
+      ["claude-opus-5", { ...solid("#abcdef"), fill: "hatch" }],
+    ]);
+
+    const component = mountPanel(supplied);
+    await tick();
+
+    const tiles = Array.from(document.querySelectorAll<SVGRectElement>(".tile rect"));
+    expect(tiles[0]!.getAttribute("fill")).toBe("#123456");
+    const patternRef = tiles[1]!.getAttribute("fill")!.match(/^url\(#(.+)\)$/)?.[1];
+    const pattern = patternRef ? document.getElementById(patternRef) : null;
+    expect(pattern?.tagName.toLowerCase()).toBe("pattern");
+    expect(pattern?.querySelector("rect")?.getAttribute("fill")).toBe("#abcdef");
+
+    const railStyles = Array.from(document.querySelectorAll<HTMLElement>(".rail-dot")).map(
+      (dot) => dot.getAttribute("style") ?? "",
+    );
+    expect(railStyles[0]).not.toContain("gradient");
+    expect(railStyles[1]).toContain("repeating-linear-gradient");
+    expect(railStyles[1]).toContain("#abcdef");
+    unmount(component);
+  });
+
   it("uses aggregate-cost-ranked Matplotlib colors for model representations", async () => {
     settings.chartPalette = "matplotlib";
     usage.summary = summaryWithModels();
@@ -472,8 +539,8 @@ describe("AttributionPanel colors", () => {
     const railColors = Array.from(document.querySelectorAll<HTMLElement>(".rail-dot")).map(
       (dot) => dot.style.background,
     );
-    expect(tileColors).toEqual(["#1f77b4", "#ff7f0e"]);
-    expect(railColors).toEqual(["rgb(31, 119, 180)", "rgb(255, 127, 14)"]);
+    expect(tileColors).toEqual(["#3977a7", "#ef8a46"]);
+    expect(railColors).toEqual(["rgb(57, 119, 167)", "rgb(239, 138, 70)"]);
     unmount(component);
   });
 });
@@ -515,6 +582,21 @@ describe("AttributionPanel job groups", () => {
     vi.restoreAllMocks();
   });
 
+  it.each(["list", "treemap"] as const)(
+    "labels a project with no name in the %s view",
+    async (view) => {
+      usage.toggles.attribution.view = view;
+      const component = mountPanel();
+      await tick();
+      const labels = Array.from(
+        document.querySelectorAll(".list-label, .rail-label"),
+        (label) => label.textContent,
+      );
+      expect(labels).toEqual(["hermes-cron", "Unassigned project"]);
+      await unmount(component);
+    },
+  );
+
   it("reports the analytics kind for a displayed project error", async () => {
     usage.selectedProjectKey = "pl1:sha256:first";
     usageServiceMocks.getApiV1UsageTopSessions.mockRejectedValueOnce(new Error("Project failed"));
@@ -527,7 +609,7 @@ describe("AttributionPanel job groups", () => {
       await tick();
       await vi.waitFor(() => expect(usage.errors.zoom).toBe("Project failed"));
       await tick();
-      expect(document.querySelector(".empty")?.textContent).toBe("Project failed");
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain("Project failed");
       expect(reportErrorShown).toHaveBeenCalledExactlyOnceWith("analytics");
     } finally {
       await unmount(component);
@@ -726,6 +808,26 @@ describe("AttributionPanel job groups", () => {
       await unmount(component);
     },
   );
+
+  it("does not call an open project empty while its refresh is failing", async () => {
+    usage.setOpenProject("pl1:sha256:first");
+    await vi.waitFor(() => expect(usage.loading.zoom).toBe(false));
+    await vi.waitFor(() => expect(usage.isQuerying).toBe(false));
+    usage.zoomRows = [];
+    usage.errors.zoom = "zoom refresh failed";
+    try {
+      const component = mountPanel();
+      await tick();
+
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+        "zoom refresh failed",
+      );
+      expect(document.body.textContent).not.toContain("No data for this period");
+      unmount(component);
+    } finally {
+      usage.errors.zoom = null;
+    }
+  });
 
   it.each(["switching attribution dimensions", "the project leaving the refreshed summary"])(
     "handles zoom after %s",
