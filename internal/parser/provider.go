@@ -1379,6 +1379,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newZencoderProviderFactory(def)
 	case AgentZed:
 		return newZedProviderFactory(def)
+	case AgentBob:
+		return newBobProviderFactory(def)
 	case AgentRooCode:
 		return newRooCodeProviderFactory(def)
 	case AgentCline:

@@ -90,6 +90,7 @@ const (
 	AgentEvener         AgentType = "evener"
 	AgentMusePersonal   AgentType = "muse-personal"
 	AgentIcodemate      AgentType = "icodemate"
+	AgentBob            AgentType = "bob"
 	AgentRooCode        AgentType = "roocode"
 	AgentCline          AgentType = "cline"
 	AgentPoolside       AgentType = "poolside"
@@ -1165,6 +1166,21 @@ var Registry = []AgentDef{
 		WatchSubdirs:   []string{"storage/session_diff"},
 		FileBased:      true,
 		WatchRootsFunc: ResolveIcodemateWatchRoots,
+	},
+	{
+		Type:        AgentBob,
+		DisplayName: "Bob",
+		EnvVar:      "BOB_DIR",
+		ConfigKey:   "bob_dirs",
+		DefaultDirs: []string{
+			".bob",
+			"Library/Application Support/IBM Bob/User/globalStorage/ibm.bob-code",
+			".config/IBM Bob/User/globalStorage/ibm.bob-code",
+			"AppData/Roaming/IBM Bob/User/globalStorage/ibm.bob-code",
+		},
+		IDPrefix:     "bob:",
+		WatchSubdirs: []string{"tmp", "db", "tasks"},
+		FileBased:    true,
 	},
 	{
 		// RooCode (rooveterinaryinc.roo-cline) is a VSCode extension that

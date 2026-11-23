@@ -1,0 +1,197 @@
+name: Bob artifacts
+
+# Build only: no tags, GitHub releases, package publishing, or signing keys.
+on:
+  push:
+    branches: [upstream-v0.48.0-bob]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bob-artifacts-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION: 0.48.0+bob.1
+  GOFLAGS: -trimpath
+  GOPROXY: 'https://proxy.golang.org|direct'
+  CGO_ENABLED: '1'
+
+jobs:
+  build:
+    name: CLI and wheel (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64@sha256:853663dc8253b62be437bb52a5caecffd020792af4442f55d927d22e0ea795ae
+            wheel_tag: manylinux_2_28_x86_64
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64@sha256:ca1f9d96910e129d38f999644a1f211a6cdb4147da9f19157a49d72c5092453a
+            wheel_tag: manylinux_2_28_aarch64
+          - goos: darwin
+            goarch: arm64
+            runner: macos-26
+            wheel_tag: macosx_11_0_arm64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Trust container checkout
+        if: matrix.goos == 'linux'
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.12.1'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Use manylinux Python
+        if: matrix.goos == 'linux'
+        run: echo /opt/python/cp313-cp313/bin >> "$GITHUB_PATH"
+
+      - uses: actions/setup-python@v7.1.0
+        if: matrix.goos != 'linux'
+        with:
+          python-version: '3.13'
+
+      - name: Build embedded assets and stage SQLite header
+        run: |
+          set -euo pipefail
+          go mod download
+          mkdir -p .sqlite-include
+          cp "$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)/sqlite3-binding.h" .sqlite-include/sqlite3.h
+          export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
+          go run ./internal/pricing/cmd/litellm-snapshot -restore
+          (cd frontend && npm ci && npm run build)
+          rm -rf internal/web/dist
+          cp -r frontend/dist internal/web/dist
+
+      - name: Build and verify native CLI
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.goos == 'darwin' && '11.0' || '' }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(go env GOHOSTOS)" = "$GOOS"
+          test "$(go env GOHOSTARCH)" = "$GOARCH"
+          export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EXT=""
+          if [ "$GOOS" = windows ]; then EXT=".exe"; fi
+          mkdir -p dist
+          LDFLAGS="-s -w -X main.version=v${VERSION} -X main.commit=${SOURCE_SHA} -X main.buildDate=${BUILD_DATE}"
+          go build -tags fts5 -buildvcs=false -ldflags="$LDFLAGS" -trimpath \
+            -o "dist/agentsview${EXT}" ./cmd/agentsview
+          "./dist/agentsview${EXT}" --version | tee "dist/version_${GOOS}_${GOARCH}.txt"
+          grep -F "v${VERSION}" "dist/version_${GOOS}_${GOARCH}.txt"
+          grep -F "$SOURCE_SHA" "dist/version_${GOOS}_${GOARCH}.txt"
+
+          if [ "$GOOS" = linux ]; then
+            HIGHEST=$(objdump -T dist/agentsview | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+            test -n "$HIGHEST"
+            echo "Highest glibc symbol: $HIGHEST (max GLIBC_2.28)"
+            test "$(printf '%s\n%s\n' GLIBC_2.28 "$HIGHEST" | sort -V | tail -1)" = GLIBC_2.28
+          fi
+          if [ "$GOOS" = darwin ]; then
+            MINOS=$(otool -l dist/agentsview | grep -A3 LC_BUILD_VERSION | awk '/minos/{print $2}')
+            echo "Minimum macOS version: $MINOS"
+            case "$MINOS" in 11.0|11.0.0) ;; *) exit 1 ;; esac
+          fi
+
+          cd dist
+          if [ "$GOOS" = windows ]; then
+            7z a "agentsview_${VERSION}_${GOOS}_${GOARCH}.zip" "agentsview${EXT}"
+          else
+            tar czf "agentsview_${VERSION}_${GOOS}_${GOARCH}.tar.gz" "agentsview${EXT}"
+          fi
+          rm "agentsview${EXT}"
+
+      - name: Build and smoke-test native wheel
+        env:
+          WHEEL_TAG: ${{ matrix.wheel_tag }}
+        run: |
+          python scripts/build_wheels.py --version "$VERSION" \
+            --input-dir dist --output-dir wheels --readme README.md
+          python -m venv wheel-smoke
+          PYTHON=wheel-smoke/bin/python
+          if [ -f wheel-smoke/Scripts/python.exe ]; then PYTHON=wheel-smoke/Scripts/python.exe; fi
+          "$PYTHON" -m pip install --no-index "wheels/agentsview-${VERSION}-py3-none-${WHEEL_TAG}.whl"
+          "$PYTHON" -m agentsview --version
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: agentsview-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/version_*.txt
+          retention-days: 30
+          if-no-files-found: error
+
+  assemble:
+    name: Assemble Linux and Apple Silicon archives and wheels
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.13'
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: agentsview-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Build every wheel and checksum the complete set
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python scripts/build_wheels.py --version "$VERSION" \
+            --input-dir artifacts --output-dir artifacts --readme README.md
+          test "$(find artifacts -maxdepth 1 -name '*.whl' | wc -l)" -eq 3
+          test "$(find artifacts -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 3
+          printf 'version=v%s\ncommit=%s\nrun=%s\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_RUN_ID" > artifacts/BUILD_INFO
+          cd artifacts
+          sha256sum ./*.tar.gz ./*.whl BUILD_INFO ./version_*.txt > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: agentsview-bob-all
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error

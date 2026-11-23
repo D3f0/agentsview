@@ -9,6 +9,11 @@ import (
 )
 
 func init() {
+	registerProviderFuzzTarget(providerFuzzTarget{
+		agent: AgentBob,
+		path:  "tmp/sample-project/chats/session-sample.json",
+		seeds: []providerFuzzSeed{{file: "bob/session.json", want: "The configuration is valid"}},
+	})
 	// OpenCode, Kilo, and MiMoCode share one parser. Their released CLIs
 	// write SQLite message and part rows; the JSON storage tree is the
 	// legacy layout. The fuzz input is one assistant part's data column.
@@ -209,3 +214,5 @@ func FuzzProviderAider(f *testing.F) { fuzzProvider(f, AgentAider) }
 func FuzzProviderVibe(f *testing.F) { fuzzProvider(f, AgentVibe) }
 
 func FuzzProviderCortex(f *testing.F) { fuzzProvider(f, AgentCortex) }
+
+func FuzzProviderBob(f *testing.F) { fuzzProvider(f, AgentBob) }

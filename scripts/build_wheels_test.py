@@ -355,3 +355,17 @@ class TestBuildAllWheels:
             input_dir, output_dir, "1.0.0", require_all=True
         )
         assert len(wheels) == len(PLATFORM_MAP)
+
+    def test_bob_local_version_preserves_binary_and_metadata(self, tmp_path: Path) -> None:
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        self._make_fake_archives(input_dir, "0.48.0+bob.1")
+        wheels = build_all_wheels(
+            input_dir, tmp_path / "output", "0.48.0+bob.1", require_all=True,
+        )
+        assert len(wheels) == 6
+        wheel = tmp_path / "output/agentsview-0.48.0+bob.1-py3-none-win_arm64.whl"
+        with zipfile.ZipFile(wheel) as zf:
+            assert zf.read("agentsview/bin/agentsview.exe") == b"binary-for-windows_arm64"
+            metadata = zf.read("agentsview-0.48.0+bob.1.dist-info/METADATA").decode()
+            assert "Version: 0.48.0+bob.1\n" in metadata

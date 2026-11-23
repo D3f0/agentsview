@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-11-20
+last_edited: 2026-11-23
 title: Changelog
 description: Release history for AgentsView
 ---
@@ -10,6 +10,11 @@ The latest release is
 ## Unreleased
 
 **New features**
+
+- View Bob 1 IDE tasks and Bob 2 CLI sessions, including complete conversation
+  turns, tool results, and reported usage and cost. Default discovery includes
+  IBM Bob IDE storage and `~/.bob`; existing Bob directory overrides still work.
+  CLI projects follow the task workspace when one is recorded.
 
 - Read large MCP pattern-search results, messages, and tool calls in pages that fit
   within a 12,000-byte response budget. A page can contain fewer items than the

@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-11-17
+last_edited: 2026-11-23
 ---
 
 # Session Format Source Inventory
@@ -21,6 +21,49 @@ Usage notes distinguish values persisted by the provider from costs Agentsview
 computes later with its pricing catalog. A compatible upstream implementation,
 independent parser, or recorded fixture is useful evidence for a format, but is
 called out when it is not the product's own producer source.
+
+## Bob (`bob`)
+
+- **Format:** Bob 2 CLI chat JSON and shared SQLite task store; Bob 1 IDE API
+  history with a UI companion per task.
+- **Evidence:** `no-public-source`.
+- **Upstream:** local producer artifacts checked 2026-11-23, read-only.
+  Public producer source was not available to this port; no public-source
+  search is claimed. This evidence describes observed schema, not future Bob
+  releases. Sixty observed IDE task directories contained both
+  `api_conversation_history.json` and `ui_messages.json`; none contained
+  `history_item.json`. API history is an array of `{role, content, ts}` records.
+  `content` contains text blocks and occasional image blocks. Assistant text
+  embeds XML tool requests. UI entries carry `ts`, `type`, `say` or `ask`,
+  `text`, and optional `partial`, `images`, and checkpoint fields. UI tool
+  payloads use `tool`, `path`, `content`, `diff`, or `batchFiles`. The importer
+  reuses RooCode's native tool/result parsing without requiring RooCode's
+  absent history metadata. Native `tool_use`/`tool_result` blocks are additionally
+  covered by hand-written compatibility tests; they were not present in these
+  observed IDE samples.
+- **Usage and cost:** IDE `say=api_req_started` text is JSON with `tokensIn`,
+  `tokensOut`, `cacheReads`, `cacheWrites`, `cost`, and `apiProtocol`. Each
+  request becomes one usage event; its cache-inclusive input measures context,
+  while output counts accumulate. Explicit zero costs are authoritative.
+- **IDE identity:** one source per task, keyed by the API history path. UI
+  changes resolve to that same source. UI events precede the finalized API
+  response timestamps in observed records, so their tool metadata enriches the
+  next assistant response; API text is never replaced by a shorter UI rendering.
+- **Bob 2 CLI:** observed `db/bob.db` has `tasks(id, project_id, title,
+  directory, env, costs, created_at, updated_at, ...)` and
+  `messages(id, task_id, role, data, created_at)`. Observed task `costs` keys
+  include `contextTokens` and `cost`. Observed message data carries `role`,
+  `content`, `id`, `_meta.timestamp`, `_meta.spend`, optional `toolCalls` with
+  `id`, `name`, and `arguments`, and optional `thinkingBlocks`. Legacy chat JSON
+  is covered by selectively ported hand-written fixtures. `directory` takes
+  precedence over `env.workspace`, then `file:` project IDs. Schemas without
+  `directory` or `env` are supported. The SQLite URI uses `mode=ro` and retains
+  live WAL visibility, rather than pretending a changing store is immutable.
+- **Agentsview:** `internal/parser/bob.go`, `bob_ide.go`, and their tests.
+  IDE images retain `[image]` markers, including image-only prompts, following
+  the existing RooCode text projection; image pixels are not stored. Checkpoints
+  and task metadata are not separate conversation sources. No archive schema or
+  dependency changes are required.
 
 ## Pricing Catalog Evidence
 

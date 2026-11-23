@@ -755,6 +755,7 @@ keeps the default directories.
 | Qwen Code             | `~/.qwen/projects/`                                                                                                                                              | JSONL per session                                                                                                                                             |
 | QwenPaw               | `~/.copaw/workspaces/`                                                                                                                                           | JSON session files                                                                                                                                            |
 | Reasonix              | `~/.reasonix/` and `~/AppData/Roaming/reasonix/`                                                                                                                 | JSONL sessions plus `.jsonl.meta` sidecars                                                                                                                    |
+| Bob                   | `~/.bob/` plus platform-specific IBM Bob IDE storage (see below)                                                                                                    | CLI chat JSON, shared `db/bob.db`, and IDE task API history with UI companions                                                                                 |
 | RooCode               | (platform-specific, see below)                                                                                                                                   | `history_item.json` + `ui_messages.json` per task                                                                                                             |
 | Shelley               | `~/.config/shelley/`                                                                                                                                             | SQLite database (`shelley.db`)                                                                                                                                |
 | Visual Studio Copilot | (platform-specific, see below)                                                                                                                                   | Trace JSONL files                                                                                                                                             |
@@ -1144,6 +1145,28 @@ and per-request token usage.
     `~/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/`
 - **Linux.** `~/.config/Kiro/User/globalStorage/kiro.kiroagent/`
 - **Windows.** `~/AppData/Roaming/Kiro/User/globalStorage/kiro.kiroagent/`
+
+**Bob default directories.**
+
+Bob 2 CLI sessions are read from `~/.bob/tmp/**/chats/session-*.json` and
+`~/.bob/db/bob.db`. Bob 1 IDE tasks are read from
+`tasks/<id>/api_conversation_history.json` with `ui_messages.json` beside it.
+The API history supplies complete turns; its UI companion supplies tool
+execution results and reported request usage without creating another session.
+
+The default IDE roots are:
+
+- **macOS:** `~/Library/Application Support/IBM Bob/User/globalStorage/ibm.bob-code/`
+- **Linux:** `~/.config/IBM Bob/User/globalStorage/ibm.bob-code/`
+- **Windows:** `~/AppData/Roaming/IBM Bob/User/globalStorage/ibm.bob-code/`
+
+Set `BOB_DIR`, `agents.bob.dirs`, or the existing `bob_dirs` setting to replace
+these roots. Point IDE overrides at `ibm.bob-code`, not its `tasks` directory.
+CLI task projects use `directory`, then `env.workspace`, then a `file:` project
+path. Opaque CLI project IDs remain visible when no workspace is recorded.
+Sources are opened read-only. Reported Bob costs are preserved rather than
+estimated from the model name. IDE image attachments retain `[image]` markers,
+including image-only prompts; image pixels are not stored.
 
 **RooCode default directories.**
 

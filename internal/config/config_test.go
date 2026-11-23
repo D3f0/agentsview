@@ -23,6 +23,34 @@ import (
 
 const configFileName = "config.toml"
 
+func TestBobDefaultRootsAndOverrides(t *testing.T) {
+	home := canonicalTempDir(t)
+	setTestHome(t, home)
+	t.Setenv("BOB_DIR", "")
+	cfg, err := Default()
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		filepath.Join(home, ".bob"),
+		filepath.Join(home, "Library", "Application Support", "IBM Bob", "User", "globalStorage", "ibm.bob-code"),
+		filepath.Join(home, ".config", "IBM Bob", "User", "globalStorage", "ibm.bob-code"),
+		filepath.Join(home, "AppData", "Roaming", "IBM Bob", "User", "globalStorage", "ibm.bob-code"),
+	}, cfg.ResolveDirs(parser.AgentBob))
+	custom := canonicalTempDir(t)
+	t.Setenv("BOB_DIR", custom)
+	cfg.loadEnv()
+	assert.Equal(t, []string{custom}, cfg.ResolveDirs(parser.AgentBob))
+}
+
+func TestBobConfiguredRootsReplaceDefaults(t *testing.T) {
+	t.Setenv("BOB_DIR", "")
+	for _, text := range []string{`bob_dirs = ["/custom/bob"]`, "[agents.bob]\ndirs = [\"/custom/bob\"]"} {
+		cfg, err := Default()
+		require.NoError(t, err)
+		require.NoError(t, cfg.applyConfigTOML(text))
+		assert.Equal(t, []string{absoluteTestPath(t, "/custom/bob")}, cfg.ResolveDirs(parser.AgentBob))
+	}
+}
+
 func TestCodeBuddyDefaultAndOverride(t *testing.T) {
 	home := canonicalTempDir(t)
 	setTestHome(t, home)
