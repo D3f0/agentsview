@@ -14,7 +14,9 @@ The latest release is
 - View Bob 1 IDE tasks and Bob 2 CLI sessions, including complete conversation
   turns, tool results, and reported usage and cost. Default discovery includes
   IBM Bob IDE storage and `~/.bob`; existing Bob directory overrides still work.
-  CLI projects follow the task workspace when one is recorded.
+  CLI projects follow the task workspace when one is recorded. Transcripts follow
+  recorded message times, link command results to their tools, and count IDE
+  tool-output rows separately from human prompts.
 
 - Read large MCP pattern-search results, messages, and tool calls in pages that fit
   within a 12,000-byte response budget. A page can contain fewer items than the

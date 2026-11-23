@@ -166,6 +166,22 @@ func bobIDEParseFile(ctx context.Context, src singleFileSource, req ParseRequest
 			}
 			msg.Content = strings.Join(texts, "\n")
 		}
+		if msg.Role == RoleUser {
+			if start := strings.Index(msg.Content, "<environment_details>"); start >= 0 {
+				msg.Content = strings.TrimSpace(msg.Content[:start])
+			}
+			if strings.HasPrefix(msg.Content, "<task>") {
+				if end := strings.Index(msg.Content, "</task>"); end >= 0 {
+					msg.Content = strings.TrimSpace(msg.Content[len("<task>"):end])
+				}
+			} else if strings.HasPrefix(msg.Content, "[") {
+				if end := strings.Index(msg.Content, "] Result:"); end > 1 && !strings.Contains(msg.Content[:end], "\n") {
+					msg.Role = RoleTool
+					msg.IsSystem = true
+					msg.SourceSubtype = SourceSubtypeToolResult
+				}
+			}
+		}
 		msg.HasThinking = msg.ThinkingText != ""
 		msg.HasToolUse = len(msg.ToolCalls) > 0
 		msg.ContentLength = len(msg.Content)

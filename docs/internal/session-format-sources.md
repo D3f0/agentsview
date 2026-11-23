@@ -49,6 +49,8 @@ called out when it is not the product's own producer source.
   changes resolve to that same source. UI events precede the finalized API
   response timestamps in observed records, so their tool metadata enriches the
   next assistant response; API text is never replaced by a shorter UI rendering.
+  API `[tool ...] Result:` carriers are tool/system messages, not human prompts;
+  generated environment details are removed from human prompt text.
 - **Bob 2 CLI:** observed `db/bob.db` has `tasks(id, project_id, title,
   directory, env, costs, created_at, updated_at, ...)` and
   `messages(id, task_id, role, data, created_at)`. Observed task `costs` keys
@@ -59,6 +61,10 @@ called out when it is not the product's own producer source.
   precedence over `env.workspace`, then `file:` project IDs. Schemas without
   `directory` or `env` are supported. The SQLite URI uses `mode=ro` and retains
   live WAL visibility, rather than pretending a changing store is immutable.
+  SQLite transcript ordering uses `_meta.timestamp` when present because row
+  `created_at` values can be batched. Tool results identify their calls through
+  `toolUsage.signature.id`; signature errors and nonzero `_meta.exitCode` values
+  preserve failed result status.
 - **Agentsview:** `internal/parser/bob.go`, `bob_ide.go`, and their tests.
   IDE images retain `[image]` markers, including image-only prompts, following
   the existing RooCode text projection; image pixels are not stored. Checkpoints

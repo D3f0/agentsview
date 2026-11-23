@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -470,9 +471,6 @@ func bobDBParseTaskWithDB(ctx context.Context, conn *sql.DB, path string, task b
 		if !ok {
 			continue
 		}
-		if first == "" && message.Role == RoleUser && message.Content != "" {
-			first = truncate(strings.ReplaceAll(message.Content, "\n", " "), 300)
-		}
 		messages = append(messages, message)
 	}
 	if err := rows.Err(); err != nil {
@@ -480,6 +478,13 @@ func bobDBParseTaskWithDB(ctx context.Context, conn *sql.DB, path string, task b
 	}
 	if len(messages) == 0 {
 		return nil, nil
+	}
+	sort.SliceStable(messages, func(i, j int) bool { return messages[i].Timestamp.Before(messages[j].Timestamp) })
+	for i := range messages {
+		messages[i].Ordinal = i
+		if first == "" && messages[i].Role == RoleUser && !messages[i].IsSystem && messages[i].Content != "" {
+			first = truncate(strings.ReplaceAll(messages[i].Content, "\n", " "), 300)
+		}
 	}
 	cwd := bobDBTaskWorkspace(task.Directory, task.Project, task.Env)
 	project := ExtractProjectFromCwd(cwd)
@@ -583,12 +588,18 @@ func bobDBTaskUsageEvent(task bobDBTask, sessionID string, occurredAt time.Time,
 }
 
 type bobDBMessagePayload struct {
-	Role           string           `json:"role"`
-	Content        string           `json:"content"`
-	Model          string           `json:"model"`
-	ToolCalls      []bobDBToolCall  `json:"toolCalls"`
-	Meta           bobDBMessageMeta `json:"_meta"`
-	ID             string           `json:"id"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	Model     string           `json:"model"`
+	ToolCalls []bobDBToolCall  `json:"toolCalls"`
+	Meta      bobDBMessageMeta `json:"_meta"`
+	ID        string           `json:"id"`
+	ToolUsage struct {
+		Signature struct {
+			ID      string `json:"id"`
+			IsError bool   `json:"isError"`
+		} `json:"signature"`
+	} `json:"toolUsage"`
 	ThinkingBlocks []struct {
 		Thinking string `json:"thinking"`
 	} `json:"thinkingBlocks"`
@@ -596,6 +607,7 @@ type bobDBMessagePayload struct {
 type bobDBMessageMeta struct {
 	Timestamp int64      `json:"timestamp"`
 	Spend     bobDBSpend `json:"spend"`
+	ExitCode  *int       `json:"exitCode"`
 }
 type bobDBSpend struct {
 	Input      int `json:"input"`
@@ -643,6 +655,21 @@ func parseBobDBMessage(role, raw string, createdAt int64, ordinal int) (ParsedMe
 	}
 	if payload.Meta.Timestamp != 0 {
 		message.Timestamp = time.UnixMilli(payload.Meta.Timestamp).UTC()
+	}
+	if parsedRole == RoleTool {
+		message.IsSystem = true
+		message.SourceSubtype = SourceSubtypeToolResult
+		if payload.ToolUsage.Signature.ID != "" {
+			status := "completed"
+			if payload.ToolUsage.Signature.IsError || (payload.Meta.ExitCode != nil && *payload.Meta.ExitCode != 0) {
+				status = "errored"
+			}
+			rawContent, err := json.Marshal(payload.Content)
+			if err != nil {
+				return ParsedMessage{}, false, err
+			}
+			message.ToolResults = []ParsedToolResult{{ToolUseID: payload.ToolUsage.Signature.ID, Source: "bob", Status: status, ContentRaw: string(rawContent), ContentLength: len(payload.Content)}}
+		}
 	}
 	if parsedRole == RoleAssistant {
 		var thinking []string
